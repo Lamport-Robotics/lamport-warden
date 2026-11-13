@@ -2526,6 +2526,7 @@ version = "0.1.0"
 dependencies = [
  "five8_core 0.1.2",
  "litesvm",
+ "serde_json",
  "sha2 0.10.9",
  "solana-account 4.7.0",
  "solana-address 2.7.0",

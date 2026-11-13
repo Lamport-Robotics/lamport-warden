@@ -245,10 +245,19 @@ impl Env {
 
     /// A live vault at its own address.
     pub fn live_vault(&mut self) -> Address {
-        let vault_id = Keypair::new().pubkey().to_bytes();
-        let (address, bump) = Self::vault_address(&vault_id);
-        self.put(address, LAMPORT_VAULT, Self::vault_bytes(2, bump, &vault_id));
+        self.live_vault_with_id(&Keypair::new().pubkey().to_bytes())
+    }
+
+    /// A live vault with a chosen `vault_id`, so that its address is the same on every run.
+    pub fn live_vault_with_id(&mut self, vault_id: &[u8; 32]) -> Address {
+        let (address, bump) = Self::vault_address(vault_id);
+        self.put(address, LAMPORT_VAULT, Self::vault_bytes(2, bump, vault_id));
         address
+    }
+
+    /// The address of the vault with this `vault_id`.
+    pub fn vault_address_of(vault_id: &[u8; 32]) -> Address {
+        Self::vault_address(vault_id).0
     }
 
     /// Rewrites a vault as the tombstone `Close` leaves: its own discriminator, version 0xFE, vault_id, closed_slot, heir.
@@ -302,7 +311,11 @@ impl Env {
 
     /// A new mint with `decimals`; `self.payer` is its mint and freeze authority.
     pub fn mint(&mut self, token_program: Address, decimals: u8) -> Address {
-        let mint = Keypair::new();
+        self.mint_at(Keypair::new(), token_program, decimals)
+    }
+
+    /// A mint at a chosen keypair's address.
+    pub fn mint_at(&mut self, mint: Keypair, token_program: Address, decimals: u8) -> Address {
         let space = 82u64;
         let mut create = 0u32.to_le_bytes().to_vec();
         create.extend_from_slice(&self.svm.minimum_balance_for_rent_exemption(space as usize).to_le_bytes());
@@ -414,16 +427,21 @@ impl Env {
         account
     }
 
-    /// `ApproveChecked`: the owner lets `delegate` move up to `amount` out of `account`.
-    pub fn approve(&mut self, owner: &Keypair, account: &Address, mint: &Address, token_program: Address, delegate: &Address, amount: u64, decimals: u8) {
+    /// The `ApproveChecked` instruction: the owner lets `delegate` move up to `amount` out of `account`.
+    pub fn ix_approve(owner: &Address, account: &Address, mint: &Address, token_program: Address, delegate: &Address, amount: u64, decimals: u8) -> Instruction {
         let mut data = vec![13u8];
         data.extend_from_slice(&amount.to_le_bytes());
         data.push(decimals);
-        let ix = Instruction {
+        Instruction {
             program_id: token_program,
-            accounts: vec![AccountMeta::new(*account, false), AccountMeta::new_readonly(*mint, false), AccountMeta::new_readonly(*delegate, false), AccountMeta::new_readonly(owner.pubkey(), true)],
+            accounts: vec![AccountMeta::new(*account, false), AccountMeta::new_readonly(*mint, false), AccountMeta::new_readonly(*delegate, false), AccountMeta::new_readonly(*owner, true)],
             data,
-        };
+        }
+    }
+
+    /// `ApproveChecked`, sent.
+    pub fn approve(&mut self, owner: &Keypair, account: &Address, mint: &Address, token_program: Address, delegate: &Address, amount: u64, decimals: u8) {
+        let ix = Self::ix_approve(&owner.pubkey(), account, mint, token_program, delegate, amount, decimals);
         ok(self.send(&[ix], &[owner]));
     }
 

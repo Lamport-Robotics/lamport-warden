@@ -91,6 +91,8 @@ because this program never calls it.
 - `tests/tests/config.rs`: what may be a vault; the delay, one second early and at it; the close-and-reopen
   walk-around.
 - `tests/tests/rescuers.rs`: who creates and changes the shared set.
+- `tests/tests/vectors.rs`: `../vectors/instructions.json` is what this suite builds, and the compiled program
+  accepts every instruction in it. Warden's own tests read that file (`UPDATE_VECTORS=1` rewrites it).
 - `tests/tests/fuzz.rs`: 8,000 tampered calls (substituted accounts, random instruction bytes). After each,
   every token of the mint is the owner's or in the vault's associated token account.
 

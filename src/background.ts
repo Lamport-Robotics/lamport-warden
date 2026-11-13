@@ -18,6 +18,8 @@ const store: Store = {
   async load(owner) { const k = `memory:${owner}`; return (await chrome.storage.local.get(k))[k]; },
   async save(owner, state: MemoryState) { await chrome.storage.local.set({ [`memory:${owner}`]: state }); },
   async ringSites() { return (await settings()).ringSites; },
+  async sentinel(owner) { const k = `sentinel:${owner}`; return (await chrome.storage.local.get(k))[k]; },
+  async saveSentinel(owner, state) { const k = `sentinel:${owner}`; if (state === null) await chrome.storage.local.remove(k); else await chrome.storage.local.set({ [k]: state }); },
 };
 const settings = async () => settingsFrom(await chrome.storage.local.get([...KEYS]));
 // no cookies, no cache, no referrer: the RPC gets the question and nothing about where it came from

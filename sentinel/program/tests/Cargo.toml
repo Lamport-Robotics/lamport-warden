@@ -25,6 +25,7 @@ solana-transaction = "4"
 solana-transaction-error = "3"
 solana-instruction-error = "2"
 sha2 = "0.10"
+serde_json = "1"
 # solana-keypair 3.1 needs the base58 decoder's error type to be a std error, and nothing else in this tree
 # turns that feature on. Naming the crate here does.
 five8_core = { version = "0.1.2", features = ["std"] }

@@ -1,0 +1,262 @@
+{
+  "about": "lamport-sentinel instructions for one fixed owner and vault. Written and checked by sentinel/program/tests/tests/vectors.rs, which also runs each through the compiled program. Warden's tests read this file.",
+  "config": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK",
+  "delegate": "DCNQr33n16UpAx5XfC3SR9btH6TFdJX1sJ8WMB9ezXU9",
+  "delegate2": "Hwogqpx3F1KbSma2axfxzLGmXHquvdAbxfbi8mnDF2nq",
+  "instructions": {
+    "accept_vault": {
+      "accounts": [
+        {
+          "isSigner": true,
+          "isWritable": false,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "EQS8Hg4R6bMRj1hCLjn4B9pTrZGBAc2sBM1BGT6wPUYB"
+        }
+      ],
+      "data": "4782611a828aca7e",
+      "programId": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+    },
+    "approve_checked": {
+      "accounts": [
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "C7sXmsuBQZ5NxTKdZT2FcqzYfMNHTKwqAzSCWPTx3sUP"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "FMUEmtxhU46GzhKF4FW9MLJdQWiLgjiXP9TYRWSrqTpV"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "DCNQr33n16UpAx5XfC3SR9btH6TFdJX1sJ8WMB9ezXU9"
+        },
+        {
+          "isSigner": true,
+          "isWritable": false,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        }
+      ],
+      "data": "0dffffffffffffffff06",
+      "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    },
+    "cancel_proposal": {
+      "accounts": [
+        {
+          "isSigner": true,
+          "isWritable": false,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK"
+        }
+      ],
+      "data": "6a4a809213412717",
+      "programId": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+    },
+    "close_config": {
+      "accounts": [
+        {
+          "isSigner": true,
+          "isWritable": true,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK"
+        }
+      ],
+      "data": "9109489d5f7d3d55",
+      "programId": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+    },
+    "init_config": {
+      "accounts": [
+        {
+          "isSigner": true,
+          "isWritable": true,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "7E2jd8KcimKBzYouZ3gycCeuGTBnyEn6DRQAcDRx75hk"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "11111111111111111111111111111111"
+        }
+      ],
+      "data": "17eb73e8a86001e700",
+      "programId": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+    },
+    "init_config_with_delay_24h": {
+      "accounts": [
+        {
+          "isSigner": true,
+          "isWritable": true,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "7E2jd8KcimKBzYouZ3gycCeuGTBnyEn6DRQAcDRx75hk"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "11111111111111111111111111111111"
+        }
+      ],
+      "data": "17eb73e8a86001e7018051010000000000",
+      "programId": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+    },
+    "propose_vault": {
+      "accounts": [
+        {
+          "isSigner": true,
+          "isWritable": false,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "EQS8Hg4R6bMRj1hCLjn4B9pTrZGBAc2sBM1BGT6wPUYB"
+        }
+      ],
+      "data": "a5ea784f735935a4",
+      "programId": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+    },
+    "rescue_token_by_owner": {
+      "accounts": [
+        {
+          "isSigner": true,
+          "isWritable": true,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "DCNQr33n16UpAx5XfC3SR9btH6TFdJX1sJ8WMB9ezXU9"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "7E2jd8KcimKBzYouZ3gycCeuGTBnyEn6DRQAcDRx75hk"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "FMUEmtxhU46GzhKF4FW9MLJdQWiLgjiXP9TYRWSrqTpV"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "C7sXmsuBQZ5NxTKdZT2FcqzYfMNHTKwqAzSCWPTx3sUP"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "84fUYJVQkHWvbGXxah2158dTqxRGYzXWS6dHi89h59ww"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "isSigner": false,
+          "isWritable": false,
+          "pubkey": "11111111111111111111111111111111"
+        }
+      ],
+      "data": "e3f8a895a5501459",
+      "programId": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+    },
+    "set_rescuers_lamport_set": {
+      "accounts": [
+        {
+          "isSigner": true,
+          "isWritable": false,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK"
+        }
+      ],
+      "data": "4e08f83696fc6a0300",
+      "programId": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+    },
+    "set_rescuers_own": {
+      "accounts": [
+        {
+          "isSigner": true,
+          "isWritable": false,
+          "pubkey": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"
+        },
+        {
+          "isSigner": false,
+          "isWritable": true,
+          "pubkey": "735EmaEqKYX63YehfXD9jbWbK7XdiCoYMFHLfrTYM4XK"
+        }
+      ],
+      "data": "4e08f83696fc6a030166be7e332c7a453332bd9d0a7f7db055f5c5ef1a06ada66d98b39fb6810c473a",
+      "programId": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+    }
+  },
+  "lamportVaultProgram": "B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH",
+  "mint": "FMUEmtxhU46GzhKF4FW9MLJdQWiLgjiXP9TYRWSrqTpV",
+  "ownRescuer": "7v54NWdBtkjuAFJrLGsS2SXnuk8nKam81mZJeeYxVFi9",
+  "owner": "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
+  "ownerSeed": "0707070707070707070707070707070707070707070707070707070707070707",
+  "program": "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK",
+  "source": "C7sXmsuBQZ5NxTKdZT2FcqzYfMNHTKwqAzSCWPTx3sUP",
+  "vault": "7E2jd8KcimKBzYouZ3gycCeuGTBnyEn6DRQAcDRx75hk",
+  "vault2": "EQS8Hg4R6bMRj1hCLjn4B9pTrZGBAc2sBM1BGT6wPUYB"
+}
