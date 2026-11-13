@@ -50,6 +50,16 @@ export interface WalletRecord {
   lastSeenAt: number | null;
   /** When its accounts (not just its list of transactions) were last read. Absent before the first time. */
   accountsReadAt?: number;
+  /** When its list of transactions was last read through: a full pass, as against a look at its accounts. */
+  passedAt?: number;
+  /** True when the last pass left transactions unread (too many for one pass, or one the RPC could not show yet): the next turn is a pass, whatever a look says. */
+  more?: boolean;
+  /**
+   * What its accounts looked like at the last look (watcher.ts, `glance`): the wallet's balance and owner, and
+   * each token account's amount and who may spend or close it, as one line of text. A look that finds the
+   * same line found nothing new.
+   */
+  glance?: { print: string; at: number };
   /** Signatures the owner's browser reported as theirs, with the time each was reported. */
   ownerSignatures: Record<string, number>;
 }
@@ -62,6 +72,8 @@ export interface Store {
   events(wallet: string): StoredEvent[];
   /** Notes that an alert reached no channel. */
   markUndelivered?(id: string): void;
+  /** Notes that these wallets were looked at and nothing had changed. Many at once, and written out lazily. */
+  seen?(addresses: string[], at: number): void;
 }
 
 const fresh = (): WalletRecord => ({ cursor: null, baseline: null, tokenAccounts: {}, ownerProgram: null, lastSeenAt: null, ownerSignatures: {} });
@@ -136,6 +148,19 @@ export class MemoryStore implements Store {
     e.undelivered = true;
     this.persist();
   }
+  /**
+   * These wallets were looked at just now and nothing had changed. Only the time is kept, for every one of
+   * them at once, and it is written out soon rather than now: a thousand wallets looked at every minute must
+   * not mean a thousand writes of the whole file.
+   */
+  seen(addresses: string[], at: number): void {
+    let any = false;
+    for (const a of addresses) {
+      const r = Object.hasOwn(this.data.records, a) ? this.data.records[a] : undefined;
+      if (r && this.watched(a)) { r.lastSeenAt = at; any = true; }
+    }
+    if (any) this.persistSoon();
+  }
   /** Starts watching a wallet. A wallet already watched is left as it is. */
   watch(wallet: WatchedWallet): void {
     if (this.data.wallets.some((w) => w.address === wallet.address)) return;
@@ -168,7 +193,11 @@ export class MemoryStore implements Store {
     this.save(wallet, r);
   }
   protected persist(): void { /* memory only */ }
+  protected persistSoon(): void { /* memory only */ }
 }
+
+/** How long a time-of-last-look may wait to be written out. Nothing but the page's "read a moment ago" depends on it. */
+export const LAZY_WRITE_SECONDS = 30;
 
 /** How many daily copies are kept. What an owner had the service forget is gone from the last of them after this many days. */
 export const SNAPSHOT_DAYS = 7;
@@ -245,8 +274,18 @@ export class FileStore extends MemoryStore {
     return path;
   }
 
+  private soon: ReturnType<typeof setTimeout> | null = null;
+
   protected override persist(): void {
+    if (this.soon) { clearTimeout(this.soon); this.soon = null; }
     mkdirSync(dirname(this.file), { recursive: true });
     writeWhole(this.file, JSON.stringify(this.data));
+  }
+
+  /** Within half a minute, unless something that matters is written first (which writes this too). */
+  protected override persistSoon(): void {
+    if (this.soon) return;
+    this.soon = setTimeout(() => { this.soon = null; this.persist(); }, LAZY_WRITE_SECONDS * 1000);
+    (this.soon as { unref?: () => void }).unref?.();
   }
 }

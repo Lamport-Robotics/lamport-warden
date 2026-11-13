@@ -25,8 +25,18 @@ export interface PushOptions {
   onMention: (wallet: string) => void;
   socket?: (url: string) => SocketLike;
   log?: (line: string) => void;
-  /** No more subscriptions than this on the connection (default 500): the rest are read in turn like before. */
-  most?: number;
+  /**
+   * How many subscriptions one connection carries (default 90), how many connections there may be (default
+   * 5), and how many new subscriptions are asked for at a time (default 20, each time the wallets are given).
+   * Measured on the public Solana RPC on 2026-11-13: a connection is closed at its hundred-and-first
+   * subscription ("Too many subscriptions attempted. Please open a new connection"); a sixth connection from
+   * one address is closed as it opens; and a connection that asks for two hundred subscriptions in a second
+   * is closed, where ten a second are all taken. So the wallets are spread over several connections and asked
+   * for gradually. A wallet beyond what they carry between them is not pushed, and is read in turn like before.
+   */
+  perLine?: number;
+  lines?: number;
+  perSync?: number;
   /** Timers, so a test can run them by hand. */
   later?: (work: () => void, ms: number) => unknown;
 }
@@ -34,7 +44,8 @@ export interface PushOptions {
 /** An address as Solana writes one: nothing else is ever put in a subscription. */
 const ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
-export class Push {
+/** One connection, and the wallets listened for on it. */
+class PushLine {
   private socket: SocketLike | null = null;
   private open = false;
   private stopped = false;
@@ -49,7 +60,7 @@ export class Push {
   private failures = 0;
   private unanswered = 0;
 
-  constructor(private o: PushOptions) {}
+  constructor(private o: PushOptions, private most: number) {}
 
   private later(work: () => void, ms: number): void { const t = (this.o.later ?? ((w, m) => setTimeout(w, m)))(work, ms); (t as { unref?: () => void } | undefined)?.unref?.(); }
   private log(line: string): void { (this.o.log ?? console.error)(`sentinel: ${line}`); }
@@ -67,17 +78,27 @@ export class Push {
   }
 
   /** The wallets to listen for now. Called every round: new ones are subscribed, ones no longer watched are dropped. */
-  watch(wallets: string[]): void {
-    this.wanted = wallets.filter((w) => ADDRESS.test(w)).slice(0, this.o.most ?? 500);
-    if (!this.open) return;
+  /**
+   * The wallets to listen for on this connection. No more than `budget` new subscriptions are asked for in one
+   * call (the RPC closes a connection that asks for many at once); the rest are asked for on the next.
+   * Returns how many were asked for.
+   */
+  watch(wallets: string[], budget = Infinity): number {
+    this.wanted = wallets.filter((w) => ADDRESS.test(w)).slice(0, this.most);
+    if (!this.open) return 0;
     const want = new Set(this.wanted);
-    for (const w of this.wanted) if (!this.numberOf.has(w) && !this.pending.has(w)) this.subscribe(w);
+    let asked = 0;
+    for (const w of this.wanted) {
+      if (asked >= budget) break;
+      if (!this.numberOf.has(w) && !this.pending.has(w)) { this.subscribe(w); asked += 1; }
+    }
     for (const [w, n] of this.numberOf) {
       if (want.has(w)) continue;
       this.numberOf.delete(w);
       this.byNumber.delete(n);
       this.sendJson({ jsonrpc: "2.0", id: this.nextId++, method: "logsUnsubscribe", params: [n] });
     }
+    return asked;
   }
 
   /**
@@ -116,7 +137,7 @@ export class Push {
       this.open = true;
       this.failures = 0;
       this.unanswered = 0;
-      this.watch(this.wanted);
+      // what to listen for is asked for a few at a time, by the next call to `watch`: all of it at once is refused
     });
     socket.addEventListener("message", (event) => { if (this.socket === socket) this.heard(event?.data); });
     const gone = () => { if (this.socket === socket) this.drop(); };
@@ -161,6 +182,57 @@ export class Push {
     if (typeof m.result === "number" && this.wanted.includes(asked.wallet)) { this.byNumber.set(m.result, asked.wallet); this.numberOf.set(asked.wallet, m.result); }
     // a subscription the RPC would not take is not asked for again on this connection: the wallet is read in turn, as always
     else if (m.error) this.pending.add(asked.wallet);
+  }
+}
+
+/**
+ * The push line: as many connections as the watched wallets need, each carrying no more than the RPC takes on
+ * one. A wallet stays on the connection it is on; a new one goes where there is room, and a connection is
+ * opened when there is none; one left with nobody on it is closed.
+ */
+export class Push {
+  private lines: { line: PushLine; wallets: string[] }[] = [];
+  private started = false;
+  private perLine: number;
+  private most: number;
+
+  constructor(private o: PushOptions) {
+    this.perLine = Math.max(1, o.perLine ?? 90);
+    this.most = Math.max(1, o.lines ?? 5);
+    this.open(); // one is kept even with nobody to listen for, so that it is known whether the RPC can be reached this way
+  }
+
+  private open(): { line: PushLine; wallets: string[] } {
+    const entry = { line: new PushLine(this.o, this.perLine), wallets: [] as string[] };
+    this.lines.push(entry);
+    if (this.started) entry.line.start();
+    return entry;
+  }
+
+  /** Whether every connection is up, and how many wallets are being listened for in all. */
+  get state(): { connected: boolean; listening: number; lines: number } {
+    return { connected: this.lines.every((l) => l.line.state.connected), listening: this.lines.reduce((n, l) => n + l.line.state.listening, 0), lines: this.lines.length };
+  }
+
+  start(): void { this.started = true; for (const l of this.lines) l.line.start(); }
+  stop(): void { this.started = false; for (const l of this.lines) l.line.stop(); }
+  check(): void { for (const l of this.lines) l.line.check(); }
+
+  /** The wallets to listen for now. Called every round. */
+  watch(wallets: string[]): void {
+    const wanted = [...new Set(wallets.filter((w) => ADDRESS.test(w)))].slice(0, this.perLine * this.most);
+    const want = new Set(wanted), placed = new Set<string>();
+    for (const l of this.lines) { l.wallets = l.wallets.filter((w) => want.has(w)); for (const w of l.wallets) placed.add(w); }
+    for (const w of wanted) {
+      if (placed.has(w)) continue;
+      const home = this.lines.find((l) => l.wallets.length < this.perLine) ?? (this.lines.length < this.most ? this.open() : null);
+      if (!home) break;
+      home.wallets.push(w);
+    }
+    let budget = Math.max(1, this.o.perSync ?? 20);
+    for (const l of this.lines) budget -= l.line.watch(l.wallets, budget);
+    // nobody left on a connection: it is closed, all but the first
+    for (let i = this.lines.length - 1; i >= 1; i--) if (this.lines[i]!.wallets.length === 0) { this.lines[i]!.line.stop(); this.lines.splice(i, 1); }
   }
 }
 

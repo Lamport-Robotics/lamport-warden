@@ -29,6 +29,10 @@ class Chain implements Rpc {
   txs: { signature: string; result: any; visible: boolean }[] = [];
   tokenAccounts: TokenAccountState[] = [];
   walletOwner = SYSTEM;
+  /** What the wallet holds, in lamports: it moves with every payment, as the real one does. */
+  lamports = 20 * SOL;
+  /** What each token account holds, in the token's smallest units. */
+  amounts: Record<string, number> = {};
   down = false;
   calls: string[] = [];
   private n = 0;
@@ -38,6 +42,8 @@ class Chain implements Rpc {
     const raw = new Transaction({ feePayer: from, recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" }).add(SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports: Math.round(sol * SOL) })).serialize({ requireAllSignatures: false, verifySignatures: false });
     const signature = `sig${String(++this.n).padStart(4, "0")}`;
     const lamports = Math.round(sol * SOL);
+    if (from.toBase58() === W) this.lamports -= lamports + 5000;
+    if (to.toBase58() === W) this.lamports += lamports;
     this.txs.push({ signature, visible: opts.visible ?? true, result: { slot: this.n, blockTime: at, transaction: [Buffer.from(raw).toString("base64"), "base64"], meta: { err: null, fee: 5000, preBalances: [20 * SOL, 0, 1], postBalances: [20 * SOL - lamports - 5000, lamports, 1], preTokenBalances: [], postTokenBalances: [] } } });
     return signature;
   }
@@ -56,6 +62,14 @@ class Chain implements Rpc {
       case "getTransaction": { const t = this.txs.find((x) => x.signature === params[0]); return t && t.visible ? t.result : null; }
       case "getTokenAccountsByOwner":
         return { value: this.tokenAccounts.filter((a) => a.owner === params[0] && params[1].programId.startsWith("Tokenkeg")).map((a) => ({ pubkey: a.address, account: { data: { parsed: { info: { mint: a.mint, owner: a.owner, ...(a.delegate ? { delegate: a.delegate } : {}), ...(a.closeAuthority ? { closeAuthority: a.closeAuthority } : {}) } } } } })) };
+      case "getMultipleAccounts":
+        // a hundred at most, answered in the order asked, as the RPC does
+        if (params[0].length > 100) throw new Error("getMultipleAccounts: Too many inputs provided; max 100");
+        return { value: (params[0] as string[]).map((address) => {
+          if (address === W) return { lamports: this.lamports, owner: this.walletOwner, data: ["", "base64"] };
+          const a = this.tokenAccounts.find((x) => x.address === address);
+          return a ? { lamports: 2_039_280, owner: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", data: { parsed: { info: { mint: a.mint, owner: a.owner, state: "initialized", tokenAmount: { amount: String(this.amounts[a.address] ?? 0) }, ...(a.delegate ? { delegate: a.delegate, delegatedAmount: { amount: "18446744073709551615" } } : {}), ...(a.closeAuthority ? { closeAuthority: a.closeAuthority } : {}) } } } } : null;
+        }) };
       case "getAccountInfo": {
         if (params[0] === W) return { value: { owner: this.walletOwner } };
         const a = this.tokenAccounts.find((x) => x.address === params[0]);
@@ -282,7 +296,7 @@ describe("the watcher", () => {
     tick(900);
     const out = await watcher.passAll();
     expect(out.raised).toEqual([]);
-    expect(out.blind).toEqual([{ wallet: W, why: "getSignaturesForAddress: the RPC answered 503" }]);
+    expect(out.blind).toEqual([{ wallet: W, why: "getMultipleAccounts: the RPC answered 503" }]);
     expect(store.record(W).cursor).toBe(cursor);
     expect(watcher.stale(600)).toEqual([W]); // the owner is told watching has stopped
     chain.down = false;
