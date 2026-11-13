@@ -1,6 +1,6 @@
 # Lamport Warden
 
-Browser extension, v0.4. Not released: it is not in the Chrome Web Store, and nobody outside Lamport has
+Browser extension, v0.5. Not released: it is not in the Chrome Web Store, and nobody outside Lamport has
 reviewed it. Load it unpacked to try it.
 
 Warden sits in front of whatever Solana wallet you already use. Before a signing request reaches the wallet,
