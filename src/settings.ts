@@ -8,12 +8,14 @@ export interface Settings {
   ringSites: string[];
   /** Simulate transactions that call programs the decoder does not read. Off unless turned on: it shows the RPC the transaction. */
   simulate: boolean;
+  /** Tell Sentinel which signatures were the owner's own. Off unless turned on: it is the one thing ever sent to Lamport. */
+  reportSigned: boolean;
 }
 
 /** The stored keys settingsFrom() reads. */
-export const KEYS = ["rpcUrl", "ringSites", "simulate"] as const;
+export const KEYS = ["rpcUrl", "ringSites", "simulate", "reportSigned"] as const;
 
-export const DEFAULTS: Settings = { rpcUrl: DEFAULT_RPC, ringSites: [], simulate: false };
+export const DEFAULTS: Settings = { rpcUrl: DEFAULT_RPC, ringSites: [], simulate: false, reportSigned: false };
 
 /** Only https, or http on this machine: the RPC's answer decides what Warden says a transaction does. */
 export function cleanRpcUrl(input: string): string | null {
@@ -40,5 +42,6 @@ export function settingsFrom(stored: Record<string, unknown>): Settings {
     rpcUrl: rpc ?? DEFAULTS.rpcUrl,
     ringSites: Array.isArray(stored.ringSites) ? stored.ringSites.filter((x): x is string => typeof x === "string") : [],
     simulate: stored.simulate === true,
+    reportSigned: stored.reportSigned === true,
   };
 }

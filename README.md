@@ -20,7 +20,7 @@ sign-now-broadcast-later transactions, a transaction or a raw hash dressed up as
 for the signature that unlocks your Privacy Rings keys. Privacy Rings deposits and withdrawals are stated with
 their public amounts; a private transfer is called what it is, with its amount hidden.
 
-There is no account, no Lamport server and no model. Your payment history stays in the browser's extension
+There is no account and no model, and by default nothing goes to Lamport. Your payment history stays in the browser's extension
 storage on this machine, one history per wallet address, and it grows only when a request you let through
 comes back signed.
 
@@ -119,6 +119,14 @@ by their exact shape and explains them, and only on the Sentinel page. From any 
 Sentinel program is blocked: the real program pointed at someone else's vault is a way to drain a wallet.
 Setting it up, or changing the vault, asks you to retype the end of the vault's address, because whoever holds
 that vault's 24 words receives a rescue.
+
+The settings page has a Sentinel panel: which wallets this browser saw armed, which are linked for
+reporting, and one switch, off by default, "Tell Sentinel which signatures were mine". A server sees only the
+chain, so it cannot tell the owner's payment from a thief's with the same key. With the switch on, Warden
+tells Sentinel the wallet and the signature of a transaction the owner let through, and only when the
+wallet's answer proves it: the owner's own key, over the exact bytes Warden read (`src/report.ts`). The
+Sentinel page hands over the token a wallet reports with; only that page's top frame is listened to, and the
+address reports go to is fixed in the extension (`src/sentinel-link.ts`, `src/defaults.ts`).
 
 `sentinel/service` is the watcher and the server around it: it reads each watched wallet, raises alerts in
 plain sentences, and lets an owner sign in with a wallet to choose where alerts go and to answer them. It

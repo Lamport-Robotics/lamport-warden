@@ -1,5 +1,6 @@
 /** The settings page. Everything is built with textContent: stored addresses and labels are never parsed as HTML. */
-import { DEFAULT_RPC } from "./defaults.js";
+import { DEFAULT_RPC, SENTINEL_PAGE } from "./defaults.js";
+import { LINK_PREFIX, linkFrom } from "./sentinel-link.js";
 import { KEYS, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
 import type { MemoryState } from "../pincer1/daemon/src/warden/index.js";
 
@@ -40,6 +41,39 @@ async function load() {
   const doors = all.unguarded && typeof all.unguarded === "object" ? Object.entries(all.unguarded as Record<string, unknown>).filter(([, d]) => typeof d === "string").sort() : [];
   $("doors").hidden = doors.length === 0;
   $("doorList").replaceChildren(...doors.map(([name, seen]) => { const li = el("li"); li.append(el("span", `window.${name}`), el("span", `last seen ${String(seen)}`, "soft")); return li; }));
+
+  // Sentinel: what this browser saw each wallet set up (sentinel.ts keeps it), and which wallets report
+  const page = $<HTMLAnchorElement>("sentinelPage");
+  page.href = SENTINEL_PAGE;
+  page.textContent = SENTINEL_PAGE.replace(/^https:\/\//, "");
+  $<HTMLInputElement>("reportSigned").checked = s.reportSigned;
+  const armed = new Map<string, { vault: string; pending: boolean }>();
+  for (const [k, v] of Object.entries(all)) {
+    const state = v as { vault?: unknown; pendingVault?: unknown } | null;
+    if (k.startsWith("sentinel:") && state && typeof state.vault === "string") armed.set(k.slice(9), { vault: state.vault, pending: typeof state.pendingVault === "string" });
+  }
+  const linked = new Set(Object.keys(all).filter((k) => k.startsWith(LINK_PREFIX) && linkFrom(all[k])).map((k) => k.slice(LINK_PREFIX.length)));
+  const sentinel = $("sentinelWallets");
+  sentinel.replaceChildren();
+  const known = [...new Set([...armed.keys(), ...linked])].sort();
+  if (known.length === 0) sentinel.append(el("li", "No wallet in this browser is set up with Sentinel."));
+  for (const wallet of known) {
+    const li = el("li");
+    const a = armed.get(wallet);
+    const says = [
+      a ? `armed: a rescue moves its tokens to your vault ending ${a.vault.slice(-4)}${a.pending ? ", and a change of vault is waiting" : ""}` : "not armed in this browser",
+      linked.has(wallet) ? (s.reportSigned ? "reports its signatures" : "linked, but reporting is off") : "does not report",
+    ];
+    const name = el("span", short(wallet), "addr");
+    name.title = wallet;
+    li.append(name, el("span", says.join("; "), "soft"));
+    if (linked.has(wallet)) {
+      const rm = el("button", "Unlink", "small");
+      rm.addEventListener("click", async () => { await chrome.storage.local.remove(`${LINK_PREFIX}${wallet}`); await load(); });
+      li.append(rm);
+    }
+    sentinel.append(li);
+  }
 
   // history
   const memory = $("memory");
@@ -92,6 +126,13 @@ $("simulate").addEventListener("change", async () => {
   const on = $<HTMLInputElement>("simulate").checked;
   await chrome.storage.local.set({ simulate: on });
   note("simNote", on ? "On. The RPC above will see each transaction Warden simulates." : "Off. No transaction leaves this browser.");
+  await load();
+});
+
+$("reportSigned").addEventListener("change", async () => {
+  const on = $<HTMLInputElement>("reportSigned").checked;
+  await chrome.storage.local.set({ reportSigned: on });
+  note("reportNote", on ? "On. Only wallets linked on the Sentinel page report, and only transactions you let through." : "Off. Warden sends Lamport nothing.");
   await load();
 });
 

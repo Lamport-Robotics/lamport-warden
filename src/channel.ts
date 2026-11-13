@@ -26,7 +26,7 @@ export interface Channel {
   request: string;
   /** content -> inpage: {id, ok} */
   reply: string;
-  /** inpage -> content: {id, signed} */
+  /** inpage -> content: {id, signed, sigs?} */
   done: string;
   /** inpage -> content: {unguarded}: the wallet doors on this page Warden could not get in front of */
   doors: string;
@@ -48,4 +48,5 @@ export const fromBase64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c
 export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string }
 export interface DoorsMessage { unguarded: string[] }
 export interface ReplyMessage { id: string; ok: boolean }
-export interface DoneMessage { id: string; signed: boolean }
+/** `sigs`: for a signed transaction, the signatures in the wallet's answer, base64, first one first. */
+export interface DoneMessage { id: string; signed: boolean; sigs?: string[] }

@@ -6,6 +6,9 @@ Item ID: `dmlhclkglnpkdhidfjfgjfdjnblnalea`, created on 2026-11-13 from `lamport
 **draft**: every field below is filled in and saved, and it is not submitted. It was submitted once that day
 and the review was cancelled, to wait for the version that has the paid tier (Sentinel) built in.
 
+The draft in the dashboard still has the 0.5.0 texts. The description, the storage justification and the
+data-usage note below have changed since (Sentinel reporting), so paste them again before submitting.
+
 When that version is ready: upload its zip on the Package tab, set Payments on the Distribution tab to
 "Contains in-app purchases" if the extension then offers the subscription, and submit. Google flags the host
 permission for an in-depth review, so expect it to take longer than a few days.
@@ -45,9 +48,14 @@ Works with Phantom, Backpack and Solflare through Wallet Standard, which is what
 the older page objects of Phantom and Backpack. Solflare's older page object cannot be guarded; the settings
 page tells you when Warden meets it.
 
-No account, no Lamport server, no model. By default the only network request is to read on-chain lookup
-tables from a Solana RPC you can change or turn off. You can turn on simulation, which sends a swap,
+No account, no model, and by default nothing goes to Lamport. The only network request is to read on-chain
+lookup tables from a Solana RPC you can change or turn off. You can turn on simulation, which sends a swap,
 unsigned, to your RPC to find out what it would do; it is off until you choose it.
+
+Sentinel is Warden's optional watching service: it watches the wallets you give it after you sign and tells
+you in one sentence when something looks wrong. If you use it, you can let Warden tell Sentinel which
+signatures were yours, so it does not alert you about your own payments. That is off until you turn it on,
+and it sends only the wallet's address and the transaction's signature.
 
 Warden is advice in front of your wallet, not a lock on it. A page can still reach a wallet in ways an
 extension never sees. It is open source: https://github.com/Lamport-Robotics/lamport-warden
@@ -71,7 +79,8 @@ that match known theft patterns.
 
 **Permission justification, storage:**
 Keeps, on the user's device, the addresses each of their wallets has paid (to recognise familiar payments
-and look-alike addresses) and the user's settings.
+and look-alike addresses), the user's settings, and, for a wallet the user linked to Sentinel, the token it
+reports with.
 
 **Host permission justification** (content scripts on https://*/*):
 Any web page can ask a Solana wallet to sign, and a page built to steal is not on any list. Warden's scripts
@@ -81,8 +90,9 @@ prompt. They do not read the page's content.
 **Remote code:** No. Everything the extension runs is in the package.
 
 **Data usage.** Tick "Financial and payment information": Warden handles transactions and wallet addresses.
-It keeps payment history on the device, and when the user has turned simulation on, sends the unsigned
-transaction to the Solana RPC the user chose. Tick nothing else. Then certify all three statements: the data
+It keeps payment history on the device; when the user has turned simulation on, sends the unsigned
+transaction to the Solana RPC the user chose; and when the user has turned Sentinel reporting on, sends a
+linked wallet's address and a transaction's signature to Lamport's Sentinel service. Tick nothing else. Then certify all three statements: the data
 is not sold, not used for purposes unrelated to the single purpose, and not used for creditworthiness or
 lending.
 

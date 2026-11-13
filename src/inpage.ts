@@ -43,7 +43,7 @@ const guard: Guard = async (req) => {
     dispatch(new CE(ch.request, { detail: JSON.stringify({ id, kind: req.kind, bytes: toBase64(req.bytes), owner: req.owner }) }));
   });
   if (!ok) throw new WardenRejected();
-  return { done: (signed) => { dispatch(new CE(ch.done, { detail: JSON.stringify({ id, signed }) })); } };
+  return { done: (signed, signatures) => { dispatch(new CE(ch.done, { detail: JSON.stringify({ id, signed, ...(signed && signatures?.length ? { sigs: signatures.slice(0, 12).map(toBase64) } : {}) }) })); } };
 };
 
 installStandardHook(window, guard);
