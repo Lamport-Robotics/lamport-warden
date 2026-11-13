@@ -23,6 +23,14 @@ export const channelAddedNotice = (hint: string, wallet: string | null): string 
 export const channelRemovedNotice = (hint: string, wallet: string | null): string =>
   `An alert channel (${hint}) was removed from this profile${by(wallet)}. Alerts no longer go there. ${notYou(wallet)}`;
 
+/**
+ * "This was me" on an alert about a taking makes whoever holds that permission familiar: what it takes from
+ * that wallet afterwards is listed on the page and no longer alerted. That is less protection, asked for by
+ * whoever was signed in, so the profile's channels hear of it.
+ */
+export const takerTrustedNotice = (takers: string[], watched: string, wallet: string | null): string =>
+  `"This was me" was answered to an alert about tokens taken from ${short(watched)} under a permission${by(wallet)}. What ${takers.map(short).join(" and ")} take${takers.length === 1 ? "s" : ""} from that wallet under ${takers.length === 1 ? "that permission" : "those permissions"} is from now on listed on the Sentinel page and not alerted. ${notYou(wallet)}`;
+
 export const walletRemovedNotice = (removed: string, last: boolean, wallet: string | null): string =>
   last
     ? `Sentinel has stopped watching ${short(removed)}, and this profile is gone: its last wallet was removed${by(wallet)}. ${notYou(wallet)}`
