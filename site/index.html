@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lamport Warden</title>
+<meta name="description" content="Warden sits in front of your Solana wallet. Before a request reaches it, Warden says in one sentence what it will do to your money, and stops it when that is not what you meant.">
+<meta name="theme-color" content="#0b0b0a">
+<meta property="og:title" content="Lamport Warden">
+<meta property="og:description" content="It reads the request before you sign it.">
+<link rel="icon" href="/site/mark.svg">
+<link rel="preload" href="/site/fonts/switzer-300.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/site/fonts/switzer-400.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  @font-face { font-family: Switzer; src: url(/site/fonts/switzer-300.woff2) format("woff2"); font-weight: 300; font-display: swap; }
+  @font-face { font-family: Switzer; src: url(/site/fonts/switzer-400.woff2) format("woff2"); font-weight: 400; font-display: swap; }
+  @font-face { font-family: Switzer; src: url(/site/fonts/switzer-500.woff2) format("woff2"); font-weight: 500; font-display: swap; }
+  :root {
+    --ink: #0b0b0a; --bone: #f2eee3; --dim: rgba(242, 238, 227, .62); --mute: rgba(242, 238, 227, .38); --line: rgba(242, 238, 227, .12);
+    --raise: rgba(242, 238, 227, .04); --stop: #e8735a; --care: #d9b36a;
+    --pad: clamp(20px, 3.4vw, 56px);
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--ink); color: var(--bone); font: 400 17px/1.5 Switzer, system-ui, sans-serif; letter-spacing: -.01em; overflow-x: clip; -webkit-font-smoothing: antialiased; }
+  h1, h2, h3, p, ul { margin: 0; padding: 0; }
+  a { color: inherit; text-decoration: none; }
+  .bar { display: flex; align-items: center; gap: 32px; padding: 18px var(--pad); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 500; font-size: 16px; letter-spacing: -.02em; }
+  .nav { display: flex; gap: 24px; margin-left: auto; font-size: 15px; color: var(--dim); }
+  .nav a:hover { color: var(--bone); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; height: 48px; padding: 0 24px; border-radius: 999px; font-size: 15px; font-weight: 500; letter-spacing: -.01em; white-space: nowrap; border: 1px solid rgba(242, 238, 227, .32); transition: background .3s, border-color .3s, color .3s; }
+  .btn:hover { border-color: var(--bone); }
+  .btn.solid { background: var(--bone); color: var(--ink); border-color: var(--bone); }
+  .sec { padding: clamp(56px, 8vw, 120px) var(--pad); border-top: 1px solid var(--line); }
+  .inner { max-width: 1240px; margin: 0 auto; }
+  .eyebrow { font-size: 14px; color: var(--dim); margin-bottom: 18px; }
+  h1 { font-weight: 300; font-size: clamp(44px, 4.8vw, 84px); line-height: .98; letter-spacing: -.055em; text-wrap: balance; }
+  h2 { font-weight: 300; font-size: clamp(32px, 3.6vw, 56px); line-height: 1.04; letter-spacing: -.05em; margin-bottom: 18px; text-wrap: balance; }
+  h2 span { color: var(--mute); }
+  .lede { color: var(--dim); font-size: clamp(17px, 1.4vw, 20px); max-width: 34em; }
+
+  .hero { padding: clamp(40px, 6vw, 96px) var(--pad) clamp(56px, 8vw, 120px); }
+  .hero .inner { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: clamp(32px, 5vw, 80px); align-items: center; }
+  .hero h1 { margin-bottom: 24px; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
+  .status { font-size: 14px; color: var(--mute); margin-top: 18px; }
+
+  /* the prompt, as the extension draws it */
+  .stage { border: 1px solid var(--line); background: var(--raise); border-radius: 22px; padding: clamp(20px, 3vw, 36px) clamp(16px, 2.4vw, 28px); }
+  .card { background: var(--bone); color: #14130f; border-radius: 14px; padding: 20px 20px 16px; font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0; box-shadow: 0 18px 60px rgba(0, 0, 0, .5); max-width: 440px; margin: 0 auto; }
+  .card .tag { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; margin-bottom: 10px; color: #a1260d; }
+  .card .sentence { font-size: 16px; margin-bottom: 10px; overflow-wrap: anywhere; }
+  .card .site { font-size: 12px; color: #5c5a50; margin-bottom: 14px; }
+  .card .row { display: flex; justify-content: flex-end; }
+  .card .close { font-weight: 600; border-radius: 999px; padding: 9px 18px; border: 1px solid #14130f; }
+  .caption { font-size: 14px; color: var(--mute); margin-top: 18px; text-align: center; }
+
+  .levels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 40px; border-top: 1px solid var(--line); }
+  .level { padding: 24px 24px 0 0; }
+  .level + .level { padding-left: 24px; border-left: 1px solid var(--line); }
+  .level b { display: block; font-weight: 500; font-size: 20px; letter-spacing: -.03em; margin-bottom: 8px; }
+  .level p { color: var(--dim); font-size: 15px; }
+  .level.care b { color: var(--care); } .level.stop b { color: var(--stop); }
+  ul.catch { list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 clamp(24px, 4vw, 64px); margin-top: 40px; }
+  ul.catch li { padding: 20px 0; border-top: 1px solid var(--line); }
+  ul.catch b { display: block; font-weight: 500; font-size: 20px; letter-spacing: -.03em; margin-bottom: 4px; }
+  ul.catch span { color: var(--dim); font-size: 15px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 40px; font-size: 16px; }
+  th, td { text-align: left; padding: 18px 20px 18px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--mute); font-weight: 400; font-size: 14px; }
+  td.no { color: var(--care); }
+  td code { font: 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; overflow-wrap: anywhere; }
+  .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(32px, 5vw, 80px); }
+  .two h2 { font-size: clamp(28px, 2.8vw, 44px); }
+  .two p { color: var(--dim); margin-bottom: 14px; max-width: 32em; }
+  .two a { color: var(--bone); border-bottom: 1px solid var(--mute); }
+  .foot { display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: center; padding: 28px var(--pad) 40px; border-top: 1px solid var(--line); font-size: 14px; color: var(--mute); }
+  .foot nav { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-left: auto; }
+  .foot a:hover { color: var(--bone); }
+  @media (max-width: 860px) {
+    .hero .inner, .two { grid-template-columns: minmax(0, 1fr); }
+    .levels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .level { padding: 20px 16px 20px 0; }
+    .level + .level { padding-left: 0; border-left: 0; }
+    .level:nth-child(even) { padding-left: 16px; border-left: 1px solid var(--line); }
+    .level:nth-child(n+3) { border-top: 1px solid var(--line); }
+    ul.catch { grid-template-columns: minmax(0, 1fr); }
+    th, td { padding-right: 12px; font-size: 15px; }
+    .nav { gap: 16px; }
+    .foot nav { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <a class="brand" href="https://lamportrobotics.com" aria-label="Lamport Robotics">
+    <img src="/site/mark.svg" alt="" width="15" height="20"><span>Lamport Robotics</span>
+  </a>
+  <nav class="nav" aria-label="Site">
+    <a href="#doors">Wallets</a>
+    <a href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">Source</a>
+  </nav>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="inner">
+      <div>
+        <p class="eyebrow">Lamport Warden</p>
+        <h1>It reads the request before you sign it.</h1>
+        <p class="lede">Warden is a browser extension that sits in front of the Solana wallet you already use. Before a signing request reaches the wallet, Warden says in one sentence what it will do to your money, and stops it when that is not what you meant.</p>
+        <div class="cta">
+          <a class="btn solid" href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">Get the developer preview</a>
+          <a class="btn" href="#doors">Which wallets it covers</a>
+        </div>
+        <p class="status">Version 0.2. Open source. Not in the Chrome Web Store yet.</p>
+      </div>
+      <div class="stage" aria-label="What Warden shows when it blocks a request">
+        <div class="card">
+          <div class="tag">Lamport Warden · Blocked</div>
+          <p class="sentence">The destination 7xKX…q9Ab looks like an address you have paid 6 times, but it is a different address. This is address poisoning.</p>
+          <p class="site">Asked by https://claim-rewards.example</p>
+          <div class="row"><span class="close">Close</span></div>
+        </div>
+        <p class="caption">A blocked request never reaches your wallet.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="inner">
+      <p class="eyebrow">How it answers</p>
+      <h2>Four answers.<br><span>Most of the time you see none of them.</span></h2>
+      <p class="lede">Warden keeps its own record of who you have paid. It learns an address only when a request you let through comes back signed, so dust sent to you by a look-alike teaches it nothing.</p>
+      <div class="levels">
+        <div class="level"><b>Allow</b><p>Nothing appears. An address and a size you have confirmed before.</p></div>
+        <div class="level"><b>Explain</b><p>One sentence, with Cancel and Continue. A first payment to a new address.</p></div>
+        <div class="level care"><b>Confirm</b><p>The sentence, and you type a short confirmation before it goes on.</p></div>
+        <div class="level stop"><b>Block</b><p>The sentence and the reason. There is no button to continue.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="inner">
+      <p class="eyebrow">What it stops</p>
+      <h2>The rules the robot runs.<br><span>In your browser.</span></h2>
+      <p class="lede">They are the same rules as on Pincer1, tested against a replay of 14 known drain patterns, all of which are stopped.</p>
+      <ul class="catch">
+        <li><b>Look-alike addresses</b><span>The same first and last four characters as an address you have paid, but a different address.</span></li>
+        <li><b>Account handover</b><span>A hidden instruction that reassigns your account, or a token account's authority, to someone else.</span></li>
+        <li><b>Unlimited approvals</b><span>A delegate allowed to move all of a token, now or later.</span></li>
+        <li><b>Sign now, sent later</b><span>A durable-nonce transaction that stays valid long after you have forgotten it.</span></li>
+        <li><b>A transaction dressed as a message</b><span>Or a raw hash. Warden lets a message through only when you can read all of it.</span></li>
+        <li><b>The signature that unlocks private keys</b><span>A site asking for the one signature a Privacy Rings wallet derives its keys from.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="sec" id="doors">
+    <div class="inner">
+      <p class="eyebrow">Wallets</p>
+      <h2>Tested against the wallets<br><span>as they ship.</span></h2>
+      <p class="lede">A page can reach a wallet through more than one door. Warden is run in front of the real extensions from the Chrome Web Store, and this table is what the last run found (Phantom 26.38, Solflare 2.43, Backpack 0.10).</p>
+      <table>
+        <tr><th>Wallet</th><th>Wallet Standard, which most dapps use</th><th>The older object on the page</th></tr>
+        <tr><td>Phantom</td><td>Guarded</td><td>Guarded</td></tr>
+        <tr><td>Backpack</td><td>Guarded</td><td>Guarded</td></tr>
+        <tr><td>Solflare</td><td>Guarded</td><td class="no">Not guarded. Solflare freezes <code>window.solflare</code>, so nothing can stand in front of it.</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="inner two">
+      <div>
+        <h2>What leaves your browser.</h2>
+        <p>There is no account, no Lamport server and no model. Your history stays in the extension's storage on your machine.</p>
+        <p>Warden makes one kind of network call. Most swaps name their accounts by position in a table stored on chain, and to say where the money goes Warden reads that table from a Solana RPC. The RPC learns which table was asked for and your IP address. It does not learn your wallet, the transaction or the site. You can point it at your own RPC, or turn it off.</p>
+      </div>
+      <div>
+        <h2>Advice, not a lock.</h2>
+        <p>Warden is a second pair of eyes in front of your wallet. A page can still reach a wallet in ways an extension never sees, and turning Warden off removes it.</p>
+        <p>On <a href="https://lamportrobotics.com">Pincer1</a> the same rules are enforced by the robot's controller and shown on its own screen, where a compromised computer cannot talk them away.</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <span>© 2026 Lamport Robotics</span>
+  <span>Warden is open source under the MIT licence.</span>
+  <nav aria-label="More from Lamport"><a href="https://lamportrobotics.com">Pincer1</a><a href="https://vault.lamportrobotics.com" rel="noopener">Vault</a><a href="https://lamport.si" rel="noopener">Lamport</a><a href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">GitHub</a></nav>
+</footer>
+</body>
+</html>
