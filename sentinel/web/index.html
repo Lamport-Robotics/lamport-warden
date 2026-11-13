@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Warden Sentinel</title>
+<meta name="description" content="Sentinel watches your Solana wallets after you sign and tells you in one sentence when something looks wrong.">
+<meta name="theme-color" content="#0b0b0a">
+<!-- Nothing runs here but this page's own script, and it talks to nothing but this site. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="/site/mark.svg">
+<link rel="stylesheet" href="sentinel.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="/" aria-label="Lamport Warden"><img src="/site/mark.svg" alt="" width="15" height="20"><span>Warden Sentinel</span></a>
+  <nav class="nav" aria-label="Site">
+    <a href="/">Warden</a>
+    <a href="/privacy/">Privacy</a>
+    <button class="linkish" id="signOut" hidden>Sign out</button>
+  </nav>
+</header>
+
+<main class="page">
+  <section class="intro">
+    <p class="eyebrow">Sentinel</p>
+    <h1>It keeps watching after you sign.</h1>
+    <p class="lede">Warden reads a request before your wallet signs it. Sentinel watches the wallet afterwards, around the clock, and tells you in one sentence when something looks wrong: a token account handed to someone else, a payment to a look-alike address, a spending permission you did not give.</p>
+    <p class="plain">It watches and it tells you. It cannot stop a thief who empties a wallet in a single transaction, and nobody watching can. It helps when there is a gap: a drain in steps, or a permission taken before the money moves.</p>
+  </section>
+
+  <p class="notice" id="notice" role="status" hidden></p>
+
+  <section id="signedOut">
+    <h2>Sign in with a wallet</h2>
+    <p class="plain">No email and no password. Your wallet signs a short text that names this site, and that is the sign-in. It moves nothing and approves nothing. The wallet you sign in with is the first one Sentinel watches.</p>
+    <div class="choices" id="walletChoices"></div>
+    <p class="soft" id="noWallets" hidden>I can't find a Solana wallet in this browser. Sentinel signs you in through one: Phantom, Solflare and Backpack all work.</p>
+  </section>
+
+  <div id="signedIn" hidden>
+    <section>
+      <h2>Your wallets</h2>
+      <ul class="rows" id="wallets"></ul>
+      <p class="soft" id="walletLimit"></p>
+      <div class="choices" id="addChoices"></div>
+    </section>
+
+    <section>
+      <h2>Where alerts go</h2>
+      <p class="plain">Alerts arrive as a push through <b>ntfy</b>, a free notification app that needs no account. Install it on your phone, subscribe to a topic with a long name nobody could guess, and give Sentinel that topic's address. Whoever knows the topic can read what is sent to it, so treat it like a password.</p>
+      <ul class="rows" id="channels"></ul>
+      <div class="field">
+        <input type="url" id="ntfyTarget" placeholder="https://ntfy.sh/a-long-topic-name" spellcheck="false" autocomplete="off" aria-label="ntfy topic address">
+        <button id="makeTopic">Make me a topic</button>
+        <button class="solid" id="addChannel">Add</button>
+      </div>
+      <p class="soft">An alert is a plain sentence. It never has a link in it and never asks you to sign anything. A message that does is not from Sentinel.</p>
+    </section>
+
+    <section>
+      <h2>Alerts</h2>
+      <ul class="rows" id="events"></ul>
+    </section>
+
+    <section>
+      <h2>Warden in this browser</h2>
+      <p class="plain">Sentinel sees only the chain, so it cannot tell a payment you made from one a thief made with your key. Warden can tell it: when a wallet you link here signs a transaction you let through, Warden sends Sentinel the wallet's address and the transaction's signature, and Sentinel stays quiet about your own activity.</p>
+      <p class="soft" id="wardenState"></p>
+      <ul class="rows" id="links"></ul>
+    </section>
+
+    <section>
+      <h2>Plan</h2>
+      <div class="plans" id="plans"></div>
+    </section>
+
+    <section>
+      <h2>Leave</h2>
+      <p class="plain">Removing a wallet makes Sentinel forget what it learned about it and the alerts it raised. Removing the last one removes your profile.</p>
+    </section>
+  </div>
+</main>
+
+<footer class="foot">
+  <span>© 2026 Lamport Robotics</span>
+  <nav aria-label="More from Lamport"><a href="/">Warden</a><a href="/privacy/">Privacy</a><a href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">Source</a></nav>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>
