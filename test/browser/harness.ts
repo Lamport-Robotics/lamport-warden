@@ -70,14 +70,14 @@ export async function serve(): Promise<Site> {
 export interface Browser { ctx: BrowserContext; extensionId: string; close(): Promise<void> }
 
 /** Chromium with these unpacked extensions, in this order. CHROMIUM_PATH picks a browser Playwright did not install. */
-export async function launch(extensions: string[]): Promise<Browser> {
+export async function launch(extensions: string[], extraArgs: string[] = []): Promise<Browser> {
   for (const e of extensions) if (!existsSync(join(e, "manifest.json"))) throw new Error(`not built: ${e} (run pnpm build && pnpm build:fixtures)`);
   const executablePath = process.env.CHROMIUM_PATH || undefined;
   const ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), "warden-browser-")), {
     executablePath,
     channel: executablePath ? undefined : "chromium",
     headless: false, // the flag below is the headless mode that loads extensions
-    args: ["--headless=new", `--disable-extensions-except=${extensions.join(",")}`, `--load-extension=${extensions.join(",")}`, "--no-first-run", "--no-default-browser-check"],
+    args: ["--headless=new", `--disable-extensions-except=${extensions.join(",")}`, `--load-extension=${extensions.join(",")}`, "--no-first-run", "--no-default-browser-check", ...extraArgs],
     viewport: { width: 1000, height: 760 },
   });
   let worker = ctx.serviceWorkers().find((w) => w.url().endsWith("/background.js"));

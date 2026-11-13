@@ -27,7 +27,13 @@ export interface GuardRequest {
   /** The account asked to sign, base58. Empty when the page did not say. */
   owner: string;
 }
-export interface Ticket { done(signed: boolean): void }
+export interface Ticket {
+  /**
+   * @param signatures when a transaction was signed: the signatures the wallet's answer carries, in the
+   *   transaction's own order (the first is the one the chain knows the transaction by)
+   */
+  done(signed: boolean, signatures?: Uint8Array[]): void;
+}
 export type Guard = (req: GuardRequest) => Promise<Ticket>;
 
 export class WardenRejected extends Error {
@@ -62,7 +68,7 @@ async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Pr
   }
   try {
     const out = await call();
-    for (const t of tickets) t.done(true);
+    reqs.forEach((r, i) => tickets[i]!.done(true, r.kind === "tx" ? signaturesOf(out, i, reqs.length) : undefined));
     return out;
   } catch (e) {
     for (const t of tickets) t.done(false);
@@ -93,6 +99,58 @@ export function fromBase58(s: string): Uint8Array | null {
   }
   for (const ch of s) { if (ch !== "1") break; out.push(0); }
   return Uint8Array.from(out.reverse());
+}
+
+export function toBase58(bytes: Uint8Array): string {
+  const digits: number[] = [];
+  for (const b of bytes) {
+    let carry = b;
+    for (let i = 0; i < digits.length; i++) { carry += digits[i]! << 8; digits[i] = carry % 58; carry = (carry / 58) | 0; }
+    while (carry > 0) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+  }
+  let out = "";
+  for (const b of bytes) { if (b !== 0) break; out += "1"; }
+  for (let i = digits.length - 1; i >= 0; i--) out += B58[digits[i]!];
+  return out;
+}
+
+/** The signature slots of a serialized transaction, in order. Empty when the bytes are not one. */
+export function signaturesInTransaction(tx: Uint8Array): Uint8Array[] {
+  if (tx.length < 66) return [];
+  if (tx[0] === 0x81) { // version 1: the signatures follow the message
+    const n = tx[1]!;
+    if (n === 0 || n > 12 || tx.length <= 64 * n) return [];
+    return Array.from({ length: n }, (_, i) => Uint8Array.from(tx.subarray(tx.length - 64 * (n - i), tx.length - 64 * (n - i - 1))));
+  }
+  const n = tx[0]!;
+  if (n === 0 || n > 12 || tx.length < 1 + 64 * n) return [];
+  return Array.from({ length: n }, (_, i) => Uint8Array.from(tx.subarray(1 + 64 * i, 65 + 64 * i)));
+}
+
+/**
+ * What a wallet handed back for one of the transactions it was asked to sign, as signatures. Wallets answer
+ * in several shapes: a signed transaction (bytes, or an object that serializes), a signature (bytes, or
+ * base58), one per request in an array, or one object for the lot. Anything else gives none: this only ever
+ * feeds a check that the owner's own key signed, never a decision.
+ */
+export function signaturesOf(out: any, index: number, count: number): Uint8Array[] {
+  try {
+    let item = Array.isArray(out) ? out[index] : out;
+    if (!Array.isArray(out) && out && typeof out === "object" && Array.isArray(out.signatures) && typeof out.serialize !== "function") item = out.signatures[index];
+    else if (!Array.isArray(out) && count > 1) return [];
+    const one = (v: any): Uint8Array[] => {
+      if (typeof v === "string") { const b = fromBase58(v); return b && b.length === 64 ? [b] : []; }
+      if (v instanceof Uint8Array || ArrayBuffer.isView(v)) { const b = toBytes(v); return b.length === 64 ? [Uint8Array.from(b)] : signaturesInTransaction(b); }
+      return [];
+    };
+    if (!item) return [];
+    if (typeof item === "string" || item instanceof Uint8Array || ArrayBuffer.isView(item)) return one(item);
+    if (typeof item !== "object") return [];
+    if (item.signedTransaction !== undefined) return one(item.signedTransaction);
+    if (typeof item.serialize === "function") return signaturesInTransaction(serializeForGuard(item));
+    if (item.signature !== undefined) return one(item.signature);
+  } catch { /* an answer that cannot be read proves nothing */ }
+  return [];
 }
 
 /**

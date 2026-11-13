@@ -40,7 +40,7 @@
   <p class="soft" id="version"></p>
 
   <h2>Reading lookup tables</h2>
-  <p>Most swaps name their accounts by position in a table stored on chain. To say where the money goes, Warden has to read that table from a Solana RPC. Unless you turn on simulation below, this is the only network call it makes. The RPC learns which table was asked for and your IP address. It does not learn your wallet address, the transaction or the site.</p>
+  <p>Most swaps name their accounts by position in a table stored on chain. To say where the money goes, Warden has to read that table from a Solana RPC. Unless you turn on simulation or Sentinel reporting below, this is the only network call it makes. The RPC learns which table was asked for and your IP address. It does not learn your wallet address, the transaction or the site.</p>
   <label class="choice"><input type="radio" name="rpc" value="public"> <span>The public Solana RPC</span></label>
   <label class="choice"><input type="radio" name="rpc" value="own"> <span>My own RPC</span></label>
   <div class="row"><input type="url" id="rpcUrl" placeholder="https://…" spellcheck="false" autocomplete="off" aria-label="RPC address"></div>
@@ -64,6 +64,13 @@
     <p>A wallet put these objects on a page in a way nothing can be placed in front of. A page that calls one of them directly reaches the wallet without Warden. The same wallet's Wallet Standard connection, which most dapps use, is guarded.</p>
     <ul class="plain" id="doorList"></ul>
   </div>
+
+  <h2>Sentinel</h2>
+  <p>Sentinel is Warden's watching service. It runs on a Lamport server, watches the wallets you give it after you sign, and tells you in one sentence when something looks wrong. You set it up on the Sentinel page, not here: <a id="sentinelPage" target="_blank" rel="noopener noreferrer"></a></p>
+  <ul class="plain" id="sentinelWallets"></ul>
+  <label class="choice"><input type="checkbox" id="reportSigned"> <span>Tell Sentinel which signatures were mine</span></label>
+  <p>Sentinel sees only the chain, so it cannot tell a payment you made from one a thief made with your key. With this on, when a wallet you linked on the Sentinel page signs a transaction you let through, Warden sends Sentinel that wallet's address and the transaction's signature. Both are public on the chain once the transaction lands. Nothing else is sent: not the site, not the transaction, not your history. With this off, Warden sends Lamport nothing at all.</p>
+  <p class="note" id="reportNote" role="status"></p>
 
   <h2>What Warden remembers</h2>
   <p>For each wallet address, the addresses it has paid and how often. It learns one only when a request you let through comes back signed. It is kept in this browser and sent nowhere.</p>

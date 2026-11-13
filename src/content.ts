@@ -3,7 +3,9 @@
  * worker and draws the prompt. No engine and no history here; the page cannot run code here.
  */
 import { HANDSHAKE, HELLO, channelFor, newSecret, type DoneMessage, type DoorsMessage, type ReplyMessage, type RequestMessage } from "./channel.js";
+import { ARMING_ORIGIN } from "./defaults.js";
 import { prompt } from "./overlay.js";
+import { PAGE_ASKS, WARDEN_ANSWERS, readPageAsk, type PageAnswer } from "./sentinel-link.js";
 import type { JudgeReply, ToBackground, WireRequest, WireVerdict } from "./messages.js";
 
 const secret = newSecret();
@@ -57,7 +59,8 @@ window.addEventListener(channel.done, (e) => {
   const req = m && typeof m.id === "string" ? approved.get(m.id) : undefined;
   if (!req) return;
   approved.delete(m.id);
-  if (m.signed) void chrome.runtime.sendMessage({ type: "signed", req } satisfies ToBackground).catch(() => undefined);
+  const sigs = Array.isArray(m.sigs) ? m.sigs.filter((x) => typeof x === "string" && x.length <= 100).slice(0, 12) : undefined;
+  if (m.signed) void chrome.runtime.sendMessage({ type: "signed", req, ...(sigs?.length ? { sigs } : {}) } satisfies ToBackground).catch(() => undefined);
 });
 
 window.addEventListener(channel.doors, (e) => {
@@ -67,3 +70,15 @@ window.addEventListener(channel.doors, (e) => {
   const unguarded = m.unguarded.filter((x) => typeof x === "string").slice(0, 8);
   if (unguarded.length) void chrome.runtime.sendMessage({ type: "doors", unguarded } satisfies ToBackground).catch(() => undefined);
 });
+
+// The Sentinel page, and no other, may hand over the token a wallet reports with, and ask which wallets are
+// linked. Top frame only. The background worker checks the page's address again: this script only carries.
+if (location.origin === ARMING_ORIGIN && window.top === window) {
+  const answer = (a: PageAnswer) => window.postMessage({ [WARDEN_ANSWERS]: a }, ARMING_ORIGIN);
+  window.addEventListener("message", (e) => {
+    if (e.source !== window || e.origin !== ARMING_ORIGIN) return;
+    const ask = readPageAsk((e.data as Record<string, unknown> | null)?.[PAGE_ASKS]);
+    if (!ask) return;
+    chrome.runtime.sendMessage({ type: "sentinel", ask } satisfies ToBackground).then((a: PageAnswer | undefined) => answer(a ?? { ok: false }), () => answer({ ok: false }));
+  });
+}

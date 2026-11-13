@@ -28,8 +28,8 @@ import { fmtSol } from "../pincer1/daemon/src/tx/explain.js";
 
 /** lamport-sentinel on devnet. There is no mainnet program. */
 export const SENTINEL_PROGRAM = "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK";
-/** The one site that may set Sentinel up or change it. */
-export const ARMING_ORIGIN = "https://warden.lamportrobotics.com";
+import { ARMING_ORIGIN } from "./defaults.js";
+export { ARMING_ORIGIN };
 
 const SYSTEM = "11111111111111111111111111111111";
 const COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111";
