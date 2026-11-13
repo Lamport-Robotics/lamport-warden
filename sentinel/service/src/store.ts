@@ -3,12 +3,13 @@
  * last seen, and the alerts it raised. Nothing that would turn a breach into a map of someone's life: no
  * names, no balances beyond the alert that mentions one.
  *
- * `FileStore` is one JSON file, replaced whole on every save. It is enough for a first deployment with few
- * wallets; the spec's tables (profiles, channels, rescues) come with the service around this.
+ * `FileStore` is one JSON file, replaced whole on every save, with a copy set aside each day. It is enough
+ * for a first deployment with few wallets; the spec's tables (profiles, channels, rescues) come with the
+ * service around this.
  */
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { BaselineState } from "./baseline.js";
 import type { ChannelKind, Tier } from "./plans.js";
 import type { Level, SignalKind, TokenAccountState } from "./signals.js";
@@ -90,7 +91,7 @@ export interface AccountsData {
 }
 const noAccounts = (): AccountsData => ({ profiles: {}, owners: {}, channels: [], sessions: [] });
 
-interface Data { wallets: WatchedWallet[]; records: Record<string, WalletRecord>; events: StoredEvent[]; accounts: AccountsData }
+interface Data { wallets: WatchedWallet[]; records: Record<string, WalletRecord>; events: StoredEvent[]; accounts: AccountsData; said?: Record<string, number> }
 
 export class MemoryStore implements Store {
   protected data: Data = { wallets: [], records: {}, events: [], accounts: noAccounts() };
@@ -132,6 +133,8 @@ export class MemoryStore implements Store {
   }
   /** The service's tables, to read and change in place; `flush` writes them. */
   get accounts(): AccountsData { return this.data.accounts; }
+  /** When each thing was last said to whoever runs the service (ops.ts), so that a restart does not say it all again. */
+  get said(): Record<string, number> { return (this.data.said ??= {}); }
   flush(): void { this.persist(); }
   /** Tells the watcher that a signature was the owner's own (from the extension's opt-in). Kept 30 days. */
   reportOwnerSignature(wallet: string, signature: string, now: number): void {
@@ -143,18 +146,83 @@ export class MemoryStore implements Store {
   protected persist(): void { /* memory only */ }
 }
 
+/** How many daily copies are kept. What an owner had the service forget is gone from the last of them after this many days. */
+export const SNAPSHOT_DAYS = 7;
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Reads a data file, or throws when it is not one: cut short, not JSON, or not this shape. */
+function readData(path: string): Partial<Data> {
+  const stored: unknown = JSON.parse(readFileSync(path, "utf8"));
+  if (!isRecord(stored)) throw new Error("not a data file");
+  const { wallets, records, events, accounts } = stored;
+  if ((wallets !== undefined && !Array.isArray(wallets)) || (records !== undefined && !isRecord(records)) || (events !== undefined && !Array.isArray(events)) || (accounts !== undefined && !isRecord(accounts))) throw new Error("not a data file");
+  return stored as Partial<Data>;
+}
+
+/** Writes a file whole: to a new file, onto the disk, then into place. A crash leaves the old one or the new one, never half. */
+function writeWhole(file: string, text: string): void {
+  const tmp = `${file}.tmp`;
+  const fd = openSync(tmp, "w", 0o600);
+  try { writeSync(fd, text); fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(tmp, file);
+}
+
 export class FileStore extends MemoryStore {
+  /** The snapshot the service started from, when its data file was missing or could not be read. */
+  readonly restoredFrom: string | null = null;
+  /** Where a data file that could not be read was put. */
+  readonly setAside: string | null = null;
+
+  /**
+   * Opens the data file. A file that cannot be read is set aside, never overwritten, and the newest daily
+   * snapshot that can be read is used instead; the same when the file is gone and snapshots are there. With
+   * neither, it starts empty. With a file that cannot be read and no snapshot, it does not start: an empty
+   * service would have forgotten every owner, and whoever runs it has to decide.
+   */
   constructor(private file: string, wallets: WatchedWallet[] = []) {
     super(wallets);
+    let stored: Partial<Data> | null = null;
     if (existsSync(file)) {
-      const stored = JSON.parse(readFileSync(file, "utf8")) as Partial<Data>;
-      this.data = { wallets: wallets.length ? wallets : stored.wallets ?? [], records: stored.records ?? {}, events: stored.events ?? [], accounts: { ...noAccounts(), ...(stored.accounts ?? {}) } };
+      try { stored = readData(file); } catch {
+        this.setAside = `${file}.unreadable-${Date.now()}`;
+        renameSync(file, this.setAside);
+      }
     }
+    if (!stored) {
+      for (const snapshot of this.snapshots().reverse()) {
+        try { stored = readData(snapshot); this.restoredFrom = snapshot; break; } catch { /* the one before it */ }
+      }
+      if (!stored && this.setAside) throw new Error(`the data file could not be read and no snapshot can stand in for it. It was set aside as ${this.setAside}; nothing was overwritten.`);
+    }
+    if (stored) this.data = { wallets: wallets.length ? wallets : stored.wallets ?? [], records: stored.records ?? {}, events: stored.events ?? [], accounts: { ...noAccounts(), ...(stored.accounts ?? {}) }, ...(isRecord(stored.said) ? { said: stored.said as Record<string, number> } : {}) };
+    if (this.restoredFrom) this.persist();
   }
+
+  private get snapshotDir(): string { return join(dirname(this.file), "snapshots"); }
+
+  /** The daily snapshots there are, oldest first. */
+  snapshots(): string[] {
+    if (!existsSync(this.snapshotDir)) return [];
+    return readdirSync(this.snapshotDir).filter((n) => /^sentinel-\d{4}-\d{2}-\d{2}\.json$/.test(n)).sort().map((n) => join(this.snapshotDir, n));
+  }
+
+  /**
+   * Sets a copy of everything aside, once a day, and keeps the last few. The data file is one file on one
+   * disk; a snapshot is what a bad write, a bad deploy or a slip of the hand is recovered from. Returns the
+   * snapshot it wrote, or null when today's is already there.
+   */
+  snapshot(now: number): string | null {
+    const path = join(this.snapshotDir, `sentinel-${new Date(now * 1000).toISOString().slice(0, 10)}.json`);
+    if (existsSync(path)) return null;
+    mkdirSync(this.snapshotDir, { recursive: true, mode: 0o700 });
+    writeWhole(path, JSON.stringify(this.data));
+    for (const old of this.snapshots().slice(0, -SNAPSHOT_DAYS)) unlinkSync(old);
+    return path;
+  }
+
   protected override persist(): void {
     mkdirSync(dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.tmp`;
-    writeFileSync(tmp, JSON.stringify(this.data), { mode: 0o600 });
-    renameSync(tmp, this.file);
+    writeWhole(this.file, JSON.stringify(this.data));
   }
 }

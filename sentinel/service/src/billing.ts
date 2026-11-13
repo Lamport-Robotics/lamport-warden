@@ -237,6 +237,49 @@ export class Billing {
   }
 
   /**
+   * The daily look at Stripe's side of things. Webhooks are how news arrives, and a webhook can be missed
+   * (the service was down for longer than Stripe keeps trying, or the endpoint was changed). So once a day
+   * every paid subscription to this plan is read from Stripe and each profile is made to match: one that
+   * paid and was never lifted is lifted, one whose plan ended and was never told is put back. A subscription
+   * that is being paid and belongs to no profile here is returned, for whoever runs the service: somebody is
+   * being charged for nothing.
+   */
+  async reconcile(): Promise<{ healed: number; failed: number; orphans: { subscription: string; profile: string | null }[] }> {
+    let healed = 0, failed = 0;
+    const orphans: { subscription: string; profile: string | null }[] = [];
+    const seen = new Set<string>();
+    const before = (id: string) => { const p = this.accounts.profile(id); return p ? `${p.tier}/${p.billing?.subscription ?? ""}/${p.billing?.status ?? ""}/${p.billing?.price ?? ""}` : ""; };
+    const sync = (profile: string, subscription: any) => { const was = before(profile); this.apply(profile, subscription); if (before(profile) !== was) healed += 1; };
+    try {
+      for (const price of [this.cfg.priceFull, this.cfg.priceHolder]) {
+        let after: string | undefined;
+        for (let page = 0; page < 50; page++) {
+          const res = await this.stripe.call("GET", "/subscriptions", { price, status: "active", limit: "100", ...(after ? { starting_after: after } : {}) });
+          const data: any[] = Array.isArray(res?.data) ? res.data : [];
+          for (const s of data) {
+            if (typeof s?.id !== "string" || !this.ours(s)) continue;
+            seen.add(s.id);
+            const named = typeof s.metadata?.profile === "string" ? s.metadata.profile : null;
+            const profile = this.accounts.profileBySubscription(s.id)?.id ?? (named && this.accounts.profile(named) ? named : null);
+            if (profile) sync(profile, s); else orphans.push({ subscription: s.id, profile: named });
+          }
+          if (!res?.has_more || data.length === 0) break;
+          after = String(data[data.length - 1].id);
+        }
+      }
+    } catch {
+      // Stripe could not be asked: nothing is concluded from a list that was cut short
+      return { healed, failed: failed + 1, orphans: [] };
+    }
+    // a profile that believes it is paid, whose subscription is no longer among the active ones: ask about that one
+    for (const p of this.accounts.profiles()) {
+      if (!p.billing || !PAID.has(p.billing.status) || seen.has(p.billing.subscription)) continue;
+      try { sync(p.id, await this.stripe.call("GET", `/subscriptions/${p.billing.subscription}`)); } catch { failed += 1; }
+    }
+    return { healed, failed, orphans };
+  }
+
+  /**
    * The daily look at who holds the token. A subscription on the wrong price is moved to the right one from
    * its next bill on, with nothing charged or refunded for the days already paid.
    */

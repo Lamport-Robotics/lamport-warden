@@ -12,6 +12,8 @@
  *   SENTINEL_NTFY_HOSTS   ntfy hosts alerts may go to, comma-separated (default ntfy.sh)
  *   SENTINEL_TRUST_PROXY  "1" when a proxy this process trusts sets X-Forwarded-For
  *   SENTINEL_MAX_WALLETS  how many wallets it watches in all (default 100): each costs RPC calls every round
+ *   SENTINEL_OPS_CHANNEL  where whoever runs the service is told what no owner can act on (ops.ts): an ntfy
+ *                         topic on one of the hosts above, or a Discord or Slack webhook. Unset: only the log.
  *
  * The paid plan is there only when all four of these are set, and nothing is sold until checkout is opened:
  *   SENTINEL_STRIPE_SECRET_KEY, SENTINEL_STRIPE_WEBHOOK_SECRET
@@ -24,19 +26,20 @@
  *   SENTINEL_HOLDER_RPC_URL    a mainnet RPC for the holder check, when SENTINEL_RPC_URL is not mainnet
  */
 import { join } from "node:path";
-import { Accounts } from "./accounts.js";
+import { Accounts, cleanTarget } from "./accounts.js";
 import { Billing, Stripe, type BillingConfig } from "./billing.js";
 import { dataKeyFrom } from "./crypto.js";
 import { Blindness, RESUMED_SENTENCE, stoppedSentence } from "./blindness.js";
 import { ChannelNotifier } from "./notify.js";
-import { PLANS } from "./plans.js";
+import { Ops } from "./ops.js";
+import { PLANS, type ChannelKind } from "./plans.js";
 import { HttpRpc } from "./rpc.js";
 import { listen } from "./server.js";
 import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore } from "./store.js";
 import { Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; ntfyHosts: Set<string>; trustProxy: boolean; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: ChannelKind; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -78,9 +81,11 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const maxWallets = Number(env.SENTINEL_MAX_WALLETS ?? 100);
   if (!Number.isInteger(maxWallets) || maxWallets < 1) return { ok: false, why: "SENTINEL_MAX_WALLETS has to be a whole number above zero." };
   const ntfyHosts = new Set((env.SENTINEL_NTFY_HOSTS ?? "ntfy.sh").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean));
+  const opsChannel = env.SENTINEL_OPS_CHANNEL ? cleanTarget(env.SENTINEL_OPS_CHANNEL, ntfyHosts) : null;
+  if (env.SENTINEL_OPS_CHANNEL && !opsChannel) return { ok: false, why: "SENTINEL_OPS_CHANNEL has to be an ntfy topic on an allowed host, or a Discord or Slack webhook." };
   const billing = billingFrom(env, origin, rpcUrl);
   if (!billing.ok) return billing;
-  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", billing: billing.billing } };
+  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -125,17 +130,21 @@ export function pacer(tierOf: (wallet: string) => "watch" | "pro", seconds: { wa
 export function watchRound(o: {
   watcher: Pick<Watcher, "passAll">; store: MemoryStore; notifier: Notifier; pace: ReturnType<typeof pacer>; blindness: Blindness;
   state: { lastPassAt: number | null; blind: number }; log?: (line: string) => void;
+  /** Whoever runs the service hears when wallets go unread for long, and when they are read again. */
+  ops?: Pick<Ops, "say">;
 }): (now?: number) => Promise<void> {
   const blindNow = new Set<string>();
   const log = o.log ?? console.error;
   return async (now = Math.floor(Date.now() / 1000)) => {
     const { blind } = await o.watcher.passAll((w) => o.pace.pick(w, now));
     const failed = new Set(blind.map((b) => b.wallet));
+    let stopped = 0, resumed = 0;
     for (const w of o.pace.tried()) {
       const read = !failed.has(w);
       if (read) blindNow.delete(w); else blindNow.add(w);
       const news = o.blindness.note(w, read, now);
       if (!news) continue;
+      if (news === "stopped") stopped += 1; else resumed += 1;
       const sentence = news === "stopped" ? stoppedSentence(o.blindness.afterSeconds) : RESUMED_SENTENCE;
       o.store.addEvent({ wallet: w, signature: "", slot: 0, at: now, level: "alert", signals: [news === "stopped" ? "watch_stopped" : "watch_resumed"], sentence, rescueWorthy: false });
       await o.notifier.notify(w, "alert", sentence).catch(() => undefined);
@@ -148,8 +157,15 @@ export function watchRound(o: {
     o.state.blind = blindNow.size;
     // which wallet, and why, goes to the log and nowhere else
     for (const b of blind) log(`sentinel: could not read ${b.wallet.slice(0, 4)}..${b.wallet.slice(-4)}: ${b.why}`);
+    const minutes = Math.round(o.blindness.afterSeconds / 60);
+    if (stopped) void o.ops?.say(`${stopped} of ${watched.size} wallets ${stopped === 1 ? "has" : "have"} gone unread for ${minutes} minutes (${String(blind[0]?.why ?? "no reason given").slice(0, 120)}). Their owners were told.`, "unread", 3600);
+    if (resumed && blindNow.size === 0) void o.ops?.say("Every wallet is being read again.", "read-again", 3600);
   };
 }
+
+/** How full the service is, in words, once it is nearly full; null before that. */
+export const nearlyFull = (watching: number, max: number): string | null =>
+  watching >= Math.ceil(max * 0.9) ? `Sentinel is watching ${watching} of the ${max} wallets it has room for. New owners are turned away when it is full.` : null;
 
 export async function run(env: Record<string, string | undefined>): Promise<() => Promise<void>> {
   const read = configFrom(env);
@@ -158,21 +174,46 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const store = new FileStore(join(cfg.dataDir, "sentinel.json"));
   const accounts = new Accounts(store, cfg.dataKey, { ntfyHosts: cfg.ntfyHosts, maxWallets: cfg.maxWallets });
   const notifier = new ChannelNotifier(accounts);
+  const ops = new Ops(cfg.opsChannel, store.said, { saved: () => store.flush() });
   const watcher = new Watcher(new HttpRpc(cfg.rpcUrl), store, notifier);
   const state = { lastPassAt: null as number | null, blind: 0 };
 
+  if (store.restoredFrom) void ops.say(`The data file was ${store.setAside ? "unreadable" : "missing"}, so Sentinel started from the snapshot ${store.restoredFrom.split("/").pop()}. What changed after that snapshot is lost${store.setAside ? "; the unreadable file was set aside, not deleted" : ""}.`, "restored", 0);
+
   // each wallet at its plan's pace: the paid plan's more often
   const pace = pacer((w) => accounts.profile(accounts.profileOf(w) ?? "")?.tier ?? "watch", { watch: cfg.pollSeconds, pro: cfg.proPollSeconds });
-  const stopRounds = startRounds(watchRound({ watcher, store, notifier, pace, blindness: new Blindness(), state }), Math.min(cfg.pollSeconds, cfg.proPollSeconds));
+  const stopRounds = startRounds(watchRound({ watcher, store, notifier, pace, blindness: new Blindness(), state, ops }), Math.min(cfg.pollSeconds, cfg.proPollSeconds));
+
+  // once an hour: today's snapshot if there is none yet, and a word when the house is nearly full
+  const stopHourly = startRounds(async () => {
+    const now = Math.floor(Date.now() / 1000);
+    try { store.snapshot(now); } catch (e) { void ops.say(`Today's snapshot of the data file could not be written (${String((e as Error).message ?? e).slice(0, 120)}).`, "snapshot-failed"); }
+    const full = nearlyFull(store.wallets().length, cfg.maxWallets);
+    if (full) void ops.say(full, "nearly-full", 86_400);
+  }, 3600);
 
   const billing = cfg.billing ? new Billing(cfg.billing, accounts, new HttpRpc(cfg.billing.holderRpcUrl), new Stripe(cfg.billing.secretKey), { notice: (profile, sentence) => notifier.notice(profile, sentence) }) : null;
-  // once a day: whoever stopped holding the token moves to the full price from their next bill, and the other way round
-  const stopReprice = billing ? startRounds(async () => {
+  // Once a day. First, Stripe's side: every profile is made to match what Stripe says, in case a webhook was
+  // missed, and a subscription nobody here has is reported. Then whoever stopped holding the token moves to
+  // the full price from their next bill, and the other way round.
+  const stopDaily = billing ? startRounds(async () => {
+    const { healed, failed: unread, orphans } = await billing.reconcile();
+    if (healed) console.error(`sentinel: ${healed} profile(s) brought in line with Stripe`);
+    if (unread) void ops.say("Stripe could not be read for the daily check of subscriptions. It is tried again tomorrow.", "stripe-unread", 86_400);
+    for (const o of orphans) void ops.say(`A subscription to Sentinel is being paid and belongs to no profile here: ${o.subscription}. Its owner is paying for nothing: look it up in Stripe, and cancel and refund it or restore the profile.`, `orphan:${o.subscription}`, 86_400);
     const { moved, failed } = await billing.reprice();
     if (moved || failed) console.error(`sentinel: holder prices checked, ${moved} moved, ${failed} could not be checked`);
   }, 86_400) : () => undefined;
 
-  const server = await listen({ accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => state, testChannel: (profile, id) => notifier.test(profile, id), notice: (profile, sentence, opts) => notifier.notice(profile, sentence, opts), ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}) }, { port: cfg.port, trustProxy: cfg.trustProxy });
-  console.error(`sentinel: watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : "set up, checkout closed") : "not set up"}`);
-  return async () => { stopRounds(); stopReprice(); await new Promise<void>((r) => server.close(() => r())); };
+  const server = await listen({
+    accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => state,
+    testChannel: (profile, id) => notifier.test(profile, id),
+    notice: (profile, sentence, opts) => notifier.notice(profile, sentence, opts),
+    webhookFailed: (why) => { void ops.say(`A webhook from Stripe could not be applied (${why.slice(0, 120)}). Stripe sends it again; if this repeats, a plan may not be starting or ending when it should.`, "webhook-failed", 3600); },
+    ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}),
+  }, { port: cfg.port, trustProxy: cfg.trustProxy });
+  const started = `watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : "set up, checkout closed") : "not set up"}`;
+  // said at most every ten minutes, so a service that keeps falling over does not fill the channel
+  void ops.say(`Sentinel started: ${started}.`, "started", 600);
+  return async () => { stopRounds(); stopHourly(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); };
 }

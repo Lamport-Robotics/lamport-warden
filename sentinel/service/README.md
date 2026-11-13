@@ -73,7 +73,8 @@ can sign with one of them.
   another site is refused (and Warden, in the browser, blocks a page that asks for one).
 - A wallet is added to a profile only on that wallet's own signature, and belongs to one profile.
 - Removing a wallet forgets its baseline, its token accounts and its alerts. Removing the last one removes the
-  profile, its channels and its sessions.
+  profile, its channels and its sessions. The daily snapshots (below) still hold them for up to seven days,
+  and then they are gone from those too.
 - Watch, the free tier, watches three wallets per profile.
 
 ## What an owner is told about the profile itself
@@ -134,6 +135,42 @@ raised, which is what the chain already says. They do not get in:
 - where alerts go is sealed with AES-256-GCM under `SENTINEL_DATA_KEY`, which is not in the file. The page is
   shown only the host and the last four characters of a topic.
 
+## Keeping the data
+
+The data file is one file on one disk, and with a paid plan it is also the only record of which profile a
+subscription belongs to. So:
+
+- every write goes to a new file, onto the disk (`fsync`), then into place: a crash leaves the old file or
+  the new one, never half of one;
+- once a day a copy is set aside in `snapshots/` beside it, mode 0600, and the last seven are kept;
+- a data file that cannot be read at start (cut short, not JSON, not this shape) is set aside as
+  `sentinel.json.unreadable-<time>`, never overwritten, and the newest snapshot that can be read is used
+  instead. The same when the file is gone and snapshots are there. Whoever runs the service is told;
+- with a file that cannot be read and no snapshot, the service does not start. An empty service would have
+  forgotten every owner, and that is not a decision for a program.
+
+The snapshots are on the same disk. They are for a bad write, a bad deploy or a slip of the hand, not for a
+lost server: a copy somewhere else is still to be set up.
+
+## A line to whoever runs it
+
+`SENTINEL_OPS_CHANNEL` is one channel (an ntfy topic, or a Discord or Slack webhook) for what no owner can
+act on (`src/ops.ts`). Without it the same lines are only in the log.
+
+| Said | How often at most |
+|---|---|
+| The service started, with how many wallets and the state of the paid plan | every ten minutes, so a service that keeps falling over does not fill the channel |
+| Wallets have gone unread for fifteen minutes (how many, and what the RPC answered), and when all are read again | hourly |
+| It started from a snapshot, because the data file was missing or unreadable | every time |
+| Today's snapshot could not be written | every six hours |
+| It is watching nine tenths of the wallets it has room for | daily |
+| A webhook Stripe signed could not be applied | hourly |
+| A subscription is being paid and belongs to no profile here | daily, per subscription |
+| Stripe could not be read for the daily check | daily |
+
+No line names a wallet in full, an owner or a Stripe customer. When each was last said is kept in the data
+file, so a restart does not say it all again.
+
 ## The API
 
 Everything is JSON under `/v1`. The Sentinel page sends its session as a bearer header, not a cookie, so no
@@ -187,6 +224,11 @@ of the customer and the subscription.
   a page left open in another tab cannot be paid as well and start a second subscription. If the earlier page
   was just paid and Stripe's word has not arrived, no new page is opened. Someone who had the plan before
   comes back as the same Stripe customer.
+- **Once a day every profile is made to match Stripe**, in case a webhook was missed: the active
+  subscriptions to the plan's two prices are listed, a profile that paid and was never lifted is lifted, and
+  one whose plan ended without a word arriving is put back. A subscription that is being paid and belongs to
+  no profile here is reported to whoever runs the service, and nothing is done to it: cancelling and
+  refunding is a person's decision. A list that could not be read to its end concludes nothing.
 - **The owner hears what the plan does** through the profile's channels: that it started, that a payment
   failed, that it ended (and how many wallets are no longer watched), and, before the bill that carries it,
   that the price changes because the wallets now hold, or no longer hold, enough $LAMPORT.
@@ -237,7 +279,8 @@ SENTINEL_RPC_URL=https://… SENTINEL_DATA_KEY=$(openssl rand -base64 32) pnpm s
 
 `src/main.ts` lists the settings. It listens on 127.0.0.1 and expects a web server in front for TLS. It
 refuses to start without an RPC and a data key. Keep the data key: without it the stored channels cannot be
-read and owners have to add them again.
+read and owners have to add them again. To start over from nothing, remove the `snapshots` folder as well as
+the data file, or it starts from the newest snapshot.
 
 `pnpm test:service` builds it and starts the built file once, with a probe beside it: sign-in, a first read,
 an RPC failure reported as blind, removal. It is there because the first deployment crashed within seconds of

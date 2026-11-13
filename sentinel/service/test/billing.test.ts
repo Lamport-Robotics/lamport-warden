@@ -41,6 +41,7 @@ class FakeStripe {
   sessions = new Map<string, { status: "open" | "expired" | "complete" }>();
   /** Customers Stripe no longer has. */
   gone = new Set<string>();
+  pageSize = 100;
   down = false;
   private n = 0;
   fetch: StripeFetch = async (url, init) => {
@@ -65,6 +66,13 @@ class FakeStripe {
       return reply(200, { id: cs[1], status: session.status });
     }
     if (init.method === "POST" && path === "/billing_portal/sessions") return reply(200, { url: "https://billing.stripe.com/p/session/x" });
+    if (init.method === "GET" && path === "/subscriptions") {
+      // Stripe's list: by price and status, a page at a time, each page starting after the last id of the one before
+      const all = [...this.subscriptions.values()].filter((x) => x.status === params.status && x.items.data.some((i: any) => i.price.id === params.price));
+      const from = params.starting_after ? all.findIndex((x) => x.id === params.starting_after) + 1 : 0;
+      const size = Math.min(Number(params.limit ?? 10), this.pageSize);
+      return reply(200, { data: all.slice(from, from + size), has_more: from + size < all.length });
+    }
     const sub = /^\/subscriptions\/(sub_\w+)$/.exec(path);
     if (sub) {
       const s = this.subscriptions.get(sub[1]!);
@@ -350,6 +358,66 @@ describe("what the owner is told about the plan", () => {
     await billing.onEvent(stripe.changed("sub_1", "canceled"));
     expect(posts).toEqual(["discord.com"]);
     expect(accounts.channelsOfProfile(profile)).toEqual([]); // and from now on it is not used
+  });
+});
+
+describe("the daily look at Stripe's side", () => {
+  it("lifts a profile that paid and was never told so, and says so to its owner", async () => {
+    const { accounts, stripe, billing, said, profile } = setup();
+    stripe.start("sub_1", profile, "price_holder"); // paid at Stripe; the webhook never arrived
+    expect(accounts.profile(profile)!.tier).toBe("watch");
+    expect(await billing.reconcile()).toEqual({ healed: 1, failed: 0, orphans: [] });
+    expect(accounts.profile(profile)).toMatchObject({ tier: "pro", billing: { subscription: "sub_1", price: "holder", status: "active" } });
+    expect(said.map((x) => x.sentence)).toEqual([planStartedNotice(10, 20)]);
+    // in line already: nothing is changed and nothing more is said
+    expect(await billing.reconcile()).toEqual({ healed: 0, failed: 0, orphans: [] });
+    expect(said).toHaveLength(1);
+  });
+
+  it("puts back a profile whose plan ended at Stripe without a word arriving", async () => {
+    const { accounts, stripe, billing, said, profile } = setup();
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    stripe.subscriptions.get("sub_1").status = "canceled"; // cancelled at Stripe; the webhook never arrived
+    said.length = 0;
+    expect(await billing.reconcile()).toEqual({ healed: 1, failed: 0, orphans: [] });
+    expect(accounts.profile(profile)).toMatchObject({ tier: "watch", billing: { status: "canceled" } });
+    expect(said.map((x) => x.sentence)).toEqual([planEndedNotice(3, 0)]);
+    // a card that is failing is learned of the same way, and the plan stays on
+    const other = setup();
+    await other.billing.onEvent(other.stripe.start("sub_2", other.profile, "price_full"));
+    other.stripe.subscriptions.get("sub_2").status = "past_due";
+    expect(await other.billing.reconcile()).toMatchObject({ healed: 1, failed: 0 });
+    expect(other.accounts.profile(other.profile)).toMatchObject({ tier: "pro", billing: { status: "past_due" } });
+  });
+
+  it("reports a subscription that is being paid and belongs to no profile here, and changes nothing for it", async () => {
+    const { accounts, stripe, billing, profile } = setup();
+    stripe.start("sub_lost", "a-profile-that-is-gone", "price_full");
+    stripe.start("sub_nameless", "", "price_holder");
+    stripe.subscriptions.get("sub_nameless").metadata = {};
+    stripe.start("sub_other_product", profile, "price_other"); // something else the account sells: not this plan's business
+    expect(await billing.reconcile()).toEqual({ healed: 0, failed: 0, orphans: [{ subscription: "sub_lost", profile: "a-profile-that-is-gone" }, { subscription: "sub_nameless", profile: null }] });
+    expect(accounts.profile(profile)!.tier).toBe("watch");
+    // a name every object answers to is not a profile here either
+    stripe.start("sub_proto", "__proto__", "price_full");
+    expect((await billing.reconcile()).orphans.map((o) => o.subscription)).toContain("sub_proto");
+    expect(({} as any).tier).toBeUndefined();
+  });
+
+  it("reads every page of the list, and concludes nothing from a list it could not finish", async () => {
+    const { accounts, stripe, billing, profile } = setup();
+    stripe.pageSize = 2;
+    for (let i = 0; i < 5; i++) stripe.start(`sub_x${i}`, `gone-${i}`, "price_full");
+    stripe.start("sub_mine", profile, "price_full"); // the last one on the last page
+    const result = await billing.reconcile();
+    expect(result.orphans).toHaveLength(5);
+    expect(result.healed).toBe(1);
+    expect(accounts.profile(profile)!.tier).toBe("pro");
+    expect(stripe.calls.filter((c) => c.method === "GET" && c.path === "/subscriptions" && c.params.price === "price_full")).toHaveLength(3);
+
+    stripe.down = true;
+    expect(await billing.reconcile()).toEqual({ healed: 0, failed: 1, orphans: [] });
+    expect(accounts.profile(profile)!.tier).toBe("pro"); // not being able to ask is not a cancellation
   });
 });
 

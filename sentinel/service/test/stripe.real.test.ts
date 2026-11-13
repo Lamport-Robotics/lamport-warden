@@ -57,6 +57,11 @@ describe.skipIf(!usable)("the paid plan against Stripe in test mode", () => {
     try {
       const sub = await call("POST", "/subscriptions", [["customer", customer.id], ["items[0][price]", made.priceHolder], ["metadata[profile]", profile]]);
       expect(sub.status).toBe("active");
+      // no webhook has arrived: the daily look at Stripe's own list finds the subscription and lifts the profile
+      const found = await billing.reconcile();
+      expect(found).toMatchObject({ healed: 1, failed: 0 });
+      expect(found.orphans.map((o: { subscription: string }) => o.subscription)).not.toContain(sub.id);
+      expect(accounts.profile(profile)!.tier).toBe("pro");
       await billing.onEvent({ type: "customer.subscription.created", data: { object: { id: sub.id } } });
       expect(accounts.profile(profile)).toMatchObject({ tier: "pro", billing: { customer: customer.id, subscription: sub.id, price: "holder", status: "active" } });
       expect(await billing.quote(profile)).toMatchObject({ subscribed: true, price: "holder", cents: 1000 });
@@ -77,6 +82,9 @@ describe.skipIf(!usable)("the paid plan against Stripe in test mode", () => {
       await fetch(`https://api.stripe.com/v1/subscriptions/${sub.id}`, { method: "DELETE", headers: { authorization: `Bearer ${key}` } });
       await billing.onEvent({ type: "customer.subscription.deleted", data: { object: { id: sub.id } } });
       expect(accounts.profile(profile)).toMatchObject({ tier: "watch", billing: { status: "canceled" } });
+      // and a subscription Stripe has ended is not found again
+      expect(await billing.reconcile()).toMatchObject({ healed: 0, failed: 0 });
+      expect(accounts.profile(profile)!.tier).toBe("watch");
 
       // coming back: the new checkout page is for the same Stripe customer
       expect(await billing.checkout(profile)).toMatchObject({ ok: true });
