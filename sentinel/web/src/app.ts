@@ -15,7 +15,7 @@ const API = "/sentinel/api/v1";
 const SESSION = "sentinel.session";
 
 interface WalletRow { address: string; armed: boolean; reporting: boolean; paused: boolean; lastReadAt: number | null }
-interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack"; hint: string; active: boolean; lastDeliveredAt: number | null; failing: { since: number; why: string } | null }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number; push?: boolean } }
+interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack" | "telegram"; hint: string; active: boolean; lastDeliveredAt: number | null; failing: { since: number; why: string } | null }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number; push?: boolean } }
 interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; signals: string[]; sentence: string; answer: string | null; undelivered?: boolean }
 type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
@@ -170,7 +170,7 @@ function render(): void {
   const add = $("addChoices");
   if (mine.wallets.length < mine.limits.wallets) choices(add, "link"); else add.replaceChildren();
 
-  const kindName = { ntfy: "ntfy topic", discord: "Discord channel", slack: "Slack channel" } as const;
+  const kindName = { ntfy: "ntfy topic", discord: "Discord channel", slack: "Slack channel", telegram: "Telegram chat" } as const;
   $("channels").replaceChildren(...(mine.channels.length ? mine.channels.map((c) => {
     const acts: HTMLElement[] = [];
     if (c.active) {
@@ -188,8 +188,14 @@ function render(): void {
     if (c.active && c.failing) li.classList.add("failing");
     return li;
   }) : [row("No channel yet", "Sentinel is watching, but it has nowhere to tell you. Alerts are still listed on this page.")]));
-  $("channelLimit").textContent = mine.limits.kinds.length > 1 ? `Up to ${mine.limits.channels} channels on this plan: ntfy topics, Discord webhooks and Slack webhooks.` : "One ntfy channel on this plan. Pro adds Discord and Slack, and up to five channels.";
-  $<HTMLInputElement>("ntfyTarget").placeholder = mine.limits.kinds.length > 1 ? "An ntfy topic, or a Discord or Slack webhook address" : "https://ntfy.sh/a-long-topic-name";
+  // which kinds this plan takes, and whether the service has a Telegram bot to send through, come from the service
+  const webhooks = mine.limits.kinds.includes("discord"), telegram = mine.limits.kinds.includes("telegram");
+  $("channelLimit").textContent = webhooks
+    ? `Up to ${mine.limits.channels} channels on this plan: ntfy topics, ${telegram ? "Telegram chats, " : ""}Discord webhooks and Slack webhooks.`
+    : telegram ? "One channel on this plan: an ntfy topic or a Telegram chat. Pro adds Discord and Slack, and up to five channels." : "One ntfy channel on this plan. Pro adds Discord and Slack, and up to five channels.";
+  $<HTMLInputElement>("ntfyTarget").placeholder = webhooks ? "An ntfy topic, or a Discord or Slack webhook address" : "https://ntfy.sh/a-long-topic-name";
+  $("addTelegram").hidden = !telegram;
+  $("telegramHelp").hidden = !telegram;
 
   const shown = alerts.slice(0, 50);
   $("events").replaceChildren(...(shown.length ? shown.map((a) => {
@@ -305,6 +311,27 @@ $("makeTopic").addEventListener("click", () => {
 });
 $("addChannel").addEventListener("click", async () => {
   if (await done(call("POST", "/channels", { target: $<HTMLInputElement>("ntfyTarget").value }), "Added. Alerts will be sent there.")) { $<HTMLInputElement>("ntfyTarget").value = ""; await refresh(); }
+});
+
+// A Telegram chat has no address to paste. The service hands out a link to its bot with a one-time code in it;
+// the chat that presses Start there is the one alerts go to, and this page shows it once the bot has heard.
+$("addTelegram").addEventListener("click", async () => {
+  const r = await call("POST", "/channels/telegram");
+  const url = typeof r.body?.url === "string" && r.body.url.startsWith("https://t.me/") ? r.body.url as string : null;
+  if (r.status !== 201 || !url) { await done(Promise.resolve(r)); return; }
+  const seconds = Number(r.body.seconds) || 900;
+  const box = $("telegramLink"), link = el("a", "Open Telegram and press Start") as HTMLAnchorElement;
+  link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer";
+  box.replaceChildren(link, el("span", ` The link works once, for ${Math.round(seconds / 60)} minutes. This page shows the chat when it is connected.`));
+  box.hidden = false;
+  const before = me?.channels.length ?? 0, until = Date.now() + seconds * 1000;
+  const look = async (): Promise<void> => {
+    if (box.hidden) return;
+    await refresh();
+    if ((me?.channels.length ?? 0) > before) { box.hidden = true; say("Connected. Alerts will be sent to that chat."); return; }
+    if (Date.now() < until) setTimeout(() => void look(), 4000); else box.hidden = true;
+  };
+  setTimeout(() => void look(), 4000);
 });
 
 registry.on("register", () => { if (!me || me.wallets.length < me.limits.wallets) render(); });

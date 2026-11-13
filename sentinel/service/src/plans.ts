@@ -5,7 +5,7 @@
  * Nothing here but data: the page and the extension bundle this file.
  */
 export type Tier = "watch" | "pro";
-export type ChannelKind = "ntfy" | "discord" | "slack";
+export type ChannelKind = "ntfy" | "discord" | "slack" | "telegram";
 
 export interface Plan {
   name: string;
@@ -21,8 +21,9 @@ export interface Plan {
 }
 
 export const PLANS: Record<Tier, Plan> = {
-  watch: { name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy"], pollSeconds: 60, push: false },
-  pro: { name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack"], pollSeconds: 20, push: true },
+  // "telegram" is in both, and is offered only where the service has a Telegram bot to send through (telegram.ts)
+  watch: { name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy", "telegram"], pollSeconds: 60, push: false },
+  pro: { name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack", "telegram"], pollSeconds: 20, push: true },
 };
 
 /** The monthly prices, in cents, as the page shows them when the service has not said otherwise. */

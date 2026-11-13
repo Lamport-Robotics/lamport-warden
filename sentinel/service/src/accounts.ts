@@ -11,6 +11,7 @@
 import { randomBytes } from "node:crypto";
 import { hashToken, randomToken, sameHash, seal, unseal } from "./crypto.js";
 import { PLANS, type ChannelKind, type Tier } from "./plans.js";
+import { chatOf, chatTarget } from "./telegram.js";
 import type { Channel, MemoryStore, Profile, StoredEvent, WalletOwner } from "./store.js";
 
 export const SESSION_SECONDS = 7 * 86_400;
@@ -35,7 +36,7 @@ const DISCORD = /^https:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\/\d{
 const SLACK = /^https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]{4,20}\/B[A-Z0-9]{4,20}\/[A-Za-z0-9]{10,60}$/;
 
 /** Reads an address as one of the kinds of channel, or as none. */
-export function cleanTarget(input: unknown, ntfyHosts: ReadonlySet<string>): { kind: ChannelKind; url: string } | null {
+export function cleanTarget(input: unknown, ntfyHosts: ReadonlySet<string>): { kind: Exclude<ChannelKind, "telegram">; url: string } | null {
   if (typeof input !== "string" || input.length > 300) return null;
   const s = input.trim();
   if (DISCORD.test(s)) return { kind: "discord", url: s.replace("discordapp.com", "discord.com") };
@@ -44,7 +45,16 @@ export function cleanTarget(input: unknown, ntfyHosts: ReadonlySet<string>): { k
   return ntfy ? { kind: "ntfy", url: ntfy } : null;
 }
 
-const hintOf = (kind: ChannelKind, url: string): string => (kind === "ntfy" ? `${new URL(url).host}/…${url.slice(-4)}` : `${kind === "discord" ? "Discord" : "Slack"} webhook …${url.slice(-4)}`);
+/**
+ * Reads an address out of the data file. The same as one that was typed, and besides those a Telegram chat,
+ * which is never typed: it gets here only by the chat itself sending the bot a code made for the profile.
+ */
+function cleanStored(url: string, ntfyHosts: ReadonlySet<string>): { kind: ChannelKind; url: string } | null {
+  return chatOf(url) !== null ? { kind: "telegram", url } : cleanTarget(url, ntfyHosts);
+}
+
+const hintOf = (kind: ChannelKind, url: string): string =>
+  kind === "ntfy" ? `${new URL(url).host}/…${url.slice(-4)}` : kind === "telegram" ? `Telegram chat …${url.slice(-4)}` : `${kind === "discord" ? "Discord" : "Slack"} webhook …${url.slice(-4)}`;
 
 /**
  * How many reads of a wallet the RPC will take in a minute, what a wallet on each plan costs of them (a
@@ -267,7 +277,7 @@ export class Accounts {
     if (!c) return refuse(404, "there is no such channel.");
     if (!this.active(profile).some((x) => x.id === id)) return refuse(409, "that channel is not in use on this plan, so nothing is sent to it.");
     const url = unseal(this.dataKey, c.target);
-    const clean = url === null ? null : cleanTarget(url, this.ntfyHosts);
+    const clean = url === null ? null : cleanStored(url, this.ntfyHosts);
     return clean && clean.kind === c.kind && clean.url === url ? { ok: true, id: c.id, kind: clean.kind, url: clean.url } : refuse(409, "that channel's address can no longer be read. Remove it and add it again.");
   }
 
@@ -303,6 +313,42 @@ export class Accounts {
     return { ok: true, channel: { id: channel.id, kind: channel.kind, hint: channel.hint } };
   }
 
+  /** Whether the profile could take a Telegram chat as a channel now. Asked before its owner is sent to Telegram for one. */
+  roomForTelegram(profile: string): { ok: true } | Refusal {
+    const p = this.profile(profile);
+    if (!p) return refuse(401, "sign in again.");
+    const plan = PLANS[p.tier];
+    if (!plan.kinds.includes("telegram")) return refuse(403, "this plan does not send alerts to Telegram.");
+    if (this.channelsOf(profile).length >= plan.channels) return refuse(403, plan.channels === 1 ? "this plan has one alert channel. Remove it to use another, or move to Pro for five." : `this plan has ${plan.channels} alert channels at most.`);
+    return { ok: true };
+  }
+
+  /**
+   * Makes a Telegram chat one of the profile's channels. Called only when that chat has sent the bot a code
+   * made for this profile (telegram.ts): there is no way to name a chat from the page. A chat that is already
+   * one of the profile's channels stays the one it is.
+   */
+  addTelegram(profile: string, chat: string, now: number): { ok: true; channel: { id: string; kind: ChannelKind; hint: string }; already: boolean } | Refusal {
+    const target = chatTarget(chat);
+    if (chatOf(target) === null) return refuse(400, "that is not a chat.");
+    const have = this.channelsOf(profile).find((c) => c.kind === "telegram" && unseal(this.dataKey, c.target) === target);
+    if (have) return { ok: true, channel: { id: have.id, kind: have.kind, hint: have.hint }, already: true };
+    const room = this.roomForTelegram(profile);
+    if (!room.ok) return room;
+    const channel: Channel = { id: randomBytes(6).toString("base64url"), profile, kind: "telegram", target: seal(this.dataKey, target), hint: hintOf("telegram", target), addedAt: now };
+    this.data.channels.push(channel);
+    this.store.flush();
+    return { ok: true, channel: { id: channel.id, kind: channel.kind, hint: channel.hint }, already: false };
+  }
+
+  /** The channels, of any profile, that are this Telegram chat: what "/stop" in the chat ends. */
+  telegramChannels(chat: string): { profile: string; id: string; hint: string; active: boolean }[] {
+    const target = chatTarget(chat);
+    return this.data.channels
+      .filter((c) => c.kind === "telegram" && unseal(this.dataKey, c.target) === target)
+      .map((c) => ({ profile: c.profile, id: c.id, hint: c.hint, active: this.active(c.profile).some((x) => x.id === c.id) }));
+  }
+
   removeChannel(profile: string, id: string): boolean {
     const before = this.data.channels.length;
     this.data.channels = this.data.channels.filter((c) => !(c.profile === profile && c.id === id));
@@ -323,7 +369,7 @@ export class Accounts {
   channelsOfProfile(profile: string): { id: string; kind: ChannelKind; url: string; hint: string }[] {
     return this.active(profile).flatMap((c) => {
       const url = unseal(this.dataKey, c.target);
-      const clean = url === null ? null : cleanTarget(url, this.ntfyHosts);
+      const clean = url === null ? null : cleanStored(url, this.ntfyHosts);
       return clean && clean.kind === c.kind && clean.url === url ? [{ id: c.id, ...clean, hint: c.hint }] : [];
     });
   }

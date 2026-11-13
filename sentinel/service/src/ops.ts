@@ -12,7 +12,7 @@ import { messageFor, type Post } from "./notify.js";
 
 export class Ops {
   constructor(
-    private target: { kind: ChannelKind; url: string } | null,
+    private target: { kind: Exclude<ChannelKind, "telegram">; url: string } | null,
     /** When each thing was last said. The store's own record, so a restart does not say it all again. */
     private said: Record<string, number>,
     private opts: { post?: Post; now?: () => number; log?: (line: string) => void; saved?: () => void; timeoutMs?: number } = {},

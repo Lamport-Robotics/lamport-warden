@@ -55,6 +55,15 @@ describe("the privacy policy, about the service", () => {
     expect(mdSentinel).toContain("held in memory for up to a day");
   });
 
+  it("is right about Telegram: the chat's number is what is kept, and it is kept sealed", () => {
+    expect(mdSentinel).toContain("sentinel keeps the chat's number, encrypted like any channel's address, and nothing else about the account");
+    // of a message to the bot, the chat's number and the text are read, and nothing else is taken
+    const bot = read("sentinel", "service", "src", "telegram.ts");
+    expect(bot).toContain("out.push({ chat: String(m.chat.id), text: m.text.slice(0, 200) });");
+    expect(bot).not.toMatch(/first_name|last_name|\bm\.from\b|chat\??\.(title|username)/);
+    expect(read("sentinel", "service", "src", "accounts.ts")).toContain('target: seal(this.dataKey, target), hint: hintOf("telegram", target)');
+  });
+
   it("is right about cookies, analytics and what the practice page sends", () => {
     const page = read("sentinel", "web", "src", "app.ts");
     expect(page).not.toMatch(/document\.cookie|localStorage/);

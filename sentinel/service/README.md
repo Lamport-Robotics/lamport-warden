@@ -15,6 +15,7 @@ and answer them. It holds no signing key and moves nothing. There is no rescuer 
 | `src/signin.ts` | Sign In With Solana, the service's side: the text a wallet signs, the one-time number in it, and the checks that make a signature count. |
 | `src/accounts.ts` | Profiles, their wallets, their alert channels, sessions, and the token an owner's browser reports with. |
 | `src/notify.ts` | Sends an alert to the owner's channels. |
+| `src/telegram.ts` | Telegram as a channel: the bot's three calls, the one-time codes that tie a chat to a profile, and what the bot answers. |
 | `src/server.ts` | The HTTP API. |
 | `src/main.ts`, `src/cli.ts` | The process: the watcher on a timer and the API beside it. |
 | `src/billing.ts` | The paid plan: a monthly Stripe subscription at one of two prices, the webhook that moves a profile between tiers, and the daily look at who holds the token. |
@@ -288,6 +289,37 @@ can sign with one of them.
   profile, its channels and its sessions. The daily snapshots (below) still hold them for up to seven days,
   and then they are gone from those too.
 - Watch, the free tier, watches three wallets per profile.
+
+## Telegram
+
+An owner's other channels are addresses they paste in. A Telegram chat has no address: a bot can only write
+to a chat that wrote to it first. So it goes the other way round.
+
+- The page asks for a link (`POST /v1/channels/telegram`). The service makes a one-time code for the profile
+  (random, kept as a hash, good for fifteen minutes, three at most for a profile) and answers with
+  `https://t.me/<the bot>?start=<code>`.
+- The owner opens it and presses Start. Telegram sends the bot `/start <code>` from their chat. The chat
+  that sent it becomes a channel of that profile, the profile's channels are told as for any channel added,
+  and the bot says so in the chat.
+- There is no other way in. A chat typed into the address field is refused, so nobody can point the bot at
+  a chat that is not theirs.
+- `/stop` in the chat ends it, after the profile's channels are told. The page removes it like any channel.
+- The chat's number is sealed in the data file like any channel's address. Telegram sends the bot the
+  sender's name with each message; the service reads the chat's number and the text and keeps nothing else.
+
+The bot reads its messages by asking for them (a long poll), so nothing has to be opened to the internet
+for Telegram to reach. It answers a code, `/stop`, and anything else with one line saying what it is for; a
+chat gets five answers a minute. Like every message Sentinel sends, what it sends has no link in it, and is
+written so that Telegram makes nothing in it tappable (an address, a mention, a command, a cashtag quoted
+from the chain).
+
+It is on both plans (a chat counts as one of the plan's channels) and is offered only where the service
+has a bot: without `SENTINEL_TELEGRAM_BOT_TOKEN` the page shows no Telegram button and `/v1/me` does not
+list the kind. `sentinel/telegram-setup.sh [ssh-host]` gives the deployed service its bot: it asks for the
+token BotFather gave (not shown, never an argument of any command), asks Telegram whose it is, writes it
+into the root-only settings file on the server and restarts the service. A token Telegram does not accept
+at start leaves Telegram switched off and tells whoever runs the service; chats already connected are
+still written to.
 
 ## What an owner is told about the profile itself
 

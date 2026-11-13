@@ -14,6 +14,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { Accounts, type Refusal } from "./accounts.js";
 import { PLANS } from "./plans.js";
 import { verifyStripeSignature, type Billing } from "./billing.js";
+import { LINK_SECONDS, type LinkCodes } from "./telegram.js";
 import { addressBytes, looksLikeSignature } from "./crypto.js";
 import { channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, takerTrustedNotice, walletRemovedNotice } from "./notices.js";
 import { NonceBook, verifySignIn } from "./signin.js";
@@ -55,6 +56,8 @@ export interface ApiDeps {
    * (notices.ts). The addresses are taken when it is called, so a notice about a removal is called for first.
    */
   notice?: (profile: string, sentence: string, opts?: { quiet?: boolean }) => Promise<void>;
+  /** The Telegram bot, when the service has one: its name, and the codes that tie a chat to a profile. Absent: Telegram is not offered. */
+  telegram?: { username: string; codes: Pick<LinkCodes, "issue"> };
   /** How many new profiles one network may start in a day (default 5). */
   newProfilesPerDay?: number;
   /** Told when a webhook that Stripe signed could not be applied: Stripe will send it again, and someone should know. */
@@ -130,7 +133,7 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       })),
       // `active`: alerts go there now. A channel the plan does not cover stays listed, and unused.
       channels: accounts.channelViews(profile),
-      limits: { wallets: PLANS[p.tier].wallets, channels: PLANS[p.tier].channels, kinds: PLANS[p.tier].kinds, pollSeconds: PLANS[p.tier].pollSeconds, push: PLANS[p.tier].push },
+      limits: { wallets: PLANS[p.tier].wallets, channels: PLANS[p.tier].channels, kinds: PLANS[p.tier].kinds.filter((k) => k !== "telegram" || !!deps.telegram), pollSeconds: PLANS[p.tier].pollSeconds, push: PLANS[p.tier].push },
     };
   };
 
@@ -247,6 +250,15 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       if (!r.ok) return refused(r);
       notice(session, channelAddedNotice(r.channel.hint, who!.wallet));
       return ok(r.channel, 201);
+    }
+    if (route === "POST /channels/telegram") {
+      // A chat cannot be named from here. This hands out a link to the bot with a one-time code in it; the
+      // chat that sends the bot that code becomes the channel (telegram.ts), and the owner is told then.
+      if (!deps.telegram) return no(501, "Telegram alerts are not switched on here.");
+      if (!limiter.allow(`change:${session}`, 20, 3600, t)) return TOO_MANY_CHANGES;
+      const room = accounts.roomForTelegram(session);
+      if (!room.ok) return refused(room);
+      return ok({ url: `https://t.me/${deps.telegram.username}?start=${deps.telegram.codes.issue(session, t)}`, seconds: LINK_SECONDS }, 201);
     }
     if (req.method === "DELETE" && parts[1] === "channels" && parts[2] && parts.length === 3) {
       const channel = accounts.channelView(session, parts[2]);
