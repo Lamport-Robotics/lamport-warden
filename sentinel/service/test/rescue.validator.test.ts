@@ -11,7 +11,8 @@
 import "../../../src/polyfill.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,7 +44,7 @@ const vaultA = vault(1), vaultB = vault(2);
 describe.skipIf(!onPath || !existsSync(SO))("a rescue on a local validator, through the compiled program", () => {
   let validator: ChildProcess;
   let rpc: HttpRpc;
-  const port = 18_899 + Math.floor(Math.random() * 400) * 2;
+  let port = 0;
   const mints: PublicKey[] = [];
   const accounts: Record<string, PublicKey> = {};
 
@@ -88,17 +89,35 @@ describe.skipIf(!onPath || !existsSync(SO))("a rescue on a local validator, thro
       writeFileSync(path, JSON.stringify({ pubkey: v.address.toBase58(), account: { lamports: 10_000_000, data: [v.data.toString("base64"), "base64"], owner: LAMPORT_VAULT.toBase58(), executable: false, rentEpoch: 0, space: v.data.length } }));
       return path;
     };
+    // A stretch of ports nobody is using, for this validator alone: its RPC, its faucet, its gossip and the
+    // range it picks the rest from. Another validator on the machine (another test, another project) takes
+    // the defaults, and two that share a port either fail to start or, worse, answer for each other.
+    const isFree = (p: number) => new Promise<boolean>((resolve) => { const s = createServer(); s.once("error", () => resolve(false)); s.listen(p, "127.0.0.1", () => s.close(() => resolve(true))); });
+    for (let tries = 0; ; tries++) {
+      const base = 20_000 + Math.floor(Math.random() * 300) * 100;
+      const all = await Promise.all(Array.from({ length: 70 }, (_, i) => isFree(base + i)));
+      if (all.every(Boolean)) { port = base; break; }
+      if (tries > 20) throw new Error("no free stretch of ports for a validator");
+    }
+    let exited: number | null = null;
     validator = spawn("solana-test-validator", [
       "--reset", "--quiet", "--ledger", join(dir, "ledger"), "--bind-address", "127.0.0.1", "--rpc-port", String(port), "--faucet-port", String(port + 3),
+      "--gossip-port", String(port + 5), "--dynamic-port-range", `${port + 10}-${port + 69}`,
       "--upgradeable-program", PROGRAM.toBase58(), SO, authority.publicKey.toBase58(),
       "--account", vaultA.address.toBase58(), file("vault-a.json", vaultA), "--account", vaultB.address.toBase58(), file("vault-b.json", vaultB),
     ], { stdio: "ignore" });
+    validator.once("exit", (code) => { exited = code ?? -1; });
+    const why = () => { try { return readFileSync(join(dir, "ledger", "validator.log"), "utf8").split("\n").filter((l) => /panicked|Address already in use|ERROR/.test(l)).slice(-3).join(" | ").slice(0, 400); } catch { return "no log"; } };
     rpc = new HttpRpc(`http://127.0.0.1:${port}`, undefined, { timeoutMs: 5000, retries: 0 });
     for (let i = 0; ; i++) {
+      if (exited !== null) throw new Error(`the validator stopped while starting (${exited}): ${why()}`);
       try { if ((await rpc.call("getHealth", [])) === "ok") break; } catch { /* still starting */ }
-      if (i > 150) throw new Error("the validator did not start");
+      if (i > 150) throw new Error(`the validator did not start: ${why()}`);
       await new Promise((r) => setTimeout(r, 300));
     }
+    // and it is this validator that answers: the one with the rescue program in it
+    const program = await rpc.call("getAccountInfo", [PROGRAM.toBase58(), { encoding: "base64", commitment: "confirmed" }]);
+    if (!program?.value?.executable) throw new Error("whatever answers on that port is not the validator this test started");
     for (const k of [authority, owner, lamportRescuer, ownRescuer, stranger, other]) await rpc.call("requestAirdrop", [k.publicKey.toBase58(), 5_000_000_000]);
     for (let i = 0; i < 100 && ((await rpc.call("getBalance", [other.publicKey.toBase58(), { commitment: "confirmed" }]))?.value ?? 0) === 0; i++) await new Promise((r) => setTimeout(r, 200));
     // Lamport's rescuer set, made once by the program's upgrade authority
