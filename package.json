@@ -13,6 +13,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:fixtures": "node scripts/build-fixtures.mjs",
+    "build:service": "node scripts/build-service.mjs",
+    "start:service": "node sentinel/service/dist/sentinel.mjs",
     "test": "vitest run",
     "test:browser": "node scripts/build.mjs && node scripts/build-fixtures.mjs && vitest run --config vitest.browser.config.ts",
     "test:wallets": "node scripts/build.mjs && node scripts/build-fixtures.mjs && vitest run --config vitest.wallets.config.ts",

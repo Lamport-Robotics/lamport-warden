@@ -40,7 +40,60 @@ export interface WatcherOptions {
 
 export class Watcher {
   private windows = new Map<string, BurstWindow>();
+  /** One thing at a time per wallet: a pass reads a wallet's record, waits on the RPC, and writes it back. */
+  private busy = new Map<string, Promise<unknown>>();
+  /** Signatures the owner's browser reported and that are not yet in the wallet's record. */
+  private reported = new Map<string, Map<string, number>>();
   constructor(private rpc: Rpc, private store: Store, private notifier: Notifier, private opts: WatcherOptions = {}) {}
+
+  private exclusive<T>(wallet: string, work: () => Promise<T>): Promise<T> {
+    const run = (this.busy.get(wallet) ?? Promise.resolve()).then(work, work);
+    const settled = run.catch(() => undefined);
+    this.busy.set(wallet, settled);
+    void settled.then(() => { if (this.busy.get(wallet) === settled) this.busy.delete(wallet); });
+    return run;
+  }
+
+  /** Moves what was reported into the record. Kept 30 days, and no more than a few thousand. */
+  private takeReported(wallet: string, record: { ownerSignatures: Record<string, number> }): void {
+    const now = this.now();
+    for (const [signature, at] of this.reported.get(wallet) ?? []) record.ownerSignatures[signature] = at;
+    this.reported.delete(wallet);
+    const kept = Object.entries(record.ownerSignatures).filter(([, at]) => now - at <= 30 * 86_400).sort((a, b) => b[1] - a[1]).slice(0, 5000);
+    record.ownerSignatures = Object.fromEntries(kept);
+  }
+
+  /**
+   * The owner's own browser says it signed this. Known at once, so a pass already under way sees it, and
+   * written to the record when the wallet is next free.
+   */
+  ownerSigned(wallet: string, signature: string): Promise<void> {
+    const pending = this.reported.get(wallet) ?? this.reported.set(wallet, new Map()).get(wallet)!;
+    pending.set(signature, this.now());
+    return this.exclusive(wallet, async () => {
+      if (!this.reported.has(wallet)) return;
+      const record = this.store.record(wallet);
+      this.takeReported(wallet, record);
+      this.store.save(wallet, record);
+    });
+  }
+
+  /**
+   * "This was me": the owner says a transaction an alert was about was theirs. Who it paid becomes someone
+   * this wallet pays, the same way a confirmed send does in the browser. False when the RPC cannot show it.
+   */
+  confirmOwn(wallet: string, signature: string): Promise<boolean> {
+    return this.exclusive(wallet, async () => {
+      const tx = await this.transaction(signature);
+      if (!tx) return false;
+      const record = this.store.record(wallet);
+      const baseline = Baseline.from(record.baseline);
+      baseline.confirm(tx, wallet);
+      record.baseline = baseline.toJSON();
+      this.store.save(wallet, record);
+      return true;
+    });
+  }
 
   private now(): number { return this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000); }
 
@@ -74,8 +127,11 @@ export class Watcher {
     return out;
   }
 
+  private watching(wallet: string): boolean { return this.store.wallets().some((w) => w.address === wallet); }
+
   private async raise(wallet: string, a: Assessment, tx: { signature: string; slot: number; blockTime: number | null } | null): Promise<StoredEvent | null> {
-    if (a.level === null) return null;
+    // a wallet its owner removed a moment ago gets no alert and leaves no record
+    if (a.level === null || !this.watching(wallet)) return null;
     const event: StoredEvent = { wallet, signature: tx?.signature ?? "", slot: tx?.slot ?? 0, at: tx?.blockTime ?? this.now(), level: a.level, signals: a.signals.map((s) => s.kind), sentence: a.sentence, rescueWorthy: a.rescueWorthy };
     this.store.addEvent(event);
     // Info is for the Sentinel page; the others go to the owner. A notifier that fails must not stop the watching.
@@ -87,8 +143,13 @@ export class Watcher {
    * One pass over one wallet. The first pass builds the baseline from the wallet's history and raises nothing
    * for it: what already happened is not news. Later passes read what is new, oldest first.
    */
-  async pass(w: WatchedWallet): Promise<StoredEvent[]> {
+  pass(w: WatchedWallet): Promise<StoredEvent[]> {
+    return this.exclusive(w.address, () => this.passNow(w));
+  }
+
+  private async passNow(w: WatchedWallet): Promise<StoredEvent[]> {
     const wallet = w.address;
+    if (!this.watching(wallet)) return [];
     const record = this.store.record(wallet);
     const baseline = Baseline.from(record.baseline);
     const raised: StoredEvent[] = [];
@@ -106,7 +167,7 @@ export class Watcher {
         const tx = await this.transaction(signature);
         // a transaction the RPC does not have yet is read on the next pass: the cursor stays before it
         if (!tx) break;
-        const a = assessTransaction(tx, { ...ctxBase, ownerSigned: signature in record.ownerSignatures });
+        const a = assessTransaction(tx, { ...ctxBase, ownerSigned: signature in record.ownerSignatures || !!this.reported.get(wallet)?.has(signature) });
         const event = await this.raise(wallet, a, tx);
         if (event) raised.push(event);
         // what raised an alert is not taken as normal: a thief's first transfer must not make the second one familiar
@@ -135,6 +196,7 @@ export class Watcher {
 
     record.baseline = baseline.toJSON();
     record.lastSeenAt = this.now();
+    this.takeReported(wallet, record);
     this.store.save(wallet, record);
     return raised;
   }
