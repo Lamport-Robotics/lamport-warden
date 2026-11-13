@@ -35,8 +35,10 @@ describe("the plans, wherever they are described", () => {
   });
 
   it("the definition itself is the one the service runs with", () => {
-    expect(PLANS.watch).toEqual({ name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy"], pollSeconds: 60 });
-    expect(PLANS.pro).toEqual({ name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack"], pollSeconds: 20 });
+    expect(PLANS.watch).toEqual({ name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy"], pollSeconds: 60, push: false });
+    expect(PLANS.pro).toEqual({ name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack"], pollSeconds: 20, push: true });
+    // being told as it happens is what the paid plan sells first
+    expect(PRO_FEATURES[0]).toBe("Alerts in seconds: a wallet is read as soon as the network reports a transaction in it, without waiting for its turn");
     // Pro is never slower, smaller or narrower than Watch
     expect(PLANS.pro.wallets).toBeGreaterThan(PLANS.watch.wallets);
     expect(PLANS.pro.pollSeconds).toBeLessThan(PLANS.watch.pollSeconds);

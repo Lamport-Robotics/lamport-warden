@@ -16,11 +16,13 @@ export interface Plan {
   kinds: readonly ChannelKind[];
   /** How often each wallet is read, in seconds. */
   pollSeconds: number;
+  /** Whether a wallet is also read at once when the network reports a transaction in it, ahead of its turn. */
+  push: boolean;
 }
 
 export const PLANS: Record<Tier, Plan> = {
-  watch: { name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy"], pollSeconds: 60 },
-  pro: { name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack"], pollSeconds: 20 },
+  watch: { name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy"], pollSeconds: 60, push: false },
+  pro: { name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack"], pollSeconds: 20, push: true },
 };
 
 /** The monthly prices, in cents, as the page shows them when the service has not said otherwise. */
@@ -36,6 +38,7 @@ export const WATCH_FEATURES: readonly string[] = [
 ];
 /** What Pro adds today. Every line is something the service does now. */
 export const PRO_FEATURES: readonly string[] = [
+  "Alerts in seconds: a wallet is read as soon as the network reports a transaction in it, without waiting for its turn",
   `${PLANS.pro.wallets} wallets watched instead of ${PLANS.watch.wallets}`,
   `Each wallet read every ${PLANS.pro.pollSeconds} seconds instead of every minute`,
   `Up to ${PLANS.pro.channels} alert channels, including Discord and Slack, so a team sees an alert together`,
@@ -60,7 +63,8 @@ export const renewalTerms = (cents: number, centsFull: number = PRICE_CENTS, cen
 
 /**
  * How a profile's wallets are being read, said to its owner in full: the pace its plan promises, whether the
- * network is also reporting transactions as they happen, and, when the service is behind, that it is.
+ * network is also reporting transactions as they happen (`push`: the plan has it and the line is up), and,
+ * when the service is behind, that it is.
  */
 export function paceText(pollSeconds: number, now: { push: boolean; late: boolean } | null): string {
   const every = pollSeconds === 60 ? "every minute" : `every ${pollSeconds} seconds`;

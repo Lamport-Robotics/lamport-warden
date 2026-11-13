@@ -210,6 +210,8 @@ export class Push {
   }
 
   /** Whether every connection is up, and how many wallets are being listened for in all. */
+  /** How many wallets it can listen for at most. */
+  get capacity(): number { return this.perLine * this.most; }
   get state(): { connected: boolean; listening: number; lines: number } {
     return { connected: this.lines.every((l) => l.line.state.connected), listening: this.lines.reduce((n, l) => n + l.line.state.listening, 0), lines: this.lines.length };
   }

@@ -294,9 +294,12 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     const profile = accounts.profileOf(W1)!;
     expect(stripeCalls.at(-1)).toMatchObject({ path: "/checkout/sessions", params: { mode: "subscription", "line_items[0][price]": "price_holder", client_reference_id: profile } });
 
-    // back from the checkout page, before Stripe has said anything: still Watch
+    // back from the checkout page, before Stripe has said anything: still Watch. The service is being told of
+    // transactions as they happen, and that is not something the free plan has: the page does not say it has.
+    Object.assign(healthNow, { push: "on" });
     await page.goto(`${ARMING}/sentinel/?plan=started`);
     await expect.poll(() => page.locator("#notice").innerText(), { timeout: 10_000 }).toContain("Stripe is confirming the payment");
+    expect(await page.locator("#pace").innerText()).toBe("Each wallet is read every minute.");
     expect(page.url()).toBe(`${ARMING}/sentinel/`); // the marker is taken out of the address
     await expect.poll(() => page.locator("#plans .plan.mine h3").innerText(), { timeout: 10_000 }).toBe("Watch");
     expect(accounts.profile(profile)!.tier).toBe("watch");
@@ -304,8 +307,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     // Stripe says so, signed: now it is Pro
     subscriptions.set("sub_page", { id: "sub_page", customer: "cus_page", status: "active", metadata: { profile }, items: { data: [{ id: "si_page", price: { id: "price_holder" } }] } });
     expect(await webhook({ type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_page", client_reference_id: profile } } })).toBe(200);
-    // and the service, meanwhile, is being told of transactions as they happen, and is running behind
-    Object.assign(healthNow, { push: "on", late: 2 });
+    // and the service, meanwhile, is running behind
+    Object.assign(healthNow, { late: 2 });
     await page.reload();
     await expect.poll(() => page.locator("#plans .plan.mine h3").innerText(), { timeout: 10_000 }).toBe("Pro");
     expect(await page.locator("#walletLimit").innerText()).toBe("2 of 10 wallets on this plan.");

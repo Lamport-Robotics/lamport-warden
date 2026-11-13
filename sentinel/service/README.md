@@ -66,9 +66,9 @@ transaction that changes none of the things a look sees. This is the call an RPC
 beside a pass is the one from the look just *before* it, so whatever lands while the pass is reading moves the
 next look and the wallet is read through again: nothing falls between the two.
 
-**The RPC saying so** (`src/push.ts`). The service keeps a few websockets to the RPC and asks to be told when
-a watched address is mentioned in a transaction. When it is, that wallet is read through next, ahead of its
-turn. Nothing that is pushed is believed: it is only a reason to read sooner. A wallet is read on the RPC's
+**The RPC saying so** (`src/push.ts`), for wallets on the paid plan. The service keeps a few websockets to
+the RPC and asks to be told when one of those addresses is mentioned in a transaction. When it is, that
+wallet is read through next, ahead of its turn. Nothing that is pushed is believed: it is only a reason to read sooner. A wallet is read on the RPC's
 word at most every quarter of its promised pace. The connections are asked twice a minute whether they are
 still there and put up again when they are not; `/v1/health` says `push: on`, `down` or `off`, and whoever
 runs the service is told when it has been down for a quarter of an hour. `SENTINEL_PUSH=off` turns it off.
@@ -77,9 +77,15 @@ Run for real against the public RPC, watching a public wallet that transacts abo
 the push line up, each new transaction had been read 3 to 7 seconds after it happened. With it off, the look
 alone noticed at the wallet's next turn, about a minute apart, and the transaction was then read.
 
-What a look cannot see is a transaction that moves no balance and changes no permission. With the push line
-up it is read within seconds all the same; with it down, at the next full pass. Neither plan promises the
-push, and it is not counted in what a wallet costs.
+What a look cannot see is a transaction that moves no balance and changes no permission. For a wallet on the
+paid plan with the push line up it is read within seconds all the same; otherwise, at the next full pass.
+
+The paid plan promises the push (`PLANS.pro.push`), and the free plan is read in turn only: it is what
+"alerts in seconds" on the plan means. The public RPC takes about 450 such subscriptions from one address
+(five connections of ninety), so that is how many paid wallets can have it there; whoever runs the service
+is told when nine in ten are taken, and again if more wallets are on the plan than the line takes. It is not
+counted in what a wallet costs in reads. What it does not cover is a transaction that does not name the
+wallet (a delegate's taking, below), which only a look sees, at the plan's pace.
 
 ## How a pass goes
 
@@ -438,6 +444,7 @@ page print it, and `test/plans.test.ts` fails if the Warden site or the store li
 |---|---|---|
 | Wallets watched | 3 | 10 |
 | Each wallet read | every minute | every 20 seconds |
+| Read as soon as the network reports a transaction in it | no | yes |
 | Alert channels | 1, ntfy | up to 5: ntfy, Discord, Slack |
 | Rescue into the owner's Lamport Vault | no | not yet |
 

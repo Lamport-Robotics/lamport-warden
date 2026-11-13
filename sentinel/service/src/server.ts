@@ -130,7 +130,7 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       })),
       // `active`: alerts go there now. A channel the plan does not cover stays listed, and unused.
       channels: accounts.channelViews(profile),
-      limits: { wallets: PLANS[p.tier].wallets, channels: PLANS[p.tier].channels, kinds: PLANS[p.tier].kinds, pollSeconds: PLANS[p.tier].pollSeconds },
+      limits: { wallets: PLANS[p.tier].wallets, channels: PLANS[p.tier].channels, kinds: PLANS[p.tier].kinds, pollSeconds: PLANS[p.tier].pollSeconds, push: PLANS[p.tier].push },
     };
   };
 
