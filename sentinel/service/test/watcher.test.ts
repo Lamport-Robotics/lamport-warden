@@ -69,7 +69,7 @@ class Chain implements Rpc {
 class Sent implements Notifier {
   list: [Level, string][] = [];
   fail = false;
-  async notify(_wallet: string, level: Level, sentence: string) { if (this.fail) throw new Error("push service down"); this.list.push([level, sentence]); }
+  notify: Notifier["notify"] = async (_wallet, level, sentence) => { if (this.fail) throw new Error("push service down"); this.list.push([level, sentence]); };
 }
 
 /** A wallet with thirty days of payments to one friend, watched from now on. */
@@ -126,6 +126,27 @@ describe("the watcher", () => {
     chain.pay(wallet.publicKey, fake, 0.5, NOON + 1200);
     expect((await watcher.pass(me))[0]).toMatchObject({ level: "urgent", signals: ["lookalike"] });
     expect(store.events(W)).toHaveLength(2);
+  });
+
+  it("marks an alert that reached no channel, and not one that reached one or whose notifier does not say", async () => {
+    const { chain, store, sent, watcher } = setup();
+    await watcher.pass(me);
+    const fake = lookalike(friend);
+    // a notifier that says nothing about delivery is taken at its word
+    chain.pay(wallet.publicKey, fake, 0.5, NOON + 600);
+    await watcher.pass(me);
+    // one that says nobody took it, one that says somebody did, and one that fell over
+    const told = { delivered: 0, failed: 1 };
+    sent.notify = async () => told;
+    chain.pay(wallet.publicKey, fake, 0.5, NOON + 1200);
+    await watcher.pass(me);
+    told.delivered = 1;
+    chain.pay(wallet.publicKey, fake, 0.5, NOON + 1800);
+    await watcher.pass(me);
+    sent.notify = async () => { throw new Error("push service down"); };
+    chain.pay(wallet.publicKey, fake, 0.5, NOON + 2400);
+    await watcher.pass(me);
+    expect(store.events(W).map((e) => e.undelivered === true)).toEqual([false, true, false, true]);
   });
 
   it("keeps a note of dust without disturbing the owner", async () => {

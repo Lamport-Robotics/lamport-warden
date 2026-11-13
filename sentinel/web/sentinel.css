@@ -52,6 +52,7 @@ ul.rows .what { flex: 1 1 260px; min-width: 0; }
 ul.rows .what b { display: block; font-weight: 500; overflow-wrap: anywhere; }
 ul.rows .what span { color: var(--dim); font-size: 15px; }
 ul.rows .acts { display: flex; gap: 8px; }
+ul.rows li.failing .what span { color: var(--stop); }
 .addr { font: 15px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; }
 .tag { display: inline-block; font-size: 12px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); color: var(--dim); margin-right: 8px; }
 .tag.urgent { color: var(--stop); border-color: var(--stop); }

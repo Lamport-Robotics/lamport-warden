@@ -240,19 +240,30 @@ export class Accounts {
   }
 
   /** One of the profile's channels, with its address, if alerts go there now. For sending it a test. */
-  channelOf(profile: string, id: string): { ok: true; kind: ChannelKind; url: string } | Refusal {
+  channelOf(profile: string, id: string): { ok: true; id: string; kind: ChannelKind; url: string } | Refusal {
     const c = this.channelsOf(profile).find((x) => x.id === id);
     if (!c) return refuse(404, "there is no such channel.");
     if (!this.active(profile).some((x) => x.id === id)) return refuse(409, "that channel is not in use on this plan, so nothing is sent to it.");
     const url = unseal(this.dataKey, c.target);
     const clean = url === null ? null : cleanTarget(url, this.ntfyHosts);
-    return clean && clean.kind === c.kind && clean.url === url ? { ok: true, kind: clean.kind, url: clean.url } : refuse(409, "that channel's address can no longer be read. Remove it and add it again.");
+    return clean && clean.kind === c.kind && clean.url === url ? { ok: true, id: c.id, kind: clean.kind, url: clean.url } : refuse(409, "that channel's address can no longer be read. Remove it and add it again.");
   }
 
   /** The profile's channels as the page shows them: what kind, a hint of the address, and whether alerts go there now. */
-  channelViews(profile: string): { id: string; kind: ChannelKind; hint: string; active: boolean }[] {
+  channelViews(profile: string): { id: string; kind: ChannelKind; hint: string; active: boolean; lastDeliveredAt: number | null; failing: { since: number; why: string } | null }[] {
     const active = new Set(this.active(profile).map((c) => c.id));
-    return this.channelsOf(profile).map((c) => ({ id: c.id, kind: c.kind, hint: c.hint, active: active.has(c.id) }));
+    return this.channelsOf(profile).map((c) => ({ id: c.id, kind: c.kind, hint: c.hint, active: active.has(c.id), lastDeliveredAt: c.delivered ?? null, failing: c.failed ? { since: c.failed.at, why: c.failed.why } : null }));
+  }
+
+  /**
+   * What became of a message sent to a channel. A channel that took it is no longer failing; one that did not
+   * is failing since the first time it did not, and its owner is shown why on the page.
+   */
+  noteDelivery(id: string, ok: boolean, why: string, now: number): void {
+    const c = this.data.channels.find((x) => x.id === id);
+    if (!c) return; // removed while the message was on its way
+    if (ok) { c.delivered = now; delete c.failed; } else c.failed = { at: c.failed?.at ?? now, why };
+    this.store.flush();
   }
 
   addChannel(profile: string, target: unknown, now: number): { ok: true; channel: { id: string; kind: ChannelKind; hint: string } } | Refusal {
@@ -282,16 +293,16 @@ export class Accounts {
    * Where alerts about this wallet go, checked again as they are used: a stored address is not trusted more
    * than a typed one, and one that no longer reads as its kind is not used.
    */
-  channelsFor(wallet: string): { kind: ChannelKind; url: string }[] {
+  channelsFor(wallet: string): { id: string; kind: ChannelKind; url: string; hint: string }[] {
     const profile = this.profileOf(wallet);
     return profile ? this.channelsOfProfile(profile) : [];
   }
   /** Where a notice about the profile itself goes: the channels its alerts go to now. */
-  channelsOfProfile(profile: string): { kind: ChannelKind; url: string; hint: string }[] {
+  channelsOfProfile(profile: string): { id: string; kind: ChannelKind; url: string; hint: string }[] {
     return this.active(profile).flatMap((c) => {
       const url = unseal(this.dataKey, c.target);
       const clean = url === null ? null : cleanTarget(url, this.ntfyHosts);
-      return clean && clean.kind === c.kind && clean.url === url ? [{ ...clean, hint: c.hint }] : [];
+      return clean && clean.kind === c.kind && clean.url === url ? [{ id: c.id, ...clean, hint: c.hint }] : [];
     });
   }
   /** How one of the profile's channels is shown, and whether alerts go to it now. Null when it has no such channel. */

@@ -18,7 +18,8 @@ const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQd
 
 /** Sends an alert to the owner. The text is a plain sentence: it never carries a link, and never asks for a signature. */
 export interface Notifier {
-  notify(wallet: string, level: Level, sentence: string): Promise<void>;
+  /** May say how many channels took it; one that says nothing is taken at its word. */
+  notify(wallet: string, level: Level, sentence: string): Promise<void | { delivered: number; failed: number }>;
 }
 
 /** ntfy: a POST of the sentence to a topic URL the owner chose. No account, no link in the body. */
@@ -135,7 +136,11 @@ export class Watcher {
     const event: StoredEvent = { wallet, signature: tx?.signature ?? "", slot: tx?.slot ?? 0, at: tx?.blockTime ?? this.now(), level: a.level, signals: a.signals.map((s) => s.kind), sentence: a.sentence, rescueWorthy: a.rescueWorthy };
     this.store.addEvent(event);
     // Info is for the Sentinel page; the others go to the owner. A notifier that fails must not stop the watching.
-    if (a.level !== "info") await this.notifier.notify(wallet, a.level, a.sentence).catch(() => undefined);
+    if (a.level !== "info") {
+      const sent = await this.notifier.notify(wallet, a.level, a.sentence).catch(() => ({ delivered: 0, failed: 1 }));
+      // nobody was told: the alert says so on the page, which is now the only place it is
+      if (sent && sent.delivered === 0 && event.id) this.store.markUndelivered?.(event.id);
+    }
     return event;
   }
 

@@ -69,7 +69,8 @@ What it keeps, on that server:
 - If you turned on "Tell Sentinel which signatures were mine": the signatures your browser reported, for 30
   days.
 - Where your alerts go: the address of each channel you gave (an ntfy topic, or a Discord or Slack webhook),
-  encrypted under a key that is not stored with it.
+  encrypted under a key that is not stored with it, and when it last took a message or since when it has
+  refused them.
 - Your sign-ins: each session as a hash, for seven days, with which of your wallets signed it in; and, for a
   wallet you linked to the extension, the hash of the token it reports with.
 - Your plan. If you pay: Stripe's ids for the customer and the subscription, the price, its status and its

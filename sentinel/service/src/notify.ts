@@ -40,29 +40,61 @@ export function messageFor(kind: ChannelKind, title: string, level: Level, sente
 
 export const TEST_SENTENCE = "This is a test from Warden Sentinel. Alerts about your wallets arrive here, one plain sentence each, never with a link.";
 
+/** Why a channel did not take a message, in words fit for its owner: what it answered, or that it did not. */
+export const refusalOf = (status: number | null): string => (status === null ? "it could not be reached" : `it answered ${status}`);
+
+export const failingChannelNotice = (hint: string, why: string): string =>
+  `An alert could not be delivered to another of this profile's channels (${hint}): ${why}. Send it a test from the Sentinel page, or replace it.`;
+
 export class ChannelNotifier implements Notifier {
   /** What could not be delivered, newest last: the service says so rather than pretending the owner was told. */
   readonly undelivered: { wallet: string; at: number; why: string }[] = [];
+  /** When the profile's other channels were last told that one of them is failing, by that channel. */
+  private toldFailing = new Map<string, number>();
 
   constructor(private accounts: Accounts, private post: Post = (u, i) => fetch(u, i), private opts: { timeoutMs?: number; now?: () => number } = {}) {}
 
-  async notify(wallet: string, level: Level, sentence: string): Promise<void> {
+  private now(): number { return this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000); }
+
+  /**
+   * One message to one channel. Whether it was taken is written down on the channel, so the owner can see on
+   * the page that a channel has stopped working without waiting to miss an alert. Never throws.
+   */
+  private async send(channel: { id: string; kind: ChannelKind; url: string }, title: string, level: Level, sentence: string, about: string, quiet = false): Promise<boolean> {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), this.opts.timeoutMs ?? 8000);
+    let status: number | null = null, ok = false, detail = "";
+    try {
+      // a redirect is refused: the message goes to the address the owner gave, or nowhere
+      const res = await this.post(channel.url, { method: "POST", ...messageFor(channel.kind, title, level, sentence, quiet), redirect: "error", signal: ctl.signal });
+      status = res.status; ok = res.ok;
+      detail = `the channel answered ${res.status}`;
+    } catch (e) {
+      detail = String((e as Error).message ?? e); // what went wrong inside stays in the log
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!ok) this.miss(about, detail);
+    this.accounts.noteDelivery(channel.id, ok, refusalOf(status), this.now());
+    return ok;
+  }
+
+  /** Sends an alert to the owner's channels, and says how many took it. */
+  async notify(wallet: string, level: Level, sentence: string): Promise<{ delivered: number; failed: number }> {
     const channels = this.accounts.channelsFor(wallet);
     const title = `${level === "urgent" ? "Warden Sentinel: urgent" : "Warden Sentinel"} (${short(wallet)})`;
-    for (const { kind, url } of channels) {
-      const ctl = new AbortController();
-      const timer = setTimeout(() => ctl.abort(), this.opts.timeoutMs ?? 8000);
-      try {
-        // a redirect is refused: the alert goes to the address the owner gave, or nowhere
-        const res = await this.post(url, { method: "POST", ...messageFor(kind, title, level, sentence), redirect: "error", signal: ctl.signal });
-        if (!res.ok) this.miss(wallet, `the channel answered ${res.status}`);
-      } catch (e) {
-        this.miss(wallet, String((e as Error).message ?? e));
-      } finally {
-        clearTimeout(timer);
-      }
-    }
+    const took: typeof channels = [], refused: typeof channels = [];
+    for (const channel of channels) ((await this.send(channel, title, level, sentence, wallet)) ? took : refused).push(channel);
     if (channels.length === 0) this.miss(wallet, "the owner has no channel");
+    // A channel that has stopped taking alerts is said on the ones that still do, once a day: the owner
+    // should not find out by missing the one alert that only went there.
+    for (const dead of refused) {
+      if (took.length === 0 || this.now() - (this.toldFailing.get(dead.id) ?? -Infinity) < 86_400) continue;
+      this.toldFailing.set(dead.id, this.now());
+      const why = this.accounts.channelViews(this.accounts.profileOf(wallet) ?? "").find((c) => c.id === dead.id)?.failing?.why ?? "it did not take it";
+      for (const alive of took) await this.send(alive, "Warden Sentinel: your profile", "alert", failingChannelNotice(dead.hint, why), wallet);
+    }
+    return { delivered: took.length, failed: refused.length };
   }
 
   /**
@@ -72,16 +104,11 @@ export class ChannelNotifier implements Notifier {
   async test(profile: string, channelId: string): Promise<{ ok: true } | { ok: false; status: number; why: string }> {
     const channel = this.accounts.channelOf(profile, channelId);
     if (!channel.ok) return channel;
-    const ctl = new AbortController();
-    const timer = setTimeout(() => ctl.abort(), this.opts.timeoutMs ?? 8000);
-    try {
-      const res = await this.post(channel.url, { method: "POST", ...messageFor(channel.kind, "Warden Sentinel: test", "alert", TEST_SENTENCE), redirect: "error", signal: ctl.signal });
-      return res.ok ? { ok: true } : { ok: false, status: 502, why: `the channel did not take it (it answered ${res.status}). Check the address, or remove it and add it again.` };
-    } catch {
-      return { ok: false, status: 502, why: "the channel could not be reached. Check the address, or try again in a minute." };
-    } finally {
-      clearTimeout(timer);
-    }
+    if (await this.send(channel, "Warden Sentinel: test", "alert", TEST_SENTENCE, `profile ${profile.slice(0, 4)}`)) return { ok: true };
+    const why = this.accounts.channelViews(profile).find((c) => c.id === channelId)?.failing?.why ?? "";
+    return why.startsWith("it answered")
+      ? { ok: false, status: 502, why: `the channel did not take it (${why}). Check the address, or remove it and add it again.` }
+      : { ok: false, status: 502, why: "the channel could not be reached. Check the address, or try again in a minute." };
   }
 
   /**
@@ -90,22 +117,11 @@ export class ChannelNotifier implements Notifier {
    * sent before the channel is. Resolves when every channel has answered or timed out; never throws.
    */
   async notice(profile: string, sentence: string, opts: { quiet?: boolean } = {}): Promise<void> {
-    await Promise.all(this.accounts.channelsOfProfile(profile).map(async ({ kind, url }) => {
-      const ctl = new AbortController();
-      const timer = setTimeout(() => ctl.abort(), this.opts.timeoutMs ?? 8000);
-      try {
-        const res = await this.post(url, { method: "POST", ...messageFor(kind, "Warden Sentinel: your profile", "alert", sentence, opts.quiet), redirect: "error", signal: ctl.signal });
-        if (!res.ok) this.miss(`profile ${profile.slice(0, 4)}`, `the channel answered ${res.status}`);
-      } catch (e) {
-        this.miss(`profile ${profile.slice(0, 4)}`, String((e as Error).message ?? e));
-      } finally {
-        clearTimeout(timer);
-      }
-    }));
+    await Promise.all(this.accounts.channelsOfProfile(profile).map((channel) => this.send(channel, "Warden Sentinel: your profile", "alert", sentence, `profile ${profile.slice(0, 4)}`, opts.quiet)));
   }
 
   private miss(wallet: string, why: string): void {
-    this.undelivered.push({ wallet, at: this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000), why });
+    this.undelivered.push({ wallet, at: this.now(), why });
     if (this.undelivered.length > 200) this.undelivered.shift();
   }
 }

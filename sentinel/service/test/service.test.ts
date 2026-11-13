@@ -313,7 +313,7 @@ describe("where alerts go", () => {
     expect(first).toMatchObject({ status: 201, body: { kind: "ntfy", hint: "ntfy.sh/…c-77" } });
     // the topic is sealed in the file, and the page is shown only its last characters
     expect(readFileSync(file, "utf8")).not.toContain("alice-private-topic");
-    expect(((await s.call("GET", "/v1/me", undefined, a.session)).body as any).channels).toEqual([{ id: (first.body as any).id, kind: "ntfy", hint: "ntfy.sh/…c-77", active: true }]);
+    expect(((await s.call("GET", "/v1/me", undefined, a.session)).body as any).channels).toEqual([{ id: (first.body as any).id, kind: "ntfy", hint: "ntfy.sh/…c-77", active: true, lastDeliveredAt: null, failing: null }]);
     expect(s.accounts.targetsFor(alice.address)).toEqual(["https://ntfy.sh/alice-private-topic-77"]);
     // a store opened with another key cannot read where alerts go, and sends nowhere
     expect(new Accounts(new FileStore(file), Buffer.alloc(32, 1)).targetsFor(alice.address)).toEqual([]);
@@ -474,7 +474,7 @@ describe("alerts", () => {
     const e3 = raise(s, bob.address, "sigC", T0 + 30);
     const mine = ((await s.call("GET", "/v1/events", undefined, a.session)).body as any).events;
     expect(mine.map((e: any) => e.id)).toEqual([e2, e1]);
-    expect(mine[0]).toEqual({ id: e2, wallet: second.address, signature: "sigB", at: T0 + 20, level: "alert", signals: ["new_large_payment"], sentence: "Sent 6 SOL to a new address.", canRescue: false, answer: null });
+    expect(mine[0]).toEqual({ id: e2, wallet: second.address, signature: "sigB", at: T0 + 20, level: "alert", signals: ["new_large_payment"], sentence: "Sent 6 SOL to a new address.", canRescue: false, answer: null, undelivered: false });
     expect(((await s.call("GET", "/v1/events", undefined, b.session)).body as any).events.map((e: any) => e.id)).toEqual([e3]);
     expect((await s.call("GET", "/v1/events")).status).toBe(401);
   });

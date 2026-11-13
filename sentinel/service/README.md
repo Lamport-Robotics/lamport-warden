@@ -209,6 +209,13 @@ with a token that can do nothing else, for one wallet. A reported transaction lo
 its hard ones, so a stolen token cannot hide a handover or a look-alike. "This was me" does not take the
 page's word for what a transaction did: the watcher reads it from the chain again.
 
+**An alert that reaches nobody is said, not hidden.** Each channel keeps when it last took a message, and,
+while it is refusing them, since when and what it answered ("it answered 404", "it could not be reached";
+never the error from inside). The Sentinel page shows that on the channel. When a profile has another channel
+that still works, that one is told, once a day, that the other is failing, by its hint and never its address.
+An alert that no channel took (or that had no channel to go to) is marked, and the page says so on the alert.
+A test that works clears the mark.
+
 Alerts go only to `https` ntfy topics on hosts the service was told about (`ntfy.sh` unless configured), and
 a redirect is refused: the service posts to no address an owner can point somewhere else. On ntfy, whoever
 knows a topic can read it, so the topic is the owner's secret and has to be long.

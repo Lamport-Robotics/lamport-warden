@@ -180,6 +180,17 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     await page.locator("#channels li").getByRole("button", { name: "Send a test" }).click();
     await expect.poll(() => page.locator("#notice").innerText()).toContain("Sent.");
     expect(testsSent).toEqual([[accounts.profileOf(W1), accounts.channelViews(accounts.profileOf(W1)!)[0]!.id]]);
+    // a channel that has stopped taking messages is said on the page, with what it answered; and unsaid when it works again
+    const channelId = accounts.channelViews(accounts.profileOf(W1)!)[0]!.id;
+    const line = page.locator("#channels li").first().locator(".what span");
+    accounts.noteDelivery(channelId, false, "it answered 404", Math.floor(Date.now() / 1000) - 7200);
+    await page.reload();
+    await expect.poll(() => line.innerText(), { timeout: 10_000 }).toBe("ntfy topic. The last message could not be delivered here: it answered 404, first 2 hours ago. Send a test, or remove it and add one that works.");
+    expect(await page.locator("#channels li.failing").count()).toBe(1);
+    accounts.noteDelivery(channelId, true, "", Math.floor(Date.now() / 1000) - 30);
+    await page.reload();
+    await expect.poll(() => line.innerText(), { timeout: 10_000 }).toMatch(/^ntfy topic\. Alerts are sent here\. The last message was delivered \d+ seconds ago\.$/);
+    expect(await page.locator("#channels li.failing").count()).toBe(0);
     // something that is not a topic is refused in the service's own words
     await page.locator("#ntfyTarget").fill("https://evil.example/aaaaaaaaaaaa");
     await page.getByRole("button", { name: "Add", exact: true }).click();
@@ -213,7 +224,9 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
   it("shows an alert as text, never as markup, and records the answer", async () => {
     const hostile = `Sent 6 SOL to a new address <img src=x onerror="window.__pwned=1">.`;
     store.addEvent({ wallet: W1, signature: "sigA", slot: 5, at: Math.floor(Date.now() / 1000) - 30, level: "alert", signals: ["new_large_payment"], sentence: hostile, rescueWorthy: false });
-    store.addEvent({ wallet: W2, signature: "", slot: 6, at: Math.floor(Date.now() / 1000) - 10, level: "urgent", signals: ["delegate_replaced"], sentence: "Your USDC account's spending permission moved to another wallet.", rescueWorthy: true });
+    const unheard = { wallet: W2, signature: "", slot: 6, at: Math.floor(Date.now() / 1000) - 10, level: "urgent" as const, signals: ["delegate_replaced" as const], sentence: "Your USDC account's spending permission moved to another wallet.", rescueWorthy: true, id: undefined as string | undefined };
+    store.addEvent(unheard);
+    store.markUndelivered(unheard.id!); // no channel took this one: the page is the only place it is
     await page.reload();
     await expect.poll(() => page.locator("#events li").count(), { timeout: 10_000 }).toBe(2);
     const rows = page.locator("#events li");
@@ -223,6 +236,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     expect(await page.evaluate(() => (window as any).__pwned)).toBeUndefined();
     expect(await page.locator("#events img").count()).toBe(0);
     expect(await rows.nth(1).locator(".what > span").innerText()).toContain(short(W1));
+    expect(await rows.nth(0).locator(".what > span").innerText()).toContain("not delivered: no channel took it");
+    expect(await rows.nth(1).locator(".what > span").innerText()).not.toContain("not delivered");
 
     await rows.nth(1).getByRole("button", { name: "This was me" }).click();
     await expect.poll(() => rows.nth(1).locator(".what > span").innerText(), { timeout: 8000 }).toContain("you said this was you");

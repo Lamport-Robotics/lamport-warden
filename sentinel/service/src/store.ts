@@ -34,6 +34,8 @@ export interface StoredEvent {
   rescueWorthy: boolean;
   /** What the owner said about it. */
   answer?: "this_was_me" | "rescue" | "ignore";
+  /** True when it was pushed and no channel took it (or there was none): the owner has only the page for it. */
+  undelivered?: boolean;
 }
 
 export interface WalletRecord {
@@ -56,6 +58,8 @@ export interface Store {
   save(wallet: string, record: WalletRecord): void;
   addEvent(event: StoredEvent): void;
   events(wallet: string): StoredEvent[];
+  /** Notes that an alert reached no channel. */
+  markUndelivered?(id: string): void;
 }
 
 const fresh = (): WalletRecord => ({ cursor: null, baseline: null, tokenAccounts: {}, ownerProgram: null, lastSeenAt: null, ownerSignatures: {} });
@@ -83,7 +87,13 @@ export interface WalletOwner {
   paused?: boolean;
 }
 /** A way to reach an owner. The target is sealed (crypto.ts): the stored file alone does not say where alerts go. */
-export interface Channel { id: string; profile: string; kind: ChannelKind; target: string; hint: string; addedAt: number }
+export interface Channel {
+  id: string; profile: string; kind: ChannelKind; target: string; hint: string; addedAt: number;
+  /** When it last took a message, unix seconds. */
+  delivered?: number;
+  /** Set while it is refusing them: since when, and what it answered, in words fit for its owner. */
+  failed?: { at: number; why: string };
+}
 /** `wallet`: the one whose signature started the session. */
 export interface Session { tokenHash: string; profile: string; expiresAt: number; wallet?: string }
 
@@ -117,6 +127,12 @@ export class MemoryStore implements Store {
     e.answer = answer;
     this.persist();
     return true;
+  }
+  markUndelivered(id: string): void {
+    const e = this.data.events.find((x) => x.id === id);
+    if (!e || e.undelivered) return;
+    e.undelivered = true;
+    this.persist();
   }
   /** Starts watching a wallet. A wallet already watched is left as it is. */
   watch(wallet: WatchedWallet): void {
