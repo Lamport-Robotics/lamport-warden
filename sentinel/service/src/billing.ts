@@ -14,6 +14,8 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Accounts } from "./accounts.js";
+import { paymentFailedNotice, planEndedNotice, planStartedNotice, priceChangedNotice } from "./notices.js";
+import { PLANS } from "./plans.js";
 import type { Rpc } from "./rpc.js";
 import type { Profile } from "./store.js";
 
@@ -89,7 +91,17 @@ const HOLDER_DECIMALS = 6;
 export interface Quote { enabled: true; checkoutOpen: boolean; tier: Profile["tier"]; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number }
 
 export class Billing {
-  constructor(private cfg: BillingConfig, private accounts: Accounts, private rpc: Rpc, private stripe: Stripe) {}
+  /** The checkout page last opened for each profile and not yet paid: there is one at a time. */
+  private open = new Map<string, string>();
+
+  /**
+   * @param opts.notice tells the profile's owner, through its channels, what the plan now is (notices.ts);
+   *                    the addresses are taken as it is called
+   */
+  constructor(private cfg: BillingConfig, private accounts: Accounts, private rpc: Rpc, private stripe: Stripe, private opts: { now?: () => number; notice?: (profile: string, sentence: string) => Promise<void> } = {}) {}
+
+  private now(): number { return this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000); }
+  private tell(profile: string, sentence: string): void { void this.opts.notice?.(profile, sentence).catch(() => undefined); }
 
   /**
    * True when the wallets of this profile hold enough of the token between them. Throws when a wallet could
@@ -124,7 +136,16 @@ export class Billing {
     if (p.billing && PAID.has(p.billing.status)) return { ok: false, status: 409, why: "this profile already has the paid plan." };
     let holder: boolean;
     try { holder = await this.holder(profile); } catch { return { ok: false, status: 502, why: "I could not read your wallet's balance just now, so I can't tell which price is yours. Try again in a minute." }; }
-    const session = await this.stripe.call("POST", "/checkout/sessions", {
+    // One checkout page at a time. An older page left open in another tab is closed before a new one is made,
+    // so paying on both, and so being charged twice a month, cannot happen. If the older one was just paid,
+    // nothing new is opened: the plan is on its way.
+    const earlier = this.open.get(profile);
+    if (earlier) {
+      const state = await this.stripe.call("POST", `/checkout/sessions/${earlier}/expire`).then(() => "expired", async () => String((await this.stripe.call("GET", `/checkout/sessions/${earlier}`).catch(() => null))?.status ?? "unknown"));
+      if (state === "complete") return { ok: false, status: 409, why: "a payment for this profile was just made and is being confirmed. Give it a minute, then load the page again." };
+      this.open.delete(profile);
+    }
+    const params: Record<string, string> = {
       mode: "subscription",
       "line_items[0][price]": holder ? this.cfg.priceHolder : this.cfg.priceFull,
       "line_items[0][quantity]": "1",
@@ -134,8 +155,21 @@ export class Billing {
       "subscription_data[metadata][profile]": profile,
       success_url: `${this.cfg.pageUrl}?plan=started`,
       cancel_url: `${this.cfg.pageUrl}?plan=cancelled`,
-    });
+      // the price was worked out just now, so the page is good for half an hour (Stripe's shortest), not a day
+      expires_at: String(this.now() + 31 * 60),
+    };
+    // someone who had the plan before comes back as the same Stripe customer: one history, one portal
+    const customer = p.billing?.customer;
+    let session: any;
+    try {
+      session = await this.stripe.call("POST", "/checkout/sessions", customer ? { ...params, customer } : params);
+    } catch (e) {
+      // a customer Stripe no longer has is not a reason to refuse a sale
+      if (!customer || !/resource_missing/.test(String((e as Error).message ?? e))) throw e;
+      session = await this.stripe.call("POST", "/checkout/sessions", params);
+    }
     if (typeof session?.url !== "string" || !session.url.startsWith("https://")) throw new Error("stripe returned no checkout address");
+    if (typeof session.id === "string" && /^cs_[A-Za-z0-9_]+$/.test(session.id)) this.open.set(profile, session.id);
     return { ok: true, url: session.url };
   }
 
@@ -152,15 +186,32 @@ export class Billing {
     return subscription?.items?.data?.[0]?.price?.id === this.cfg.priceHolder ? "holder" : "full";
   }
 
-  /** Takes a subscription as Stripe describes it and makes the profile match. */
+  /**
+   * True for a subscription to this plan and nothing else. The Stripe account can sell other things, and a
+   * subscription to one of them, whatever it names as its profile, is not a payment for this.
+   */
+  private ours(subscription: any): boolean {
+    const items = subscription?.items?.data;
+    const price = Array.isArray(items) && items.length === 1 ? items[0]?.price?.id : null;
+    return price === this.cfg.priceFull || price === this.cfg.priceHolder;
+  }
+
+  /** Takes a subscription as Stripe describes it and makes the profile match. The owner hears what changed. */
   private apply(profile: string, subscription: any): void {
     const p = this.accounts.profile(profile);
-    if (!p || typeof subscription?.id !== "string" || typeof subscription?.customer !== "string") return;
+    if (!p || typeof subscription?.id !== "string" || typeof subscription?.customer !== "string" || !this.ours(subscription)) return;
     const status = String(subscription.status ?? "");
     // a profile has one subscription: news about an old one must not undo the current one
     if (p.billing && p.billing.subscription !== subscription.id && PAID.has(p.billing.status)) return;
+    const was = { tier: p.tier, status: p.billing?.status ?? null };
+    const tier = PAID.has(status) ? "pro" : "watch";
+    // said before the plan's channels and wallets go, so it reaches the channels the plan paid for
+    if (was.tier === "pro" && tier === "watch") this.tell(profile, planEndedNotice(PLANS.watch.wallets, Math.max(0, this.accounts.walletsOf(profile).length - PLANS.watch.wallets)));
     this.accounts.setBilling(profile, { customer: subscription.customer, subscription: subscription.id, price: this.priceOf(subscription), status });
-    this.accounts.setTier(profile, PAID.has(status) ? "pro" : "watch");
+    this.accounts.setTier(profile, tier);
+    if (tier === "pro") this.open.delete(profile);
+    if (was.tier === "watch" && tier === "pro") this.tell(profile, planStartedNotice(PLANS.pro.wallets, PLANS.pro.pollSeconds));
+    else if (status === "past_due" && was.status !== "past_due") this.tell(profile, paymentFailedNotice());
   }
 
   /**
@@ -201,6 +252,8 @@ export class Billing {
         if (typeof item !== "string") throw new Error("the subscription has no item");
         const updated = await this.stripe.call("POST", `/subscriptions/${p.billing.subscription}`, { "items[0][id]": item, "items[0][price]": want === "holder" ? this.cfg.priceHolder : this.cfg.priceFull, proration_behavior: "none" });
         this.apply(p.id, updated);
+        // a price that changes is said before the bill that carries it, not found on a statement
+        this.tell(p.id, priceChangedNotice(want, want === "holder" ? this.cfg.centsHolder : this.cfg.centsFull, this.cfg.holderMin));
         moved += 1;
       } catch {
         failed += 1; // tried again tomorrow; the owner keeps the price they have

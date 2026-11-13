@@ -21,13 +21,17 @@ const short = (a: string) => `${a.slice(0, 4)}..${a.slice(-4)}`;
 /** A zero-width space after "://" and "www.": the text reads the same and no chat app takes it for an address to open. */
 const unlink = (s: string) => s.replace(/:\/\//g, ":\u200b//").replace(/\bwww\./gi, "www\u200b.");
 
-/** What is sent to one channel: the headers and the body. */
-export function messageFor(kind: ChannelKind, title: string, level: Level, sentence: string): { headers: Record<string, string>; body: string } {
-  if (kind === "ntfy") return { headers: { Title: title, Priority: level === "urgent" ? "5" : "3" }, body: sentence };
+/**
+ * What is sent to one channel: the headers and the body. `quiet` is for something worth a line and not worth
+ * a buzz (the owner signing in): ntfy and Discord deliver it without a sound; Slack has no such thing.
+ */
+export function messageFor(kind: ChannelKind, title: string, level: Level, sentence: string, quiet = false): { headers: Record<string, string>; body: string } {
+  if (kind === "ntfy") return { headers: { Title: title, Priority: level === "urgent" ? "5" : quiet ? "2" : "3" }, body: sentence };
   if (kind === "discord") {
     // every character Discord reads as formatting is escaped, nobody is mentioned, and nothing is unfurled
     const plain = unlink(sentence).replace(/[\\*_~`|>#\[\]()@:-]/g, (c) => (c === ":" ? c : `\\${c}`));
-    return { headers: { "content-type": "application/json" }, body: JSON.stringify({ content: `${title}\n${plain}`.slice(0, 1900), allowed_mentions: { parse: [] }, flags: 4 }) };
+    // flags: 4 suppresses embeds, 4096 delivers without a notification
+    return { headers: { "content-type": "application/json" }, body: JSON.stringify({ content: `${title}\n${plain}`.slice(0, 1900), allowed_mentions: { parse: [] }, flags: quiet ? 4 | 4096 : 4 }) };
   }
   // Slack: formatting off, the three characters it gives meaning to written as entities, nothing unfurled
   const plain = unlink(sentence).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -78,6 +82,26 @@ export class ChannelNotifier implements Notifier {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Tells the owner about a change to the profile itself: who signed in, what was removed, what the plan now
+   * is. It goes to the channels in use at the moment it is sent, so a notice about a channel being removed is
+   * sent before the channel is. Resolves when every channel has answered or timed out; never throws.
+   */
+  async notice(profile: string, sentence: string, opts: { quiet?: boolean } = {}): Promise<void> {
+    await Promise.all(this.accounts.channelsOfProfile(profile).map(async ({ kind, url }) => {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), this.opts.timeoutMs ?? 8000);
+      try {
+        const res = await this.post(url, { method: "POST", ...messageFor(kind, "Warden Sentinel: your profile", "alert", sentence, opts.quiet), redirect: "error", signal: ctl.signal });
+        if (!res.ok) this.miss(`profile ${profile.slice(0, 4)}`, `the channel answered ${res.status}`);
+      } catch (e) {
+        this.miss(`profile ${profile.slice(0, 4)}`, String((e as Error).message ?? e));
+      } finally {
+        clearTimeout(timer);
+      }
+    }));
   }
 
   private miss(wallet: string, why: string): void {

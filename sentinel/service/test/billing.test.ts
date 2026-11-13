@@ -9,6 +9,8 @@ import { Keypair } from "@solana/web3.js";
 import { Accounts } from "../src/accounts.js";
 import { Billing, Stripe, tokenUnits, verifyStripeSignature, type BillingConfig, type StripeFetch } from "../src/billing.js";
 import { LAMPORT_MINT, configFrom } from "../src/main.js";
+import { paymentFailedNotice, planEndedNotice, planStartedNotice, priceChangedNotice } from "../src/notices.js";
+import { ChannelNotifier } from "../src/notify.js";
 import type { Rpc } from "../src/rpc.js";
 import { api } from "../src/server.js";
 import { NonceBook } from "../src/signin.js";
@@ -35,6 +37,10 @@ class Chain implements Rpc {
 class FakeStripe {
   calls: { method: string; path: string; params: Record<string, string> }[] = [];
   subscriptions = new Map<string, any>();
+  /** Checkout pages by id: open, expired, or complete (paid). */
+  sessions = new Map<string, { status: "open" | "expired" | "complete" }>();
+  /** Customers Stripe no longer has. */
+  gone = new Set<string>();
   down = false;
   private n = 0;
   fetch: StripeFetch = async (url, init) => {
@@ -45,7 +51,19 @@ class FakeStripe {
     const reply = (status: number, body: unknown) => ({ ok: status < 300, status, json: async () => body });
     if (this.down) return reply(503, { error: { type: "api_error" } });
     if (init.headers.authorization !== "Bearer sk_test_x") return reply(401, { error: { type: "invalid_request_error" } });
-    if (init.method === "POST" && path === "/checkout/sessions") return reply(200, { id: `cs_${++this.n}`, url: `https://checkout.stripe.com/c/pay/cs_${this.n}` });
+    if (init.method === "POST" && path === "/checkout/sessions") {
+      if (params.customer && this.gone.has(params.customer)) return reply(400, { error: { code: "resource_missing" } });
+      const id = `cs_${++this.n}`;
+      this.sessions.set(id, { status: "open" });
+      return reply(200, { id, url: `https://checkout.stripe.com/c/pay/${id}` });
+    }
+    const cs = /^\/checkout\/sessions\/(cs_\w+?)(\/expire)?$/.exec(path);
+    if (cs) {
+      const session = this.sessions.get(cs[1]!);
+      if (!session) return reply(404, { error: { code: "resource_missing" } });
+      if (cs[2]) { if (session.status !== "open") return reply(400, { error: { code: "checkout_session_not_open" } }); session.status = "expired"; }
+      return reply(200, { id: cs[1], status: session.status });
+    }
     if (init.method === "POST" && path === "/billing_portal/sessions") return reply(200, { url: "https://billing.stripe.com/p/session/x" });
     const sub = /^\/subscriptions\/(sub_\w+)$/.exec(path);
     if (sub) {
@@ -68,10 +86,12 @@ function setup(checkoutOpen = true) {
   const store = new MemoryStore();
   const accounts = new Accounts(store, Buffer.alloc(32, 9));
   const chain = new Chain(), stripe = new FakeStripe();
-  const billing = new Billing({ ...cfg, checkoutOpen }, accounts, chain, new Stripe(cfg.secretKey, stripe.fetch));
+  /** What the owner was told about the plan, and the channels in use at that moment. */
+  const said: { profile: string; sentence: string; channels: string[] }[] = [];
+  const billing = new Billing({ ...cfg, checkoutOpen }, accounts, chain, new Stripe(cfg.secretKey, stripe.fetch), { now: () => T0, notice: async (profile, sentence) => { said.push({ profile, sentence, channels: accounts.channelsOfProfile(profile).map((c) => c.kind) }); } });
   const admitted = accounts.admit(A, null, T0);
   if (!admitted.ok) throw new Error("setup");
-  return { store, accounts, chain, stripe, billing, profile: admitted.profile };
+  return { store, accounts, chain, stripe, billing, said, profile: admitted.profile };
 }
 const sign = (payload: string, t: number, secret = WHSEC) => `t=${t},v1=${createHmac("sha256", secret).update(`${t}.${payload}`).digest("hex")}`;
 
@@ -188,6 +208,148 @@ describe("what Stripe says moves the tier", () => {
     expect(accounts.profile(profile)).toBeDefined();
     await billing.onEvent(stripe.changed("sub_1", "canceled"));
     expect(accounts.removeWallet(profile, A)).toEqual({ ok: true, profileRemoved: true });
+  });
+});
+
+describe("the checkout page", () => {
+  const sessionCalls = (stripe: FakeStripe) => stripe.calls.filter((c) => c.path.startsWith("/checkout/sessions")).map((c) => `${c.method} ${c.path}`);
+
+  it("is good for half an hour, and there is one at a time: opening another closes the one before", async () => {
+    const { stripe, billing, profile } = setup();
+    expect(await billing.checkout(profile)).toEqual({ ok: true, url: "https://checkout.stripe.com/c/pay/cs_1" });
+    expect(stripe.calls.at(-1)!.params.expires_at).toBe(String(T0 + 31 * 60));
+    expect(stripe.calls.at(-1)!.params.customer).toBeUndefined();
+
+    expect(await billing.checkout(profile)).toEqual({ ok: true, url: "https://checkout.stripe.com/c/pay/cs_2" });
+    expect(sessionCalls(stripe)).toEqual(["POST /checkout/sessions", "POST /checkout/sessions/cs_1/expire", "POST /checkout/sessions"]);
+    expect(stripe.sessions.get("cs_1")!.status).toBe("expired"); // paying on the page left open in another tab is no longer possible
+    expect(stripe.sessions.get("cs_2")!.status).toBe("open");
+  });
+
+  it("is not opened again while a payment just made is being confirmed", async () => {
+    const { accounts, stripe, billing, profile } = setup();
+    await billing.checkout(profile);
+    stripe.sessions.get("cs_1")!.status = "complete"; // paid; Stripe's word has not arrived yet
+    expect(await billing.checkout(profile)).toEqual({ ok: false, status: 409, why: "a payment for this profile was just made and is being confirmed. Give it a minute, then load the page again." });
+    expect(stripe.sessions.size).toBe(1);
+    // Stripe's word arrives: the plan is on, and that page is no longer remembered
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    expect(accounts.profile(profile)!.tier).toBe("pro");
+    await billing.onEvent(stripe.changed("sub_1", "canceled"));
+    expect(await billing.checkout(profile)).toMatchObject({ ok: true });
+    expect(sessionCalls(stripe).filter((c) => c.endsWith("/expire"))).toHaveLength(1); // only the try before the payment was known
+  });
+
+  it("an earlier page that already ran out, or that Stripe cannot find, does not stand in the way", async () => {
+    const { stripe, billing, profile } = setup();
+    await billing.checkout(profile);
+    stripe.sessions.get("cs_1")!.status = "expired";
+    expect(await billing.checkout(profile)).toMatchObject({ ok: true });
+    stripe.sessions.delete("cs_2");
+    expect(await billing.checkout(profile)).toMatchObject({ ok: true });
+  });
+
+  it("someone coming back is the same Stripe customer, and a customer Stripe no longer has is not a reason to refuse", async () => {
+    const { stripe, billing, profile } = setup();
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full", "cus_7"));
+    await billing.onEvent(stripe.changed("sub_1", "canceled"));
+    expect(await billing.checkout(profile)).toMatchObject({ ok: true });
+    expect(stripe.calls.at(-1)!.params.customer).toBe("cus_7");
+
+    stripe.gone.add("cus_7");
+    expect(await billing.checkout(profile)).toMatchObject({ ok: true });
+    expect(stripe.calls.at(-2)!.params.customer).toBe("cus_7");
+    expect(stripe.calls.at(-1)!.params.customer).toBeUndefined();
+    // any other refusal from Stripe is not papered over
+    stripe.down = true;
+    await expect(billing.checkout(profile)).rejects.toThrow(/stripe POST \/checkout\/sessions/);
+  });
+});
+
+describe("a subscription to something else", () => {
+  it("is not a payment for this plan, whatever profile it names", async () => {
+    const { accounts, stripe, billing, said, profile } = setup();
+    // the account sells another subscription, and its checkout names this profile
+    await billing.onEvent(stripe.start("sub_other", profile, "price_other"));
+    expect(accounts.profile(profile)).toMatchObject({ tier: "watch" });
+    expect(accounts.profile(profile)!.billing).toBeUndefined();
+    // this plan's price with something else beside it is not this plan either
+    const event = stripe.start("sub_two", profile, "price_full");
+    stripe.subscriptions.get("sub_two").items.data.push({ id: "si_extra", price: { id: "price_other" } });
+    await billing.onEvent(event);
+    expect(accounts.profile(profile)!.tier).toBe("watch");
+    expect(said).toEqual([]);
+
+    // and a name every object answers to is not a profile
+    for (const name of ["__proto__", "constructor", "__defineGetter__"]) await billing.onEvent(stripe.start(`sub_${name.replace(/_/g, "")}`, name, "price_full"));
+    expect(({} as any).billing).toBeUndefined();
+    expect(({} as any).tier).toBeUndefined();
+    expect(accounts.profile(profile)!.billing).toBeUndefined();
+  });
+});
+
+describe("what the owner is told about the plan", () => {
+  it("that it started, that a payment failed (once), and that it ended, on the channels it paid for", async () => {
+    const { accounts, stripe, billing, said, profile } = setup();
+    accounts.addChannel(profile, "https://ntfy.sh/alice-topic-123", T0);
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    expect(said).toEqual([{ profile, sentence: planStartedNotice(10, 20), channels: ["ntfy"] }]);
+    expect(said[0]!.sentence).toBe("This profile's Sentinel plan has started: up to 10 wallets, each read every 20 seconds.");
+    // the same news twice is said once
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    expect(said).toHaveLength(1);
+
+    accounts.addChannel(profile, ["https://discord.com/api", "webhooks", "123456789012345678", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-abcd"].join("/"), T0 + 1);
+    for (let i = 0; i < 4; i++) accounts.admit(addr(30 + i), profile, T0 + 2 + i);
+
+    await billing.onEvent(stripe.changed("sub_1", "past_due"));
+    await billing.onEvent(stripe.changed("sub_1", "past_due"));
+    expect(said.slice(1)).toEqual([{ profile, sentence: paymentFailedNotice(), channels: ["ntfy", "discord"] }]);
+
+    await billing.onEvent(stripe.changed("sub_1", "canceled"));
+    // five wallets, three watched on the free plan; and Discord still hears it, though it is about to go quiet
+    expect(said[2]).toEqual({ profile, sentence: planEndedNotice(3, 2), channels: ["ntfy", "discord"] });
+    expect(said[2]!.sentence).toBe("This profile's Sentinel plan has ended, so it is on the free plan again: 3 wallets, read every minute, alerts to one ntfy channel. 2 of its wallets are no longer watched.");
+    expect(accounts.channelsOfProfile(profile).map((c) => c.kind)).toEqual(["ntfy"]);
+    expect(planEndedNotice(3, 0)).not.toContain("no longer watched");
+    expect(planEndedNotice(3, 1)).toContain("1 of its wallets is no longer watched.");
+  });
+
+  it("that the price is about to change, before the bill that carries it", async () => {
+    const { chain, stripe, billing, said, profile } = setup();
+    chain.balances[A] = [300_000];
+    await billing.onEvent(stripe.start("sub_1", profile, "price_holder"));
+    said.length = 0;
+    chain.balances[A] = [10];
+    expect(await billing.reprice()).toEqual({ moved: 1, failed: 0 });
+    expect(said.map((x) => x.sentence)).toEqual([priceChangedNotice("full", 1500, 250_000)]);
+    expect(said[0]!.sentence).toBe("From its next bill, this profile's Sentinel plan is $15 a month: its wallets no longer hold 250,000 $LAMPORT between them.");
+    chain.balances[A] = [250_000];
+    await billing.reprice();
+    expect(said[1]!.sentence).toBe("From its next bill, this profile's Sentinel plan is $10 a month: its wallets hold 250,000 $LAMPORT between them.");
+    // nothing moved, nothing said; a balance that could not be read is not news either
+    await billing.reprice();
+    chain.down = true;
+    await billing.reprice();
+    expect(said).toHaveLength(2);
+    expect(priceChangedNotice("full", 1250, 250_000)).toContain("$12.50 a month");
+  });
+
+  it("through the real notifier: the plan's end reaches the Discord channel that is about to stop being used", async () => {
+    const store = new MemoryStore();
+    const accounts = new Accounts(store, Buffer.alloc(32, 9));
+    const stripe = new FakeStripe();
+    const posts: string[] = [];
+    const notifier = new ChannelNotifier(accounts, async (url) => { posts.push(new URL(url).host); return { ok: true, status: 200 }; });
+    const billing = new Billing(cfg, accounts, new Chain(), new Stripe(cfg.secretKey, stripe.fetch), { notice: (p, s) => notifier.notice(p, s) });
+    const admitted = accounts.admit(A, null, T0);
+    const profile = admitted.ok ? admitted.profile : "";
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    accounts.addChannel(profile, ["https://discord.com/api", "webhooks", "123456789012345678", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-abcd"].join("/"), T0);
+    posts.length = 0;
+    await billing.onEvent(stripe.changed("sub_1", "canceled"));
+    expect(posts).toEqual(["discord.com"]);
+    expect(accounts.channelsOfProfile(profile)).toEqual([]); // and from now on it is not used
   });
 });
 

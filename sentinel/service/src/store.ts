@@ -77,7 +77,8 @@ export interface WalletOwner {
 }
 /** A way to reach an owner. The target is sealed (crypto.ts): the stored file alone does not say where alerts go. */
 export interface Channel { id: string; profile: string; kind: ChannelKind; target: string; hint: string; addedAt: number }
-export interface Session { tokenHash: string; profile: string; expiresAt: number }
+/** `wallet`: the one whose signature started the session. */
+export interface Session { tokenHash: string; profile: string; expiresAt: number; wallet?: string }
 
 /** The service's own tables (accounts.ts reads and writes them). */
 export interface AccountsData {
@@ -95,7 +96,7 @@ export class MemoryStore implements Store {
   protected data: Data = { wallets: [], records: {}, events: [], accounts: noAccounts() };
   constructor(wallets: WatchedWallet[] = []) { this.data.wallets = wallets; }
   wallets(): WatchedWallet[] { return this.data.wallets; }
-  record(wallet: string): WalletRecord { return structuredClone(this.data.records[wallet] ?? fresh()); }
+  record(wallet: string): WalletRecord { return structuredClone(Object.hasOwn(this.data.records, wallet) ? this.data.records[wallet]! : fresh()); }
   private watched(wallet: string): boolean { return this.data.wallets.some((w) => w.address === wallet); }
   // A wallet can be removed while it is being read. What that read then writes is dropped: forgotten stays forgotten.
   save(wallet: string, record: WalletRecord): void { if (!this.watched(wallet)) return; this.data.records[wallet] = structuredClone(record); this.persist(); }
