@@ -11,7 +11,8 @@
  *   SENTINEL_PRO_POLL_SECONDS  how often a wallet on the paid plan is read (default 20, as the plan says)
  *   SENTINEL_NTFY_HOSTS   ntfy hosts alerts may go to, comma-separated (default ntfy.sh)
  *   SENTINEL_TRUST_PROXY  "1" when a proxy this process trusts sets X-Forwarded-For
- *   SENTINEL_MAX_WALLETS  how many wallets it watches in all (default 100): each costs RPC calls every round
+ *   SENTINEL_MAX_WALLETS  how many wallets it watches in all (default 500): what one data file, rewritten whole,
+ *                         carries comfortably
  *   SENTINEL_RPC_HEAVY_PER_10S, SENTINEL_RPC_LIGHT_PER_10S  how fast the RPC may be asked (rpc.ts): calls
  *                         started per ten seconds, for the two listings an RPC rations and for the rest.
  *                         Unset: what the public Solana RPC takes when that is the RPC, no limit otherwise.
@@ -20,10 +21,13 @@
  *   SENTINEL_PUSH         "off" to read wallets only in turn. Otherwise the RPC is also asked, over a websocket,
  *                         to say when a watched wallet is in a transaction, and that wallet is read at once (push.ts)
  *   SENTINEL_RPC_WS_URL   the RPC's websocket address, when it is not the RPC's own address with wss:// in front
+ *   SENTINEL_PUSH_LINES, SENTINEL_PUSH_PER_LINE   how many websocket connections, and subscriptions on each
+ *                         (default 5 and 90, which is what the public RPC takes from one address)
  *   SENTINEL_READS_PER_MINUTE  how many reads of a wallet a minute are promised in all. A free wallet is one,
- *                         a paid one three. Unset: four fifths of what the pace above allows, the rest being
- *                         for what a read leads to (a new transaction, a first look at a new wallet); no
- *                         limit when the RPC is not paced. A new wallet is turned away when its reads do not fit.
+ *                         a paid one three. A read is a look at the wallet's accounts, a hundred accounts to
+ *                         a call, on the part of the RPC that is barely rationed. Unset: half of what that
+ *                         pace carries, taking a wallet for twelve accounts; no limit when the RPC is not
+ *                         paced. A new wallet is turned away when its reads do not fit.
  *   SENTINEL_RESERVED_FOR_PRO  how many of those places are kept for profiles on the paid plan (default: a
  *                         fifth of them when the paid plan is set up, none when it is not)
  *   SENTINEL_OPS_CHANNEL  where whoever runs the service is told what no owner can act on (ops.ts): an ntfy
@@ -52,9 +56,9 @@ import { HttpRpc, PUBLIC_RPC_PACE, type Pace } from "./rpc.js";
 import { listen } from "./server.js";
 import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore, type StoredEvent } from "./store.js";
-import { Watcher, type Notifier } from "./watcher.js";
+import { ACCOUNTS_PER_CALL, Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: ChannelKind; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: ChannelKind; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -93,7 +97,7 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   if (!Number.isFinite(pollSeconds) || pollSeconds < 5) return { ok: false, why: "SENTINEL_POLL_SECONDS has to be 5 or more." };
   // the paid plan is sold as the faster one: a setting that made it slower would make the page a lie
   if (!Number.isFinite(proPollSeconds) || proPollSeconds < 5 || proPollSeconds > pollSeconds) return { ok: false, why: "SENTINEL_PRO_POLL_SECONDS has to be 5 or more, and no more than SENTINEL_POLL_SECONDS." };
-  const maxWallets = Number(env.SENTINEL_MAX_WALLETS ?? 100);
+  const maxWallets = Number(env.SENTINEL_MAX_WALLETS ?? 500);
   if (!Number.isInteger(maxWallets) || maxWallets < 1) return { ok: false, why: "SENTINEL_MAX_WALLETS has to be a whole number above zero." };
   const ntfyHosts = new Set((env.SENTINEL_NTFY_HOSTS ?? "ntfy.sh").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean));
   // how fast the RPC may be asked: what was measured for the public one, unless said otherwise
@@ -112,6 +116,8 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
     pushUrl = env.SENTINEL_RPC_WS_URL ? env.SENTINEL_RPC_WS_URL : pushUrlFor(rpcUrl);
     try { if (!pushUrl || !/^wss?:$/.test(new URL(pushUrl).protocol)) throw new Error(); } catch { return { ok: false, why: "SENTINEL_RPC_WS_URL has to be the RPC's websocket address (wss://…)." }; }
   }
+  const pushLines = Number(env.SENTINEL_PUSH_LINES ?? 5), pushPerLine = Number(env.SENTINEL_PUSH_PER_LINE ?? 90);
+  if (!Number.isInteger(pushLines) || pushLines < 1 || pushLines > 200 || !Number.isInteger(pushPerLine) || pushPerLine < 1 || pushPerLine > 100_000) return { ok: false, why: "SENTINEL_PUSH_LINES and SENTINEL_PUSH_PER_LINE have to be whole numbers above zero." };
   const readers = Number(env.SENTINEL_READERS ?? 3);
   if (!Number.isInteger(readers) || readers < 1 || readers > 32) return { ok: false, why: "SENTINEL_READERS has to be a whole number from 1 to 32." };
   const opsChannel = env.SENTINEL_OPS_CHANNEL ? cleanTarget(env.SENTINEL_OPS_CHANNEL, ntfyHosts) : null;
@@ -123,12 +129,12 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   if (!Number.isInteger(reservedForPro) || reservedForPro < 0 || reservedForPro >= maxWallets) return { ok: false, why: "SENTINEL_RESERVED_FOR_PRO has to be a whole number, zero or more, and less than SENTINEL_MAX_WALLETS." };
   // what can be promised: so many reads a minute, of which a wallet on each plan takes its share
   const readsGiven = env.SENTINEL_READS_PER_MINUTE;
-  const perMinute = readsGiven !== undefined && readsGiven !== "" ? Number(readsGiven) : rpcPace.heavyPer10s ? Math.floor(rpcPace.heavyPer10s * 6 * 0.8) : 0;
+  const perMinute = readsGiven !== undefined && readsGiven !== "" ? Number(readsGiven) : rpcPace.lightPer10s ? Math.floor((rpcPace.lightPer10s * 6 * ACCOUNTS_PER_CALL * 0.5) / ACCOUNTS_PER_WALLET) : 0;
   if (!Number.isFinite(perMinute) || perMinute < 0) return { ok: false, why: "SENTINEL_READS_PER_MINUTE has to be a number of reads a minute, or 0 for no limit." };
   const reads: ReadBudget | null = perMinute > 0
     ? { perMinute, cost: { watch: 60 / pollSeconds, pro: 60 / proPollSeconds }, reservedForPro: billing.billing ? Math.floor(perMinute * (reservedForPro / maxWallets)) : 0 }
     : null;
-  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
+  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -157,6 +163,8 @@ export function startRounds(round: () => Promise<void>, everySeconds: number, lo
  */
 export function pacer(tierOf: (wallet: string) => "watch" | "pro", seconds: { watch: number; pro: number }) {
   const last = new Map<string, number>();
+  /** What `last` was before the latest pick, so that a pick can be taken back. */
+  const before = new Map<string, number | undefined>();
   /** When a wallet was first asked about: what a wallet that was never read is measured from. */
   const known = new Map<string, number>();
   /** Wallets the RPC has just said something about, and when each was last read on its word. */
@@ -171,9 +179,22 @@ export function pacer(tierOf: (wallet: string) => "watch" | "pro", seconds: { wa
       since(wallet, now);
       if (!isDue(wallet, now)) return false;
       if (urgent.delete(wallet)) hurried.set(wallet, now);
+      before.set(wallet, last.get(wallet));
       last.set(wallet, now);
       picked.push(wallet);
       return true;
+    },
+    /**
+     * The wallet was picked and then not read (the round had more to read through than it could): the pick is
+     * taken back. It is due as it was, a little further behind, and so nearer the front next time; and it is
+     * not counted as read when it was not.
+     */
+    again(wallet: string): void {
+      if (!before.has(wallet)) return;
+      const was = before.get(wallet);
+      if (was === undefined) last.delete(wallet); else last.set(wallet, was);
+      before.delete(wallet);
+      picked = picked.filter((w) => w !== wallet);
     },
     /**
      * The RPC says this wallet has just been in a transaction: it is read next, ahead of its turn. Not more
@@ -213,13 +234,23 @@ export function pacer(tierOf: (wallet: string) => "watch" | "pro", seconds: { wa
       }
       return { count, worst };
     },
+    /** True when the RPC has spoken of this wallet and it has not been read since. */
+    isUrgent(wallet: string): boolean { return urgent.has(wallet); },
     tried(): string[] { const t = picked; picked = []; return t; },
-    forget(keep: (wallet: string) => boolean): void { for (const m of [last, known, hurried]) for (const w of m.keys()) if (!keep(w)) m.delete(w); for (const w of urgent) if (!keep(w)) urgent.delete(w); },
+    forget(keep: (wallet: string) => boolean): void { for (const m of [last, known, hurried, before]) for (const w of m.keys()) if (!keep(w)) m.delete(w); for (const w of urgent) if (!keep(w)) urgent.delete(w); },
   };
 }
 
+/** What a wallet is taken to cost a look, before it is known: itself and eleven token accounts. Most have fewer. */
+export const ACCOUNTS_PER_WALLET = 12;
+
 /** The breath between one round of reading and the next. */
 export const ROUND_GAP_SECONDS = 2;
+
+/** As much of the watcher as a round uses. `deferred`: wallets it was asked to read and did not get to. */
+export interface RoundWatcher {
+  passAll(only?: (address: string) => boolean, opts?: { full?: (address: string) => boolean; mostPasses?: number }): Promise<{ raised: unknown[]; blind: { wallet: string; why: string }[]; deferred?: string[] }>;
+}
 
 /** How long wallets may be read late before whoever runs the service is told. */
 export const LATE_FOR_SECONDS = 15 * 60;
@@ -229,20 +260,27 @@ export const LATE_FOR_SECONDS = 15 * 60;
  * tell an owner when theirs has gone unread for long enough to matter, and again when it is read.
  */
 export function watchRound(o: {
-  watcher: Pick<Watcher, "passAll">; store: MemoryStore; notifier: Notifier; pace: ReturnType<typeof pacer>; blindness: Blindness;
+  watcher: RoundWatcher; store: MemoryStore; notifier: Notifier; pace: ReturnType<typeof pacer>; blindness: Blindness;
   state: { lastPassAt: number | null; blind: number; late?: number }; log?: (line: string) => void;
   /** Whoever runs the service hears when wallets go unread for long, and when they are read again. */
   ops?: Pick<Ops, "say">;
   /** How many wallets one round reads at most: a round is kept short so that the next can take whoever became due meanwhile. */
   batch?: number;
+  /** How many of those it reads through (their transactions, not just a look at their accounts) at most. */
+  mostPasses?: number;
 }): (now?: number) => Promise<void> {
   const blindNow = new Set<string>();
   const log = o.log ?? console.error;
   let lateSince: number | null = null;
   return async (now = Math.floor(Date.now() / 1000)) => {
     // the wallets furthest behind their own promise, and no more of them than one short round can read
-    const chosen = new Set(o.pace.due(o.store.wallets().map((w) => w.address), now, o.batch ?? Infinity));
-    const { blind } = await o.watcher.passAll((w) => chosen.has(w) && o.pace.pick(w, now));
+    const due = o.pace.due(o.store.wallets().map((w) => w.address), now, o.batch ?? Infinity);
+    const chosen = new Set(due);
+    // a wallet the RPC has just spoken of is read through, whatever a look at its accounts would say
+    const spokenOf = new Set(due.filter((w) => o.pace.isUrgent(w)));
+    const { blind, deferred = [] } = await o.watcher.passAll((w) => chosen.has(w) && o.pace.pick(w, now), { full: (w) => spokenOf.has(w), ...(o.mostPasses !== undefined ? { mostPasses: o.mostPasses } : {}) });
+    // not read this round, through no fault of theirs: still due, and still spoken of if they were
+    for (const w of deferred) { o.pace.again(w); if (spokenOf.has(w)) o.pace.hurry(w, now, 0); }
     const failed = new Set(blind.map((b) => b.wallet));
     let stopped = 0, resumed = 0;
     for (const w of o.pace.tried()) {
@@ -320,7 +358,12 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const ops = new Ops(cfg.opsChannel, store.said, { saved: () => store.flush() });
   // one client for one RPC, so that everything asked of it is counted against the same pace
   const rpc = new HttpRpc(cfg.rpcUrl, undefined, { pace: cfg.rpcPace });
-  const watcher = new Watcher(rpc, store, notifier, { readers: cfg.readers });
+  // How long a wallet whose accounts never move may go without its list of transactions being read: ten
+  // minutes, or longer when there are more wallets than the rationed call can get round in that time (two
+  // fifths of its pace is given to this; the rest is for wallets whose accounts did move).
+  const passesPerMinute = cfg.rpcPace.heavyPer10s ? cfg.rpcPace.heavyPer10s * 6 * 0.4 : Infinity;
+  const fullEverySeconds = () => Math.max(600, Math.ceil(store.wallets().length / passesPerMinute) * 60);
+  const watcher = new Watcher(rpc, store, notifier, { readers: cfg.readers, fullEverySeconds });
   const state = { lastPassAt: null as number | null, blind: 0, late: 0 };
 
   if (store.restoredFrom) void ops.say(`The data file was ${store.setAside ? "unreadable" : "missing"}, so Sentinel started from the snapshot ${store.restoredFrom.split("/").pop()}. What changed after that snapshot is lost${store.setAside ? "; the unreadable file was set aside, not deleted" : ""}.`, "restored", 0);
@@ -329,11 +372,13 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const pace = pacer((w) => accounts.profile(accounts.profileOf(w) ?? "")?.tier ?? "watch", { watch: cfg.pollSeconds, pro: cfg.proPollSeconds });
   // Short rounds, one after another with a breath between: each takes the few wallets furthest behind their
   // promise, so whoever becomes due while a round is under way waits for a handful of reads and not for all.
-  const batch = Math.max(2, Math.ceil((cfg.rpcPace.heavyPer10s ?? 40) / 3));
-  const round = watchRound({ watcher, store, notifier, pace, blindness: new Blindness(), state, ops, batch });
+  const batch = Math.max(10, Math.round(((cfg.rpcPace.lightPer10s ?? 200) * 0.2 * ACCOUNTS_PER_CALL) / ACCOUNTS_PER_WALLET));
+  // and it reads through as many as the rationed call starts in about three seconds
+  const mostPasses = Math.max(2, Math.ceil((cfg.rpcPace.heavyPer10s ?? 60) / 3));
+  const round = watchRound({ watcher, store, notifier, pace, blindness: new Blindness(), state, ops, batch, mostPasses });
   // And the RPC is asked to say when a watched wallet is in a transaction: that wallet is then read next,
   // ahead of its turn. Only a reason to read sooner; the reading in turn above goes on whatever this does.
-  const push = cfg.pushUrl ? new Push({ url: cfg.pushUrl, onMention: (wallet) => { pace.hurry(wallet, Math.floor(Date.now() / 1000)); } }) : null;
+  const push = cfg.pushUrl ? new Push({ url: cfg.pushUrl, lines: cfg.pushLines, perLine: cfg.pushPerLine, onMention: (wallet) => { pace.hurry(wallet, Math.floor(Date.now() / 1000)); } }) : null;
   push?.start();
   const stopRounds = startRounds(pushedRounds(round, push, () => store.wallets().map((w) => w.address), ops), ROUND_GAP_SECONDS);
 
@@ -371,5 +416,6 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const started = `watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : "set up, checkout closed") : "not set up"}`;
   // said at most every ten minutes, so a service that keeps falling over does not fill the channel
   void ops.say(`Sentinel started: ${started}.`, "started", 600);
-  return async () => { stopRounds(); push?.stop(); stopHourly(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); };
+  // on the way out, what was waiting to be written (when each wallet was last looked at) is written
+  return async () => { stopRounds(); push?.stop(); stopHourly(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); store.flush(); };
 }

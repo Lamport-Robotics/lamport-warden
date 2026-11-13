@@ -18,8 +18,23 @@ import type { Store, StoredEvent, WatchedWallet } from "./store.js";
 export const MAX_TOKEN_ACCOUNTS = 1000;
 /** How many new transactions one pass reads. */
 export const MOST_PER_PASS = 25;
+/** How many accounts one call can ask about, and so how many of a wallet's token accounts a look takes in beside the wallet. */
+export const ACCOUNTS_PER_CALL = 100;
 
 const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
+
+/**
+ * One account as a line of text, for comparing one look with the next. The wallet itself: its balance and the
+ * program that owns it. A token account: its amount, who may spend it and how much, who owns it, who may
+ * close it, and whether it is frozen. An account that is not there says so.
+ */
+function lineOf(address: string, value: unknown, isWallet: boolean): string {
+  const v = value as { lamports?: unknown; owner?: unknown; data?: { parsed?: { info?: Record<string, any> } } } | null | undefined;
+  if (!v) return `${address}:none`;
+  const info = v.data?.parsed?.info;
+  if (isWallet || !info) return `${address}:${String(v.lamports)}:${String(v.owner)}`;
+  return [address, String(info.tokenAmount?.amount ?? ""), String(info.delegate ?? ""), String(info.delegatedAmount?.amount ?? ""), String(info.owner ?? ""), String(info.closeAuthority ?? ""), String(info.state ?? "")].join(":");
+}
 
 /** Sends an alert to the owner. The text is a plain sentence: it never carries a link, and never asks for a signature. */
 export interface Notifier {
@@ -45,6 +60,11 @@ export interface WatcherOptions {
   accountsEverySeconds?: number;
   /** How many new transactions one pass reads at most (default 25); the rest wait for the next pass. */
   mostPerPass?: number;
+  /**
+   * How long a wallet may go without its list of transactions being read through, when every look at its
+   * accounts finds them unchanged (default 600 seconds). A number, or a way to work one out as the service grows.
+   */
+  fullEverySeconds?: number | (() => number);
   /** How many wallets are read at the same time (default 1). The RPC client keeps the pace; this keeps a slow answer from holding up the rest. */
   readers?: number;
   now?: () => number;
@@ -166,11 +186,50 @@ export class Watcher {
    * One pass over one wallet. The first pass builds the baseline from the wallet's history and raises nothing
    * for it: what already happened is not news. Later passes read what is new, oldest first.
    */
-  pass(w: WatchedWallet): Promise<StoredEvent[]> {
-    return this.exclusive(w.address, () => this.passNow(w));
+  pass(w: WatchedWallet, print?: string): Promise<StoredEvent[]> {
+    return this.exclusive(w.address, () => this.passNow(w, print));
   }
 
-  private async passNow(w: WatchedWallet): Promise<StoredEvent[]> {
+  /**
+   * A look at many wallets' accounts at once: a hundred accounts to a call, on the part of the RPC that is
+   * barely rationed. For each wallet it reads the wallet's own account and its token accounts, and reduces
+   * them to one line: balance and owner, and for each token account its amount, who may spend it and how
+   * much, who owns it, who may close it. Everything an alert is about moves that line. A wallet whose line is
+   * the one kept from last time has had nothing happen to its money or its permissions, and its list of
+   * transactions need not be asked for, which is the call an RPC rations.
+   *
+   * What a look cannot see is a transaction that changes none of those. That is what the push line and the
+   * full pass every so often are for.
+   */
+  async glance(wallets: WatchedWallet[]): Promise<{ prints: Map<string, string>; failed: Map<string, string> }> {
+    const prints = new Map<string, string>(), failed = new Map<string, string>();
+    // each wallet's addresses stay together in one call, so that one answer says everything about it
+    const calls: { wallet: string; addresses: string[] }[][] = [[]];
+    let room = ACCOUNTS_PER_CALL;
+    for (const w of wallets) {
+      const tokens = Object.keys(this.store.record(w.address).tokenAccounts).sort().slice(0, ACCOUNTS_PER_CALL - 1);
+      const addresses = [w.address, ...tokens];
+      if (addresses.length > room) { calls.push([]); room = ACCOUNTS_PER_CALL; }
+      calls[calls.length - 1]!.push({ wallet: w.address, addresses });
+      room -= addresses.length;
+    }
+    await Promise.all(calls.filter((c) => c.length > 0).map(async (group) => {
+      try {
+        const res = await this.rpc.call("getMultipleAccounts", [group.flatMap((g) => g.addresses), { encoding: "jsonParsed", commitment: "confirmed" }]);
+        const values: unknown[] = Array.isArray(res?.value) ? res.value : [];
+        let at = 0;
+        for (const g of group) {
+          prints.set(g.wallet, g.addresses.map((address, i) => lineOf(address, values[at + i], i === 0)).join("\n"));
+          at += g.addresses.length;
+        }
+      } catch (e) {
+        for (const g of group) failed.set(g.wallet, String((e as Error).message ?? e));
+      }
+    }));
+    return { prints, failed };
+  }
+
+  private async passNow(w: WatchedWallet, print?: string): Promise<StoredEvent[]> {
     const wallet = w.address;
     if (!this.watching(wallet)) return [];
     const record = this.store.record(wallet);
@@ -193,10 +252,12 @@ export class Watcher {
       somethingNew = fresh.length > 0;
       // So many in one pass, oldest first, and the rest on the next: a wallet that transacts without pause
       // (a bot, an exchange) must not hold a reader, and the RPC's allowance, for as long as it likes.
+      let read = 0;
       for (const signature of fresh.slice(0, this.opts.mostPerPass ?? MOST_PER_PASS)) {
         const tx = await this.transaction(signature);
         // a transaction the RPC does not have yet is read on the next pass: the cursor stays before it
         if (!tx) break;
+        read += 1;
         const a = assessTransaction(tx, { ...ctxBase, ownerSigned: signature in record.ownerSignatures || !!this.reported.get(wallet)?.has(signature) });
         const event = await this.raise(wallet, a, tx);
         if (event) raised.push(event);
@@ -204,6 +265,8 @@ export class Watcher {
         if (a.level === null || a.level === "info") baseline.learn(tx, wallet);
         record.cursor = signature;
       }
+      // what is listed and not yet read is read on this wallet's very next turn, not when its accounts next move
+      record.more = read < fresh.length;
     }
 
     // The accounts themselves: what an instruction list can hide. What is watched here (who may spend a token
@@ -237,6 +300,10 @@ export class Watcher {
 
     record.baseline = baseline.toJSON();
     record.lastSeenAt = this.now();
+    record.passedAt = record.lastSeenAt;
+    // The line its accounts made just before this pass began. Anything that happened after that look moves
+    // the next one, and the wallet is read through again: nothing falls between a look and a pass.
+    if (print !== undefined) record.glance = { print, at: record.lastSeenAt };
     this.takeReported(wallet, record);
     this.store.save(wallet, record);
     return raised;
@@ -251,20 +318,55 @@ export class Watcher {
   }
 
   /**
-   * One pass over every wallet, or over the ones `only` picks. A wallet that could not be read is reported,
-   * and the others are still read.
+   * One round over every wallet, or over the ones `only` picks. First a look at all their accounts together.
+   * Then a full pass, which reads the list of transactions, for each wallet that needs one: its accounts are
+   * not as they were, it was never read, it has gone long enough without one, or `full` says so (the RPC has
+   * just said it was in a transaction). The rest were looked at and found unchanged, and that is their read.
+   * A wallet that could not be read is reported, and the others are still read.
    */
-  async passAll(only?: (address: string) => boolean): Promise<{ raised: StoredEvent[]; blind: { wallet: string; why: string }[] }> {
+  async passAll(only?: (address: string) => boolean, opts: { full?: (address: string) => boolean; mostPasses?: number } = {}): Promise<{ raised: StoredEvent[]; blind: { wallet: string; why: string }[]; deferred: string[] }> {
     const raised: StoredEvent[] = [];
     const blind: { wallet: string; why: string }[] = [];
-    const queue = this.store.wallets().filter((w) => !only || only(w.address));
+    const chosen = this.store.wallets().filter((w) => !only || only(w.address));
+    const now = this.now();
+    const every = typeof this.opts.fullEverySeconds === "function" ? this.opts.fullEverySeconds() : this.opts.fullEverySeconds ?? 600;
+    // Why a wallet would need its transactions read, most pressing first: the RPC has just spoken of it (0);
+    // a pass left some unread (1); it was never read (3); or only that it has been long enough (4). A look
+    // that differs is 2, and is decided below.
+    const kept = new Map<string, { print: string | undefined; known: boolean; why: number | null }>();
+    for (const w of chosen) {
+      const r = this.store.record(w.address);
+      const known = r.lastSeenAt !== null;
+      const why = opts.full?.(w.address) === true ? 0 : r.more === true ? 1 : !known ? 3 : now - (r.passedAt ?? 0) >= every ? 4 : null;
+      kept.set(w.address, { print: r.glance?.print, known, why });
+    }
+    // a wallet never read has no token accounts on record to look at: its first pass finds them
+    const { prints, failed } = await this.glance(chosen.filter((w) => kept.get(w.address)!.known));
+    const wanted: { w: WatchedWallet; print: string | undefined; why: number; moved: boolean }[] = [];
+    const same: string[] = [];
+    for (const w of chosen) {
+      const k = kept.get(w.address)!;
+      const failure = failed.get(w.address);
+      if (failure !== undefined) { blind.push({ wallet: w.address, why: failure }); continue; }
+      const print = prints.get(w.address);
+      const moved = k.known && (print === undefined || print !== k.print);
+      if (k.why !== null || moved) wanted.push({ w, print, why: Math.min(k.why ?? 2, moved ? 2 : 9), moved }); else same.push(w.address);
+    }
+    // A round is kept short: it reads through so many wallets and no more, the most pressing first. One that
+    // is only due for its now-and-then pass, with its accounts as they were, has been read by the look and
+    // waits for a quieter round. Any other has not been read yet, and is handed back to be taken first next time.
+    wanted.sort((a, b) => a.why - b.why);
+    const queue = wanted.slice(0, opts.mostPasses ?? Infinity);
+    const deferred: string[] = [];
+    for (const left of wanted.slice(queue.length)) { if (left.why === 4 && !left.moved) same.push(left.w.address); else deferred.push(left.w.address); }
+    if (same.length > 0) this.store.seen?.(same, now);
     const reader = async () => {
-      for (let w = queue.shift(); w; w = queue.shift()) {
-        try { raised.push(...(await this.pass(w))); } catch (e) { blind.push({ wallet: w.address, why: String((e as Error).message ?? e) }); }
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        try { raised.push(...(await this.pass(next.w, next.print))); } catch (e) { blind.push({ wallet: next.w.address, why: String((e as Error).message ?? e) }); }
       }
     };
     await Promise.all(Array.from({ length: Math.max(1, Math.min(this.opts.readers ?? 1, queue.length)) }, reader));
-    return { raised, blind };
+    return { raised, blind, deferred };
   }
 
   /** Wallets not read successfully for `seconds`: the owner is told when watching stops. */

@@ -36,7 +36,7 @@ function setup(most?: number) {
   const mentions: string[] = [];
   const timers: { work: () => void; ms: number }[] = [];
   const log: string[] = [];
-  const push = new Push({ url: "wss://rpc.example", onMention: (w) => mentions.push(w), socket: (u) => { const s = new FakeSocket(u); sockets.push(s); return s; }, later: (work, ms) => { timers.push({ work, ms }); }, log: (l) => log.push(l), ...(most ? { most } : {}) });
+  const push = new Push({ url: "wss://rpc.example", onMention: (w) => mentions.push(w), socket: (u) => { const s = new FakeSocket(u); sockets.push(s); return s; }, later: (work, ms) => { timers.push({ work, ms }); }, log: (l) => log.push(l), ...(most ? { perLine: most, lines: 1 } : {}) });
   return { push, sockets, mentions, timers, log, runTimers: () => { for (const t of timers.splice(0)) t.work(); } };
 }
 
@@ -47,10 +47,12 @@ describe("the push line", () => {
     s.push.watch([A, B]);
     expect(s.sockets[0]!.sent).toEqual([]); // not open yet: nothing is sent into the void
     s.sockets[0]!.emit("open");
+    expect(s.sockets[0]!.sent).toEqual([]); // open: and nothing is asked for until the wallets are next given, a round later
+    s.push.watch([A, B]);
     expect(s.sockets[0]!.sent.map((m) => [m.method, m.params[0].mentions, m.params[1]])).toEqual([["logsSubscribe", [A], { commitment: "confirmed" }], ["logsSubscribe", [B], { commitment: "confirmed" }]]);
-    expect(s.push.state).toEqual({ connected: true, listening: 0 }); // asked, not yet answered
+    expect(s.push.state).toEqual({ connected: true, listening: 0, lines: 1 }); // asked, not yet answered
     s.sockets[0]!.ack();
-    expect(s.push.state).toEqual({ connected: true, listening: 2 });
+    expect(s.push.state).toEqual({ connected: true, listening: 2, lines: 1 });
 
     s.sockets[0]!.say({ jsonrpc: "2.0", method: "logsNotification", params: { subscription: s.sockets[0]!.numberFor(B), result: { value: { signature: "sigX", err: null, logs: [] } } } });
     expect(s.mentions).toEqual([B]);
@@ -107,7 +109,7 @@ describe("the push line", () => {
     s.push.watch([A, B]);
     s.sockets[0]!.ack();
     s.sockets[0]!.emit("close");
-    expect(s.push.state).toEqual({ connected: false, listening: 0 });
+    expect(s.push.state).toEqual({ connected: false, listening: 0, lines: 1 });
     expect(s.timers.map((t) => t.ms)).toEqual([1000]);
     s.runTimers();
     expect(s.sockets).toHaveLength(2);
@@ -121,6 +123,7 @@ describe("the push line", () => {
     // it opens: both wallets are subscribed again on the new line, and the waits start over
     const line = s.sockets.at(-1)!;
     line.emit("open");
+    s.push.watch([A, B]);
     expect(line.sent.map((m) => m.params[0].mentions[0])).toEqual([A, B]);
     line.emit("close");
     expect(s.timers[0]!.ms).toBe(1000);
@@ -160,6 +163,96 @@ describe("the push line", () => {
   });
 });
 
+describe("more wallets than one connection takes", () => {
+  const D = addr(4), E = addr(5), F = addr(6), G = addr(7);
+  const pool = () => {
+    const sockets: FakeSocket[] = [];
+    const mentions: string[] = [];
+    const push = new Push({ url: "wss://rpc.example", onMention: (w) => mentions.push(w), socket: (u) => { const s = new FakeSocket(u); sockets.push(s); return s; }, later: () => undefined, log: () => undefined, perLine: 2, lines: 3 });
+    const asked = (i: number) => sockets[i]!.sent.filter((m) => m.method === "logsSubscribe").map((m) => m.params[0].mentions[0]);
+    const openAll = () => { for (const s of sockets) if (!s.sent.length && !s.closed) s.emit("open"); };
+    return { push, sockets, mentions, asked, openAll };
+  };
+
+  it("are spread over several, each carrying no more than it is given, and a wallet beyond them all is not pushed", () => {
+    const p = pool();
+    p.push.start();
+    p.push.watch([A, B, C, D, E, F, G]); // seven wallets, room for six
+    expect(p.sockets).toHaveLength(3);
+    for (const s of p.sockets) s.emit("open");
+    p.push.watch([A, B, C, D, E, F, G]);
+    expect([p.asked(0), p.asked(1), p.asked(2)]).toEqual([[A, B], [C, D], [E, F]]);
+    for (const s of p.sockets) s.ack();
+    expect(p.push.state).toEqual({ connected: true, listening: 6, lines: 3 });
+    // word arrives on the third connection: it is about the wallet that connection was given
+    p.sockets[2]!.say({ jsonrpc: "2.0", method: "logsNotification", params: { subscription: p.sockets[2]!.numberFor(F), result: {} } });
+    expect(p.mentions).toEqual([F]);
+    // one connection down is the line down, and the others go on being heard
+    p.sockets[1]!.emit("close");
+    expect(p.push.state).toMatchObject({ connected: false, listening: 4 });
+    p.sockets[0]!.say({ jsonrpc: "2.0", method: "logsNotification", params: { subscription: p.sockets[0]!.numberFor(A), result: {} } });
+    expect(p.mentions).toEqual([F, A]);
+  });
+
+  it("a wallet stays where it is, a new one goes where there is room, and a connection with nobody on it is closed", () => {
+    const p = pool();
+    p.push.start();
+    p.push.watch([A, B, C, D, E]);
+    for (const s of p.sockets) s.emit("open");
+    p.push.watch([A, B, C, D, E]);
+    for (const s of p.sockets) s.ack();
+    const before = p.sockets.map((s) => s.sent.length);
+    // C and D leave: their connection is closed, and nobody else is asked for again
+    p.push.watch([A, B, E]);
+    expect(p.sockets[1]!.closed).toBe(true);
+    expect(p.push.state).toMatchObject({ lines: 2, listening: 3 });
+    expect([p.sockets[0]!.sent.length, p.sockets[2]!.sent.length]).toEqual([before[0], before[2]]);
+    // a new wallet takes the free place beside E, not a new connection
+    p.push.watch([A, B, E, G]);
+    expect(p.sockets).toHaveLength(3);
+    expect(p.asked(2)).toEqual([E, G]);
+    // everyone leaves: one connection is kept, so that it is known whether the RPC can be reached this way
+    p.push.watch([]);
+    expect(p.push.state).toMatchObject({ lines: 1, listening: 0, connected: true });
+    // and the same wallet listed twice is listened for once
+    const sentBefore = p.sockets[0]!.sent.length;
+    p.push.watch([A, A, A]);
+    expect(p.sockets[0]!.sent.slice(sentBefore).map((m) => [m.method, m.params[0].mentions?.[0]])).toEqual([["logsSubscribe", A]]);
+  });
+
+  it("asks for subscriptions a few at a time, across all its connections, until everyone is listened for", () => {
+    const wallets = Array.from({ length: 50 }, (_, i) => addr(100 + i));
+    const sockets: FakeSocket[] = [];
+    const push = new Push({ url: "wss://rpc.example", onMention: () => undefined, socket: (u) => { const s = new FakeSocket(u); sockets.push(s); return s; }, later: () => undefined, log: () => undefined, perLine: 30, lines: 2, perSync: 20 });
+    push.start();
+    push.watch(wallets);
+    for (const s of sockets) s.emit("open");
+    const askedSoFar = () => sockets.reduce((n, s) => n + s.sent.filter((m) => m.method === "logsSubscribe").length, 0);
+    const steps: number[] = [];
+    for (let i = 0; i < 4; i++) { push.watch(wallets); steps.push(askedSoFar()); for (const s of sockets) s.ack(); }
+    expect(steps).toEqual([20, 40, 50, 50]); // twenty a round, then the rest, then nothing more to ask
+    expect(push.state).toEqual({ connected: true, listening: 50, lines: 2 });
+    // the defaults are what the public RPC was measured to take: five connections of ninety
+    const byDefault: FakeSocket[] = [];
+    const wide = new Push({ url: "wss://rpc.example", onMention: () => undefined, socket: (u) => { const s = new FakeSocket(u); byDefault.push(s); return s; }, later: () => undefined, log: () => undefined });
+    wide.start();
+    wide.watch(Array.from({ length: 600 }, (_, i) => Keypair.fromSeed(new Uint8Array(32).fill(0).map((_, j) => (j === 0 ? i % 256 : j === 1 ? Math.floor(i / 256) : 9))).publicKey.toBase58()));
+    expect(byDefault).toHaveLength(5);
+  });
+
+  it("a connection opened later is put up like the first, and stopping stops them all", () => {
+    const p = pool();
+    p.push.watch([A, B, C]); // before start: nothing is opened yet
+    expect(p.sockets).toHaveLength(0);
+    p.push.start();
+    expect(p.sockets).toHaveLength(2);
+    p.push.watch([A, B, C, D, E]); // a third is needed, and is opened at once
+    expect(p.sockets).toHaveLength(3);
+    p.push.stop();
+    expect(p.sockets.every((s) => s.closed)).toBe(true);
+  });
+});
+
 describe("a wallet the RPC has just mentioned", () => {
   const SECONDS = { watch: 60, pro: 20 };
 
@@ -187,6 +280,22 @@ describe("a wallet the RPC has just mentioned", () => {
     expect(read.at(-1)).toEqual([]);
     await round(T0 + 72);
     expect(read.at(-1)).toEqual([B]);
+  });
+
+  it("is read through, not just looked at: the round tells the watcher which wallets the RPC spoke of", async () => {
+    const wallets = [A, B];
+    const store = new MemoryStore(wallets.map((address) => ({ address })));
+    const asked: { read: string[]; full: string[] }[] = [];
+    const watcher = { passAll: async (only?: (a: string) => boolean, opts?: { full?: (a: string) => boolean }) => { const read = wallets.filter((a) => !only || only(a)); asked.push({ read, full: read.filter((a) => opts?.full?.(a) === true) }); return { raised: [], blind: [] }; } };
+    const pace = pacer(() => "watch", SECONDS);
+    const round = watchRound({ watcher, store, notifier: { notify: async () => undefined }, pace, blindness: new Blindness(), state: { lastPassAt: null, blind: 0, late: 0 }, log: () => undefined });
+    await round(T0);
+    expect(asked[0]).toEqual({ read: [A, B], full: [] }); // their turn: a look will do
+    pace.hurry(B, T0 + 20);
+    await round(T0 + 20);
+    expect(asked[1]).toEqual({ read: [B], full: [B] });
+    await round(T0 + 61);
+    expect(asked[2]).toEqual({ read: [A], full: [] }); // and the word is used once
   });
 
   it("goes ahead of wallets that are merely due, and what it is read with is as fresh as the word about it", async () => {
@@ -227,7 +336,7 @@ describe("the rounds, with the push line looked after", () => {
     const seen: string[][] = [];
     let checks = 0, rounds = 0;
     const said: string[] = [];
-    const push = { watch: (w: string[]) => { seen.push(w); }, check: () => { checks += 1; }, get state() { return { connected, listening: 2 }; } };
+    const push = { watch: (w: string[]) => { seen.push(w); }, check: () => { checks += 1; }, get state() { return { connected, listening: 2, lines: 1 }; } };
     const tick = pushedRounds(async () => { rounds += 1; }, push, () => [A, B], { say: async (s: string) => { said.push(s); return true; } }, () => now);
     for (let i = 0; i < 31; i++) { await tick(); now += 2; }
     expect(rounds).toBe(31);

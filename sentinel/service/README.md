@@ -48,27 +48,38 @@ table's level; sixty days of a wallet's ordinary payments and swaps raise nothin
 what the wallet is taken to trust. `service.test.ts` is the server: each check that keeps one owner out of
 another's profile was also removed in turn, to see a test fail for it.
 
-## Told as it happens, and read in turn
+## Told as it happens, looked at in turn, read through when something moved
 
-Two things cause a wallet to be read.
+Three things happen to a watched wallet, and they cost very different amounts.
 
-**Its turn**, at the pace its plan promises. This is the floor: it needs nothing but an RPC that answers.
+**A look, in its turn**, at the pace its plan promises (`Watcher.glance`). One call reads a hundred accounts:
+the wallet's own, and its token accounts. They are reduced to a line: the wallet's balance and owner, and for
+each token account its amount, who may spend it and how much, who owns it, who may close it. Everything an
+alert is about moves that line. A wallet whose line is the one kept from last time has had nothing happen to
+its money or its permissions, and that look is its read. An RPC barely rations this call, which is what lets
+one deployment watch hundreds of wallets every minute.
 
-**The RPC saying so** (`src/push.ts`). The service keeps one websocket to the RPC and asks to be told when a
-watched address is mentioned in a transaction. When it is, that wallet is read next, ahead of its turn.
-Nothing that is pushed is believed: it is only a reason to read sooner, and what happened is then read and
-judged exactly as on any other pass. A wallet is read on the RPC's word at most every quarter of its promised
-pace, so one that never stops transacting costs a few times its reads and no more. The line is asked twice a
-minute whether it is still there and put up again when it is not; `/v1/health` says `push: on`, `down` or
-`off`, and whoever runs the service is told when it has been down for a quarter of an hour. `SENTINEL_PUSH=off`
-turns it off; `SENTINEL_RPC_WS_URL` names the websocket when it is not the RPC's own address.
+**A full pass**, which reads the wallet's list of transactions and judges each new one. It is made when the
+look differs from the last one, when the wallet was never read, when the last pass left transactions unread,
+when the RPC has just said the wallet was in a transaction, and every ten minutes or so regardless, for the
+transaction that changes none of the things a look sees. This is the call an RPC rations. The line kept
+beside a pass is the one from the look just *before* it, so whatever lands while the pass is reading moves the
+next look and the wallet is read through again: nothing falls between the two.
 
-Run for real against the public RPC, watching a public wallet that transacts about every thirteen seconds:
-with the line up, each new transaction had been read 4 to 8 seconds after it happened (median 6). With it
-off, the wallet was read every 61 seconds, as its plan says, so a transaction waited up to a minute.
+**The RPC saying so** (`src/push.ts`). The service keeps a few websockets to the RPC and asks to be told when
+a watched address is mentioned in a transaction. When it is, that wallet is read through next, ahead of its
+turn. Nothing that is pushed is believed: it is only a reason to read sooner. A wallet is read on the RPC's
+word at most every quarter of its promised pace. The connections are asked twice a minute whether they are
+still there and put up again when they are not; `/v1/health` says `push: on`, `down` or `off`, and whoever
+runs the service is told when it has been down for a quarter of an hour. `SENTINEL_PUSH=off` turns it off.
 
-Neither plan promises this, and it is not counted in what a wallet costs: the promise is the pace, and the
-pace is kept with the line down.
+Run for real against the public RPC, watching a public wallet that transacts about every eleven seconds: with
+the push line up, each new transaction had been read 3 to 7 seconds after it happened. With it off, the look
+alone noticed at the wallet's next turn, about a minute apart, and the transaction was then read.
+
+What a look cannot see is a transaction that moves no balance and changes no permission. With the push line
+up it is read within seconds all the same; with it down, at the next full pass. Neither plan promises the
+push, and it is not counted in what a wallet costs.
 
 ## How a pass goes
 
@@ -81,7 +92,7 @@ pace is kept with the line down.
 - When the RPC fails the wallet is reported as not being watched, the cursor stays where it was, and the next
   pass reads on from there. A transaction the RPC lists but cannot show yet is waited for, not skipped.
 - A notifier that fails does not stop the watching, and the alert is on record either way.
-- A quiet wallet costs one call a pass: the list of what is new. Its accounts (who may spend a token account,
+- A pass over a quiet wallet costs one call: the list of what is new. Its accounts (who may spend a token account,
   who owns it, which program owns the wallet) change only by a transaction the wallet signs, and every such
   transaction is in that list. So the accounts are read when the list has something new, on the first pass,
   and every quarter of an hour regardless, in case that reasoning has a hole.
@@ -92,64 +103,61 @@ against a simulated RPC.
 ## How much it can watch, and keeping the pace
 
 A plan's pace is a promise: Watch says each wallet is read every minute, Pro every twenty seconds. Whether
-that can be kept is a matter of how much the RPC will take, and the public Solana RPC takes little. Measured
-from the server on 2026-11-13:
+that can be kept is a matter of how much the RPC will take. Measured on the public Solana RPC, from the
+server, on 2026-11-13:
 
-| Call | What the public RPC took |
+| Call | What the public RPC took from one address |
 |---|---|
-| `getSignaturesForAddress` (what is new for a wallet) | about 10 in ten seconds; at two a second, half were refused |
+| `getMultipleAccounts`, a hundred accounts a call | four calls a second with none refused; at eight a second, refused after about forty-five |
+| `getAccountInfo` | four a second without a refusal |
+| `getSignaturesForAddress` (a wallet's list of transactions) | about 10 in ten seconds; at two a second, half were refused |
 | `getTokenAccountsByOwner` | the same |
 | `getTransaction` | the same |
-| `getAccountInfo` | four a second without a refusal |
 | several calls in one batch request | refused every time |
-| a websocket subscription to an address being mentioned | sixty-one on one connection, all taken; word of a transaction within a second or so |
+| a websocket subscription to an address being mentioned | 100 on a connection (closed at the 101st), 5 connections from one address (the 6th closed as it opened), ten requests a second all taken, two hundred a second closed |
 
-Each of the three rationed calls has an allowance of its own: eight of each inside ten seconds, twenty-four
-calls in all, and none was refused.
+Each refusal came with "retry after 10 seconds". Each of the three rationed calls has an allowance of its
+own. Reading accounts in bulk is more than four hundred times cheaper, counted in accounts, than listing
+transactions: that difference is the whole design.
 
-Each refusal came with "retry after 10 seconds", and the signature list took over a second to answer. Read
-the old way (four calls a wallet, one wallet after another) that is about thirty wallets a minute, not the
-hundred the first deployment allowed itself.
+What the service does with it:
 
-What the service does about it:
-
+- **A wallet's turn is a look at its accounts**, a hundred to a call (see above). A wallet is taken for
+  twelve accounts, and half of what that pace carries is promised: on the public RPC, 875 reads a minute.
+  A free wallet is one, a paid one three (`SENTINEL_READS_PER_MINUTE`). That is 875 free wallets, or 29 paying
+  profiles with ten wallets each, where reading the list of transactions every turn gave 43 and 1.
 - **It asks at a pace the RPC takes** (`src/rpc.ts`): each rationed call on a lane of its own, everything
-  else on another, each spaced evenly. Reading a new wallet's history is work that can wait: it takes the
-  turns nobody else wants, so one sign-up does not hold back the transaction an alert is about. A refusal is waited out for as long as the RPC says, by every call of that
-  kind. The public RPC's measured pace is the default when that is the RPC; a paid RPC is told its own
-  (`SENTINEL_RPC_HEAVY_PER_10S`, `SENTINEL_RPC_LIGHT_PER_10S`).
-- **A quiet wallet costs one call**, as above, so the rationed lane is spent on reads and not on asking again
-  for accounts that cannot have changed.
-- **The wallet furthest behind its own promise is read first**, in short rounds one after another, a few
-  wallets at a time (`SENTINEL_READERS`). A paid wallet promised twenty seconds is then not kept waiting
-  behind sixty free ones: with twenty paid wallets among eighty free ones on an RPC that takes three reads
-  a second, each kind is read within a fifth of its promise (the test runs exactly that).
-- **A wallet is taken only when its reads fit** (`SENTINEL_READS_PER_MINUTE`). A free wallet is one read a
-  minute, a paid one three. Unless set, four fifths of the rationed pace is promised and the rest is kept
-  for what a read leads to: a new transaction to fetch, a first look at a new wallet's history. On the public
-  RPC that is 43 reads a minute: forty-three free wallets, or fourteen paid ones, or a mix.
-- **One pass reads so much and no more.** At most 25 new transactions, the rest on the next pass, and a
-  thousand of a wallet's token accounts however many it has (an exchange's wallet has thousands). A wallet
-  that transacts without pause cannot hold a reader or the RPC's allowance for as long as it likes. It is
-  read behind what it does, and never skipped ahead: with more than a thousand unread, the oldest are lost.
-- **A new wallet takes its turn.** Its first read fetches up to two hundred transactions of its history, at
-  the rationed pace and behind everyone else's news: about four minutes on the public RPC for a wallet with
-  that much history, during which the page says "Not read yet". It is due at once and is behind by how long it has waited, so many arriving
-  together are read among the wallets already here and do not push them all back.
-- **Run for real**, from a laptop against the public RPC, with new empty wallets all added in the same
-  second: with 24, every wallet was read within its minute from the start and nothing was refused. With 60,
-  which is more than the 43 it would promise, nothing was refused either; the first look at all of them took
-  about five minutes, during which up to 27 were counted late, and after that none was: each was read every
-  70 to 90 seconds.
+  else on another, each spaced evenly. A refusal is waited out for as long as the RPC says, by every call of
+  that kind. Reading a new wallet's history is work that can wait: it takes the turns nobody else wants.
+- **A round is short.** It looks at the sixty or so wallets furthest behind their own promise, reads through
+  the few of them that need it (the RPC's word first, then an unfinished pass, then accounts that moved, then
+  a wallet never read, then the now-and-then pass), and hands back the rest as still due. A wallet handed
+  back is not counted as read. A paid wallet promised twenty seconds is not kept waiting behind free ones.
+- **One pass reads so much and no more.** At most 25 new transactions, the rest on the next turn, and a
+  thousand of a wallet's token accounts however many it has. A wallet that transacts without pause cannot
+  hold a reader or the RPC's allowance. It is read behind what it does, and never skipped ahead: with more
+  than a thousand unread, the oldest are lost.
+- **A new wallet's first read** fetches up to two hundred transactions of its history at the rationed pace:
+  about four minutes on the public RPC for a wallet with that much, during which the page says "Not read yet".
+- **The push line** carries 450 wallets on the public RPC (five connections of ninety), asked for twenty at a
+  time. Wallets past that are looked at in turn like the rest and are not told of at once.
 - **When the promise is not kept, that is said.** `/v1/health` counts the wallets read later than twice their
-  promise (`late`), and after a quarter of an hour of it whoever runs the service is told, with the worst
-  case in seconds.
+  promise (`late`), and after a quarter of an hour of it whoever runs the service is told.
 
-The honest size of this deployment on the free public RPC is therefore a few dozen wallets, and one or two
-paying profiles with ten wallets each would take all of it. Selling the paid plan needs an RPC that takes
-more: with one that takes a hundred signature lists in ten seconds, the same code promises 480 reads a
-minute. Notifications pushed by the RPC instead of polling would take far less again, and are where this
-should go.
+Run for real, from a laptop against the public RPC: **800 wallets, each read within its minute, for as long
+as it ran, with nothing refused and none late**, and the push line up.
+
+What is still small:
+
+- **The data file.** It is one JSON file rewritten whole on every change that matters. That is comfortable for
+  some hundreds of wallets, which is why `SENTINEL_MAX_WALLETS` is 500 unless set. Past that it wants a
+  database.
+- **Wallets that are busy all day.** Every transaction of a watched wallet costs rationed calls (the list, the
+  transaction, its token accounts). The public RPC carries a few of those a second in all. People's wallets
+  transact a few times a day; a thousand of them is a fraction of that. A few hundred bots would not fit.
+- **The public RPC is nobody's promise.** It says of itself that it is not for production, and it can change
+  what it takes on any day. The same code runs against a paid RPC by changing four settings, and there the
+  look is as cheap as it is here: a paying profile's ten wallets are three or four calls a minute.
 
 ## Who an owner is
 
@@ -434,11 +442,10 @@ first, and each step is safe to repeat.
   `/var/lib/lamport-sentinel`, and nothing else.
 - `/etc/lamport-sentinel.env` (root only) holds its settings. The data key in it was made on the server and
   has never left it. Lose it and the stored alert channels cannot be read.
-- It reads the public mainnet RPC, at the pace that RPC was measured to take, and promises 43 reads a minute
-  in all (a free wallet is one, a paid one three; see "How much it can watch"). Past that, and past 100
+- It reads the public mainnet RPC, at the pace that RPC was measured to take, and promises 875 reads a minute
+  in all (a free wallet is one, a paid one three; see "How much it can watch"). Past that, and past 500
   wallets whatever they cost (`SENTINEL_MAX_WALLETS`), new sign-ups are told it is full. The public RPC is
-  free and rationed. More wallets, or a paid plan sold to more than a couple of people, need an RPC key of
-  its own.
+  free, rationed, and nobody's promise; a paid RPC is four settings away.
 - The paid plan is not configured there: `/v1/billing` answers `{"enabled": false}`.
 
 After deploying it was checked from outside with a throwaway wallet: sign-in, a first read of the wallet from

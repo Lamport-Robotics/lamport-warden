@@ -388,11 +388,11 @@ describe("room for those who pay", () => {
   it("is a fifth of the house when there is a plan to pay for, and nothing when there is not", () => {
     const base = { SENTINEL_RPC_URL: "https://rpc.example", SENTINEL_DATA_KEY: Buffer.alloc(32, 1).toString("base64") };
     const paid = { ...base, SENTINEL_STRIPE_SECRET_KEY: "sk_test_x", SENTINEL_STRIPE_WEBHOOK_SECRET: "whsec_x", SENTINEL_STRIPE_PRICE_FULL: "price_1", SENTINEL_STRIPE_PRICE_HOLDER: "price_2" };
-    expect(configFrom(base)).toMatchObject({ ok: true, config: { maxWallets: 100, reservedForPro: 0 } });
-    expect(configFrom(paid)).toMatchObject({ ok: true, config: { maxWallets: 100, reservedForPro: 20 } });
+    expect(configFrom(base)).toMatchObject({ ok: true, config: { maxWallets: 500, reservedForPro: 0 } });
+    expect(configFrom(paid)).toMatchObject({ ok: true, config: { maxWallets: 500, reservedForPro: 100 } });
     expect(configFrom({ ...paid, SENTINEL_MAX_WALLETS: "7" })).toMatchObject({ ok: true, config: { reservedForPro: 1 } });
     expect(configFrom({ ...paid, SENTINEL_RESERVED_FOR_PRO: "0" })).toMatchObject({ ok: true, config: { reservedForPro: 0 } });
-    for (const bad of ["100", "-1", "2.5", "many"]) expect(configFrom({ ...paid, SENTINEL_RESERVED_FOR_PRO: bad })).toEqual({ ok: false, why: "SENTINEL_RESERVED_FOR_PRO has to be a whole number, zero or more, and less than SENTINEL_MAX_WALLETS." });
+    for (const bad of ["500", "-1", "2.5", "many"]) expect(configFrom({ ...paid, SENTINEL_RESERVED_FOR_PRO: bad })).toEqual({ ok: false, why: "SENTINEL_RESERVED_FOR_PRO has to be a whole number, zero or more, and less than SENTINEL_MAX_WALLETS." });
     // with no limit on the house there is nothing to keep
     expect(new Accounts(new MemoryStore(), Buffer.alloc(32, 9)).places()).toEqual({ taken: 0, open: null, inAll: null, reads: null });
   });
@@ -440,12 +440,16 @@ describe("what the RPC will take", () => {
     expect(accounts.readsPromised()).toBe(3); // three free wallets watched, three paused
   });
 
-  it("is four fifths of what the pace allows unless said, and a share of it is kept when there is a plan to pay for", () => {
+  it("is half of what a look at a hundred accounts a call carries unless said, and a share of it is kept when there is a plan to pay for", () => {
     const base = { SENTINEL_RPC_URL: "https://api.mainnet-beta.solana.com", SENTINEL_DATA_KEY: Buffer.alloc(32, 1).toString("base64") };
     const paid = { ...base, SENTINEL_STRIPE_SECRET_KEY: "sk_test_x", SENTINEL_STRIPE_WEBHOOK_SECRET: "whsec_x", SENTINEL_STRIPE_PRICE_FULL: "price_1", SENTINEL_STRIPE_PRICE_HOLDER: "price_2" };
-    // nine of the rationed calls in ten seconds is fifty-four a minute; forty-three are promised
-    expect(configFrom(base)).toMatchObject({ ok: true, config: { reads: { perMinute: 43, cost: { watch: 1, pro: 3 }, reservedForPro: 0 } } });
-    expect(configFrom(paid)).toMatchObject({ ok: true, config: { reads: { perMinute: 43, reservedForPro: 8 } } });
+    // Thirty-five calls in ten seconds, a hundred accounts a call, is 21,000 accounts a minute. Half of that
+    // is promised, and a wallet is taken for twelve accounts: 875 reads a minute, where the rationed call gave 43.
+    expect(configFrom(base)).toMatchObject({ ok: true, config: { reads: { perMinute: 875, cost: { watch: 1, pro: 3 }, reservedForPro: 0 } } });
+    expect(configFrom(paid)).toMatchObject({ ok: true, config: { reads: { perMinute: 875, reservedForPro: 175 } } });
+    // the pace of the calls that are not rationed is what it follows
+    expect(configFrom({ ...base, SENTINEL_RPC_LIGHT_PER_10S: "70" })).toMatchObject({ ok: true, config: { reads: { perMinute: 1750 } } });
+    expect(configFrom({ ...base, SENTINEL_RPC_LIGHT_PER_10S: "0" })).toMatchObject({ ok: true, config: { reads: null } });
     // an RPC that is not paced has no budget, until one is given; and one can be lifted
     expect(configFrom({ ...base, SENTINEL_RPC_URL: "https://my-own.rpc.example" })).toMatchObject({ ok: true, config: { reads: null } });
     expect(configFrom({ ...base, SENTINEL_RPC_URL: "https://my-own.rpc.example", SENTINEL_READS_PER_MINUTE: "600" })).toMatchObject({ ok: true, config: { reads: { perMinute: 600 } } });

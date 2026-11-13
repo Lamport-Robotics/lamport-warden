@@ -77,6 +77,38 @@ describe("who is read next", () => {
   });
 });
 
+describe("a wallet that was picked and not read", () => {
+  it("is due again at once, further forward, and is not counted as read", async () => {
+    const wallets = [addr(1), addr(2), addr(3), addr(4)];
+    const store = new MemoryStore(wallets.map((address) => ({ address })));
+    const rounds: { asked: string[]; read: string[] }[] = [];
+    // a watcher that can read two wallets a round, and hands back the rest
+    const watcher = { passAll: async (only?: (a: string) => boolean) => { const asked = wallets.filter((a) => !only || only(a)); const read = asked.slice(0, 2); rounds.push({ asked, read }); return { raised: [], blind: [], deferred: asked.slice(2) }; } };
+    const pace = pacer(() => "watch", SECONDS);
+    const state = { lastPassAt: null as number | null, blind: 0, late: 0 };
+    const round = watchRound({ watcher, store, notifier: { notify: async () => undefined }, pace, blindness: new Blindness(), state, log: () => undefined });
+    await round(T0);
+    expect(rounds[0]).toEqual({ asked: wallets, read: [addr(1), addr(2)] });
+    await round(T0 + 2);
+    expect(rounds[1]!.asked).toEqual([addr(3), addr(4)]); // the two that were handed back, and only those
+    await round(T0 + 4);
+    expect(rounds[2]!.asked).toEqual([]); // everyone has been read: nobody is due
+    // taken back, a pick leaves no trace: the wallet is as far behind as it was, and late when that is long
+    const p = pacer(() => "watch", SECONDS);
+    p.pick(addr(9), T0);
+    expect(p.pick(addr(9), T0 + 200)).toBe(true);
+    p.again(addr(9));
+    expect(p.late([addr(9)], T0 + 200)).toEqual({ count: 1, worst: { seconds: 200, promised: 60 } });
+    expect(p.tried()).toEqual([]); // and it is not among those the round tried and read
+    p.again(addr(9)); // twice is once
+    expect(p.pick(addr(9), T0 + 201)).toBe(true);
+    // a wallet never read before, picked and handed back, is new again
+    p.pick(addr(8), T0 + 300);
+    p.again(addr(8));
+    expect(p.due([addr(8)], T0 + 300)).toEqual([addr(8)]);
+  });
+});
+
 describe("when the promise is not being kept", () => {
   it("counts the wallets read later than twice their promise, says so after a quarter of an hour, and stops when it is kept again", async () => {
     const wallets = Array.from({ length: 30 }, (_, i) => addr(i + 1));

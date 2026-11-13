@@ -554,7 +554,7 @@ describe("the process", () => {
   const env = { SENTINEL_RPC_URL: "https://rpc.example", SENTINEL_DATA_KEY: randomBytes(32).toString("base64") };
 
   it("starts only with an RPC and a data key, and says which is missing", () => {
-    expect(configFrom(env)).toMatchObject({ ok: true, config: { origin: ORIGIN, port: 8791, pollSeconds: 60, proPollSeconds: 20, maxWallets: 100, trustProxy: false } });
+    expect(configFrom(env)).toMatchObject({ ok: true, config: { origin: ORIGIN, port: 8791, pollSeconds: 60, proPollSeconds: 20, maxWallets: 500, trustProxy: false } });
     // the paid plan is the faster one, whatever the settings say
     expect(configFrom({ ...env, SENTINEL_PRO_POLL_SECONDS: "120" })).toMatchObject({ ok: false, why: expect.stringContaining("SENTINEL_PRO_POLL_SECONDS") });
     expect(configFrom({ ...env, SENTINEL_POLL_SECONDS: "30", SENTINEL_PRO_POLL_SECONDS: "10" })).toMatchObject({ ok: true, config: { pollSeconds: 30, proPollSeconds: 10 } });
