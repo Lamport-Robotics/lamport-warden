@@ -92,8 +92,10 @@ Who else receives something:
   that stands for your profile, and learns from Stripe whether the plan is paid.
 
 Removing a wallet on the Sentinel page deletes what is kept about it. Removing the last one deletes the
-profile, its channels and its sessions. The server's daily backups hold them for up to seven days more, and
-then they are gone from those too. Stripe keeps its own record of payments.
+profile, its channels and its sessions. Sentinel's daily backups hold them for up to seven days more, and
+then they are gone from those too. The backups are copies of the same file: one set on the server, and one
+on a second computer that Lamport keeps, in case the server is lost. Stripe keeps its own record of
+payments.
 
 The practice page at `/try/` sends nothing anywhere. With Warden installed, Warden remembers the practice
 wallet's payments as it would any wallet's, in your browser; the settings page can forget them.

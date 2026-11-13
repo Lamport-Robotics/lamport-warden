@@ -295,7 +295,27 @@ subscription belongs to. So:
   forgotten every owner, and that is not a decision for a program.
 
 The snapshots are on the same disk. They are for a bad write, a bad deploy or a slip of the hand, not for a
-lost server: a copy somewhere else is still to be set up.
+lost server. For that there is a copy somewhere else:
+
+- `sentinel/backup.sh [ssh-host]` copies the data file as it is now to the machine it is run on, gzipped,
+  into a folder only that user can read (`~/Library/Application Support/Lamport Sentinel/backups`), and
+  removes copies older than seven days, which is what the privacy policy says backups hold. What comes back
+  is kept only if it unpacks and is the service's own file.
+- On a Mac it also puts into the login keychain, never into a file, the two things a restored file is no
+  use without: the data key (the stored alert channels are sealed with it) and the address of the operator's
+  channel. Stripe's keys are not copied: they can be made again at Stripe.
+- `sentinel/watch-from-here.sh` asks the deployed service the same question as the check from GitHub, from
+  that machine, and looks at the copies: it says so, as a notification there and on the operator's ntfy
+  channel, when the service does not answer or is not watching, and when no copy has been made for two days.
+- `sentinel/mac-agents.sh [ssh-host]` sets a Mac up to run both: a backup every day at 04:40 (or when it
+  next wakes), a look every ten minutes while it is awake. Two launchd agents for the user, no root;
+  `--remove` takes them out. A laptop that sleeps is not a monitor, and this does not pretend to be one: it
+  is a third look, beside the watchdog on the server and GitHub's schedule.
+
+To restore onto a new server: deploy (`sentinel/deploy.sh`), stop the service, gunzip the newest copy to
+`/var/lib/private/lamport-sentinel/sentinel.json` owned by the service's user, set `SENTINEL_DATA_KEY` in
+`/etc/lamport-sentinel.env` to what `security find-generic-password -s lamport-sentinel-data-key -a <host> -w`
+prints, and start it. Whatever happened after the copy was made is lost: at most a day.
 
 ## A line to whoever runs it
 
@@ -495,8 +515,9 @@ first, and each step is safe to repeat.
   and starts it again when it is not.
 - The service runs under systemd as a user of its own (`DynamicUser`), able to write one folder,
   `/var/lib/lamport-sentinel`, and nothing else.
-- `/etc/lamport-sentinel.env` (root only) holds its settings. The data key in it was made on the server and
-  has never left it. Lose it and the stored alert channels cannot be read.
+- `/etc/lamport-sentinel.env` (root only) holds its settings. The data key in it was made on the server.
+  One copy of it is in the login keychain of the machine that keeps the backups (`sentinel/backup.sh`), and
+  nowhere else. Lose both and the stored alert channels cannot be read.
 - It reads the public mainnet RPC, at the pace that RPC was measured to take, and promises 875 reads a minute
   in all (a free wallet is one, a paid one three; see "How much it can watch"). Past that, and past 500
   wallets whatever they cost (`SENTINEL_MAX_WALLETS`), new sign-ups are told it is full. The public RPC is
