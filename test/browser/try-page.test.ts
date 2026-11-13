@@ -5,6 +5,8 @@
  *
  * The page is served with its own Content-Security-Policy, which allows no inline style and no script but
  * its own: Warden's prompt has to appear on it all the same.
+ *
+ * TRY_LIVE=1 runs the same steps against the page as it is deployed, instead of the build in this folder.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -38,16 +40,17 @@ async function serveSite(): Promise<Server> {
   return server;
 }
 
-const mapTo = (server: Server) => [`--host-resolver-rules=MAP warden.lamportrobotics.com 127.0.0.1:${(server.address() as { port: number }).port}`, "--ignore-certificate-errors"];
+const LIVE = process.env.TRY_LIVE === "1";
+const mapTo = (server: Server | null) => server === null ? [] : [`--host-resolver-rules=MAP warden.lamportrobotics.com 127.0.0.1:${(server.address() as { port: number }).port}`, "--ignore-certificate-errors"];
 const row = (page: Page, id: string) => page.locator(`#tries li[data-id="${id}"]`);
 const resultOf = async (page: Page, id: string) => { const r = row(page, id).locator(".result"); await expect.poll(async () => (await r.getAttribute("class")) ?? "", { timeout: 10_000 }).toMatch(/^result (good|bad|plain)$/); return { cls: (await r.getAttribute("class"))!, text: await r.innerText() }; };
 
 describe.skipIf(!existsSync(join(TRY, "try.js")))("the practice page, with Warden in the browser", () => {
-  let site: Server, browser: Browser, page: Page, prompt: Prompt;
+  let site: Server | null, browser: Browser, page: Page, prompt: Prompt;
   const errors: string[] = [];
 
   beforeAll(async () => {
-    site = await serveSite();
+    site = LIVE ? null : await serveSite();
     browser = await launch([WARDEN], mapTo(site));
     page = await browser.ctx.newPage();
     page.on("pageerror", (e) => errors.push(String(e.message)));
@@ -132,11 +135,11 @@ describe.skipIf(!existsSync(join(TRY, "try.js")))("the practice page, with Warde
 });
 
 describe.skipIf(!existsSync(join(TRY, "try.js")))("the practice page, with no Warden", () => {
-  let site: Server, browser: Browser, page: Page;
+  let site: Server | null, browser: Browser, page: Page;
   const errors: string[] = [];
 
   beforeAll(async () => {
-    site = await serveSite();
+    site = LIVE ? null : await serveSite();
     // the same browser with a different extension in it: the stand-in wallets of the other tests, which are not Warden
     const { chromium } = await import("playwright");
     const ctx = await chromium.launchPersistentContext(mkdtempSync(join(tmpdir(), "warden-plain-")), { channel: process.env.CHROMIUM_PATH ? undefined : "chromium", executablePath: process.env.CHROMIUM_PATH || undefined, headless: true, args: mapTo(site), viewport: { width: 1000, height: 760 } });

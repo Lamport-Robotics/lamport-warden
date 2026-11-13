@@ -116,7 +116,7 @@
 <main class="doc">
   <p class="eyebrow">Privacy</p>
   <h1>What Warden keeps, and what leaves your browser.</h1>
-  <p>Warden has no account and no analytics. Lamport Robotics receives nothing from it unless you turn on one setting, "Tell Sentinel which signatures were mine", which is off until you do and is described below.</p>
+  <p>Warden has no account and no analytics. Lamport Robotics receives nothing from it unless you turn on one setting, "Tell Sentinel which signatures were mine", which is off until you do and is described below. Sentinel, the watching service you can sign in to, is separate from the extension and has its own section further down.</p>
 
   <h2>What it keeps, and where</h2>
   <p>In the browser's extension storage on your machine, and nowhere else:</p>
@@ -140,6 +140,28 @@
 
   <h2>What it can see on a page</h2>
   <p>Warden runs on every https page because any page can ask a wallet to sign. There it does two things: it puts itself in front of the wallet's signing calls, and it draws its prompt. It does not read the page's content, your passwords or your keys. It never has your private keys: those stay in your wallet.</p>
+
+  <h2>Sentinel, the service</h2>
+  <p>Sentinel is separate from the extension. It is a service on Lamport's server that you sign in to at <code>warden.lamportrobotics.com/sentinel/</code> with a wallet signature, and you use it only if you choose to. It has no name, email address or password for you: you are whoever can sign with one of your wallets.</p>
+  <p>What it keeps, on that server:</p>
+  <ul>
+    <li><b>Your wallets.</b> The wallet addresses you add, and which of them belong together in your profile.</li>
+    <li><b>What is normal for each.</b> Worked out from its public history on the chain: the addresses it has paid, the programs it has used, how much it usually sends, the hours it transacts in, and its token accounts as last seen.</li>
+    <li><b>Alerts.</b> The alerts it raised about a wallet, and what you answered to each.</li>
+    <li><b>Reported signatures.</b> If you turned on "Tell Sentinel which signatures were mine": the signatures your browser reported, for 30 days.</li>
+    <li><b>Where your alerts go.</b> The address of each channel you gave (an ntfy topic, or a Discord or Slack webhook), encrypted under a key that is not stored with it.</li>
+    <li><b>Your sign-ins.</b> Each session as a hash, for seven days, with which of your wallets signed it in; and, for a wallet you linked to the extension, the hash of the token it reports with.</li>
+    <li><b>Your plan.</b> If you pay: Stripe's ids for the customer and the subscription, the price, its status and its dates. Not your card, your name or your email address: those are with Stripe and never reach Sentinel.</li>
+  </ul>
+  <p>It does not keep your IP address. The address a request comes from is held in memory for up to a day, to limit abuse, and is not written down; the web server in front of Sentinel keeps no access log. The Sentinel page sets no cookie and has no analytics: your session is kept in the browser tab and ends with it.</p>
+  <p>Who else receives something:</p>
+  <ul>
+    <li><b>The Solana RPC</b> at <code>api.mainnet-beta.solana.com</code> is asked, by Lamport's server, about the addresses you added. It sees the server, not you.</li>
+    <li><b>The channel you chose</b> (ntfy.sh, Discord or Slack) receives each alert: one sentence about what happened, which can name the addresses involved, and the first and last four characters of your wallet's address. The same channel is told when someone signs in to your profile or changes it, and what your plan does. On ntfy, anyone who knows a topic's name can read what is sent to it.</li>
+    <li><b>Stripe</b>, if you pay. It takes the payment under its own privacy policy. Sentinel gives Stripe a random id that stands for your profile, and learns from Stripe whether the plan is paid.</li>
+  </ul>
+  <p>Removing a wallet on the Sentinel page deletes what is kept about it. Removing the last one deletes the profile, its channels and its sessions. The server's daily backups hold them for up to seven days more, and then they are gone from those too. Stripe keeps its own record of payments.</p>
+  <p>The practice page at <code>/try/</code> sends nothing anywhere. With Warden installed, Warden remembers the practice wallet's payments as it would any wallet's, in your browser; the settings page can forget them.</p>
 
   <h2>Changes and contact</h2>
   <p>Changes to this policy are made in the open, in <a href="https://github.com/Lamport-Robotics/lamport-warden/blob/main/PRIVACY.md" rel="noopener">PRIVACY.md in the source</a>.</p>
