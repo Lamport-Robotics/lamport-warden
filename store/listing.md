@@ -4,14 +4,15 @@ What to paste into the developer dashboard. Keep this file in step with what is 
 
 Item ID: `dmlhclkglnpkdhidfjfgjfdjnblnalea`, created on 2026-11-13 from `lamport-warden-0.5.0.zip`. It is a
 **draft** and is not submitted. It was submitted once that day and the review was cancelled, to wait for the
-version that has Sentinel built in. That was 0.6.0; the current one is 0.6.1, which adds a welcome on first
-install and a link to the practice page.
+version that has Sentinel built in. That was 0.6.0; 0.6.1 added a welcome on first install and a link to the
+practice page; the current one is 0.7.0, whose settings page describes the plans as they now are (alerts in
+seconds on Pro) and which goes with the published terms at warden.lamportrobotics.com/terms/.
 
-To submit 0.6.1:
+To submit 0.7.0:
 
-1. Package tab: upload `lamport-warden-0.6.1.zip` (`pnpm package`).
+1. Package tab: upload `lamport-warden-0.7.0.zip` (`pnpm package`).
 2. Store listing tab: paste the description below again (it now mentions Sentinel and the practice page)
-   and replace the screenshots with the four in `store/screenshots/` (retaken from 0.6.1).
+   and replace the screenshots with the four in `store/screenshots/` (retaken from 0.7.0).
 3. Privacy tab: paste the storage justification and the data-usage note below again.
 4. Distribution tab: Payments. The extension itself sells nothing; it links to the Sentinel page, where the
    paid plan is sold once checkout is open. Choose "Contains in-app purchases" if checkout is open when you
@@ -87,6 +88,8 @@ whether Pro is on sale. It is paid by card through Stripe; nothing is bought ins
 Warden is advice in front of your wallet, not a lock on it. A page can still reach a wallet in ways an
 extension never sees. It is open source: https://github.com/Lamport-Robotics/lamport-warden
 
+Terms: https://warden.lamportrobotics.com/terms
+
 **Screenshots** (1280 x 800): `store/screenshots/`, made by `pnpm shots`. Four: a look-alike address blocked,
 a swap with what a simulation showed, the settings page, and the practice page with a request stopped. The
 fourth is taken from the practice page as it is deployed, so `pnpm shots` needs the network for it.
@@ -137,7 +140,7 @@ No login is needed. No wallet or cryptocurrency is needed.
 1. Install the extension. It opens its own settings page with a short welcome. Press
    "See it work with a practice wallet" there, or open https://warden.lamportrobotics.com/try/
    The page makes a practice wallet that holds nothing. Nothing on it is sent to any blockchain.
-   Near the top it says "Warden 0.6.1 is in this browser and is standing in front of the practice wallet."
+   Near the top it says "Warden 0.7.0 is in this browser and is standing in front of the practice wallet."
 2. Press "Try it" beside "Pay someone for the first time".
    The extension shows its prompt: one sentence saying what the request does, with Cancel and
    "Continue to wallet". Press "Continue to wallet".
