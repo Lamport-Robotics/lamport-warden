@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lamport Warden",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Reads each Solana signing request before your wallet does, says what it will do, and stops it when that is not what you meant.",
   "minimum_chrome_version": "116",
   "icons": {
@@ -21,18 +21,32 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
-      "js": ["inpage.js"],
+      "matches": [
+        "https://*/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "inpage.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": true
     },
     {
-      "matches": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
-      "js": ["content.js"],
+      "matches": [
+        "https://*/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
     }
   ],
-  "permissions": ["storage"]
+  "permissions": [
+    "storage"
+  ]
 }
