@@ -1,5 +1,5 @@
 /** The settings page. Everything is built with textContent: stored addresses and labels are never parsed as HTML. */
-import { DEFAULT_RPC, SENTINEL_PAGE } from "./defaults.js";
+import { DEFAULT_RPC, PRACTICE_PAGE, SENTINEL_PAGE } from "./defaults.js";
 import { LINK_PREFIX, linkFrom } from "./sentinel-link.js";
 import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../sentinel/service/src/plans.js";
 import { KEYS, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
@@ -16,9 +16,19 @@ async function load() {
   const s = settingsFrom(all);
   $("version").textContent = `Version ${chrome.runtime.getManifest().version}`;
 
+  // the practice page: a link, here and in the welcome a new install sees. Nothing is fetched until it is pressed.
+  $<HTMLAnchorElement>("practice").href = PRACTICE_PAGE;
+  const practice = $<HTMLAnchorElement>("practiceLink");
+  practice.href = PRACTICE_PAGE;
+  practice.textContent = PRACTICE_PAGE.replace(/^https:\/\//, "");
+  const welcome = new URLSearchParams(location.search).get("welcome") === "1";
+  $("welcome").hidden = !welcome;
+  $("practiceLine").hidden = welcome;
+
   // lookup tables
   // compared as the settings store writes addresses (a trailing slash and all), not as the constant is spelled
-  const mode = s.rpcUrl === "" ? "off" : s.rpcUrl === cleanRpcUrl(DEFAULT_RPC) ? "public" : "own";
+  // both sides, because nothing stored yet is the constant itself: a new install is on the public RPC, and says so
+  const mode = s.rpcUrl === "" ? "off" : cleanRpcUrl(s.rpcUrl) === cleanRpcUrl(DEFAULT_RPC) ? "public" : "own";
   for (const r of document.querySelectorAll<HTMLInputElement>('input[name="rpc"]')) r.checked = r.value === mode;
   $<HTMLInputElement>("rpcUrl").value = mode === "own" ? s.rpcUrl : "";
 

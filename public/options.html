@@ -23,6 +23,9 @@
   button.small { padding: 3px 10px; font-size: 12px; font-weight: 500; }
   ul.plain { list-style: none; margin: 8px 0; padding: 0; }
   ul.plain li { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .welcome { border: 1px solid var(--ink); border-radius: 14px; padding: 4px 20px 12px; margin: 20px 0 8px; }
+  .welcome h2 { margin-top: 16px; font-size: 18px; }
+  a.button { display: inline-block; font-weight: 600; border-radius: 999px; padding: 9px 18px; background: var(--ink); color: var(--paper); text-decoration: none; }
   .note { min-height: 20px; font-size: 13px; color: var(--soft); }
   .note.bad { color: var(--warn); }
   details { border-top: 1px solid var(--line); padding: 8px 0; }
@@ -38,6 +41,16 @@
 <main>
   <h1>Lamport Warden</h1>
   <p class="soft" id="version"></p>
+
+  <!-- shown once, on the tab the browser opens when Warden is installed -->
+  <section class="welcome" id="welcome" hidden>
+    <h2>Warden is on.</h2>
+    <p>From now on it reads each request a site makes of your Solana wallet, before the wallet is asked. Most of the time you will see nothing. When a request is new, it says what it does in one sentence. When it is how wallets get emptied, it stops it.</p>
+    <p>Pages that were already open need to be loaded again before Warden is in front of them.</p>
+    <p><a class="button" id="practice" target="_blank" rel="noopener">See it work with a practice wallet</a></p>
+    <p class="soft">That opens a page on warden.lamportrobotics.com. Nothing leaves this browser until you press it.</p>
+  </section>
+  <p id="practiceLine">To see what Warden does without risking anything: <a id="practiceLink" target="_blank" rel="noopener"></a></p>
 
   <h2>Reading lookup tables</h2>
   <p>Most swaps name their accounts by position in a table stored on chain. To say where the money goes, Warden has to read that table from a Solana RPC. Unless you turn on simulation or Sentinel reporting below, this is the only network call it makes. The RPC learns which table was asked for and your IP address. It does not learn your wallet address, the transaction or the site.</p>
