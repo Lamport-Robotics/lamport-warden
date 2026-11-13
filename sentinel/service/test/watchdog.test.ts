@@ -35,7 +35,8 @@ function setup(channel: string | null = OPS) {
   const dir = mkdtempSync(join(tmpdir(), "sentinel-watchdog-"));
   const acts = join(dir, "acts.log");
   for (const name of ["systemctl", "curl"]) {
-    writeFileSync(join(dir, name), `#!/bin/sh\nprintf '%s' "${name}" >> "${acts}"\nfor a in "$@"; do printf ' [%s]' "$a" >> "${acts}"; done\nprintf '\\n' >> "${acts}"\nexit 0\n`);
+    // curl's record also has what it was handed on its input, in angle brackets: that is where an address goes
+    writeFileSync(join(dir, name), `#!/bin/sh\nprintf '%s' "${name}" >> "${acts}"\nfor a in "$@"; do printf ' [%s]' "$a" >> "${acts}"; done\n${name === "curl" ? `printf ' <%s>' "$(cat)" >> "${acts}"\n` : ""}printf '\\n' >> "${acts}"\nexit 0\n`);
     chmodSync(join(dir, name), 0o755);
   }
   const envFile = join(dir, "sentinel.env");
@@ -67,7 +68,9 @@ describe("the watchdog beside the service", () => {
     const first = await w.run();
     expect(first.code).toBe(0);
     expect(first.acts[0]).toBe("systemctl [restart] [lamport-sentinel.service]");
-    expect(first.acts[1]).toMatch(/^curl \[-fsS\] \[-m\] \[10\] \[-H\] \[Title: Warden Sentinel: operations\] \[-d\] \[The watchdog beside Sentinel found it not watching, twice, and started it again\. What it found: Sentinel is not watching: the last round of reading wallets ended 60 minutes ago: the watcher has stopped while the service still answers\.\] \[https:\/\/ntfy\.sh\/operator-topic-123\]$/);
+    expect(first.acts[1]).toMatch(/^curl \[-fsS\] \[-m\] \[10\] \[-H\] \[Title: Warden Sentinel: operations\] \[-d\] \[The watchdog beside Sentinel found it not watching, twice, and started it again\. What it found: Sentinel is not watching: the last round of reading wallets ended 60 minutes ago: the watcher has stopped while the service still answers\.\] \[-K\] \[-\] <url = "https:\/\/ntfy\.sh\/operator-topic-123">$/);
+    // the channel's address was not an argument: on a machine other people have accounts on, arguments can be listed
+    expect(first.acts[1]!.replace(/<[^>]*>$/, "")).not.toContain("operator-topic-123");
     expect(first.acts).toHaveLength(2);
     expect(first.out).toContain("watchdog: started lamport-sentinel.service again");
     expect(Number(readFileSync(w.stamp, "utf8"))).toBeGreaterThan(now() - 10);

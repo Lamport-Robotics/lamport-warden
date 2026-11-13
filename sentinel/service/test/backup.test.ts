@@ -11,12 +11,16 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const DATA = JSON.stringify({ wallets: [{ address: "W1" }], records: {}, events: [], accounts: { profiles: {}, owners: {}, channels: [], sessions: [] } });
 const KEY = Buffer.alloc(32, 5).toString("base64");
 const OPS = "https://ntfy.sh/operator-topic-123";
+/** The first eight characters of a key's fingerprint: what a copy's name and the keychain know it by. */
+const printOf = (key: string) => createHash("sha256").update(key).digest("hex").slice(0, 8);
+const PRINT = printOf(KEY);
 const now = () => Math.floor(Date.now() / 1000);
 
 function setup(opts: { data?: string | null; key?: string; ops?: string; sshFails?: boolean; settingsFail?: boolean } = {}) {
@@ -46,7 +50,8 @@ case "$verb" in
   find-generic-password) cat "${dir}/kc-$s-$a" 2>/dev/null || exit 44 ;;
   add-generic-password) printf 'security add %s %s\\n' "$s" "$a" >> "${acts}"; printf '%s' "$w" > "${dir}/kc-$s-$a" ;;
 esac`);
-  for (const name of ["osascript", "curl", "launchctl"]) script(name, `printf '%s' "${name}" >> "${acts}"\nfor a in "$@"; do printf ' [%s]' "$a" >> "${acts}"; done\nprintf '\\n' >> "${acts}"\nexit 0`);
+  // curl's record also has what it was handed on its input, in angle brackets: that is where an address goes
+  for (const name of ["osascript", "curl", "launchctl"]) script(name, `printf '%s' "${name}" >> "${acts}"\nfor a in "$@"; do printf ' [%s]' "$a" >> "${acts}"; done\n${name === "curl" ? `printf ' <%s>' "$(cat)" >> "${acts}"\n` : ""}printf '\\n' >> "${acts}"\nexit 0`);
   script("uname", "echo Darwin");
   const run = (file: string, args: string[] = [], env: Record<string, string> = {}): Promise<{ code: number | null; out: string }> => new Promise((resolve) => {
     const child = spawn("sh", [join(root, "sentinel", file), ...args], { env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, SENTINEL_BACKUP_DIR: dest, ...env } });
@@ -60,7 +65,7 @@ esac`);
   const did = () => all().filter((a) => !a.startsWith("security-argv"));
   const argv = () => all().filter((a) => a.startsWith("security-argv"));
   const copies = () => (existsSync(dest) ? readdirSync(dest).filter((f) => /^sentinel-.*\.json\.gz$/.test(f)).sort() : []);
-  const keychain = (name: string, host = "can") => { try { return readFileSync(join(dir, `kc-${name}-${host}`), "utf8"); } catch { return null; } };
+  const keychain = (name: string, account = "can") => { try { return readFileSync(join(dir, `kc-${name}-${account}`), "utf8"); } catch { return null; } };
   return { dir, dest, home, fixture, run, did, argv, copies, keychain };
 }
 
@@ -71,12 +76,13 @@ describe("the copy kept off the server", () => {
     expect(r.code).toBe(0);
     expect(s.copies()).toHaveLength(1);
     const copy = join(s.dest, s.copies()[0]!);
-    expect(s.copies()[0]).toMatch(/^sentinel-\d{8}T\d{6}Z\.json\.gz$/);
+    // its name says which key is its own
+    expect(s.copies()[0]).toMatch(new RegExp(`^sentinel-\\d{8}T\\d{6}Z-k${PRINT}\\.json\\.gz$`));
     expect(gunzipSync(readFileSync(copy)).toString()).toBe(DATA);
     expect(statSync(copy).mode & 0o777).toBe(0o600);
     expect(statSync(s.dest).mode & 0o777).toBe(0o700);
     expect(r.out).toMatch(/^backup: kept sentinel-\S+ \(\d+ bytes\); 1 copies in /);
-    expect(s.keychain("lamport-sentinel-data-key")).toBe(KEY);
+    expect(s.keychain("lamport-sentinel-data-key", `can#${PRINT}`)).toBe(KEY);
     expect(s.keychain("lamport-sentinel-ops-channel")).toBe(OPS);
     // neither is in anything it wrote to disk or said
     for (const f of readdirSync(s.dest, { withFileTypes: true })) if (f.isFile() && !f.name.endsWith(".gz")) expect(readFileSync(join(s.dest, f.name), "utf8")).not.toContain(KEY);
@@ -90,10 +96,28 @@ describe("the copy kept off the server", () => {
     expect(asked.slice(1).map((a) => /\^(SENTINEL_[A-Z_]+)=/.exec(a)![1])).toEqual(["SENTINEL_DATA_KEY", "SENTINEL_OPS_CHANNEL"]);
   }, 20_000);
 
+  it("keeps a new server's key beside the old one, never over it, and each copy says which is its own", async () => {
+    const s = setup();
+    await s.run("backup.sh");
+    const first = s.copies()[0]!;
+    // the server is lost and set up again: the same host, a new key
+    const NEW = Buffer.alloc(32, 6).toString("base64");
+    const again = setup({ key: NEW });
+    // (the same keychain and the same folder of copies)
+    writeFileSync(join(again.dir, `kc-lamport-sentinel-data-key-can#${PRINT}`), KEY);
+    mkdirSync(again.dest, { recursive: true });
+    writeFileSync(join(again.dest, first), readFileSync(join(s.dest, first)));
+    expect((await again.run("backup.sh")).code).toBe(0);
+    expect(again.keychain("lamport-sentinel-data-key", `can#${PRINT}`)).toBe(KEY); // the key that opens the old copy is where it was
+    expect(again.keychain("lamport-sentinel-data-key", `can#${printOf(NEW)}`)).toBe(NEW);
+    expect(again.copies().map((c) => /-k([0-9a-f]{8})\./.exec(c)![1]).sort()).toEqual([PRINT, printOf(NEW)].sort());
+    expect(readFileSync(join(root, "sentinel", "backup.sh"), "utf8")).toContain("-a '<host>#<the eight characters after -k>' -w");
+  }, 20_000);
+
   it("never puts the key on a command line, where anything running on the machine could read it", async () => {
     const s = setup();
     await s.run("backup.sh");
-    expect(s.keychain("lamport-sentinel-data-key")).toBe(KEY);
+    expect(s.keychain("lamport-sentinel-data-key", `can#${PRINT}`)).toBe(KEY);
     const lines = s.argv();
     expect(lines.length).toBeGreaterThan(2);
     for (const line of lines) { expect(line).not.toContain(KEY); expect(line).not.toContain(OPS); }
@@ -101,23 +125,21 @@ describe("the copy kept off the server", () => {
     expect(lines.filter((l) => l === "security-argv [-i]")).toHaveLength(2);
   }, 20_000);
 
-  it("says so, and ends as a failure, when the copy was made and the key for it could not be", async () => {
+  it("says so, and ends as a failure, when the copy was made and the key for it could not be read", async () => {
     const s = setup({ settingsFail: true });
     const r = await s.run("backup.sh");
     expect(r.code).toBe(2);
     expect(s.copies()).toHaveLength(1); // the copy itself is good and is kept
+    expect(s.copies()[0]).toMatch(/-kunknown\.json\.gz$/); // and says its key is not known
     expect(r.out).toContain("backup: SENTINEL_DATA_KEY could not be read from can");
     expect(r.out).toContain("the key its sealed parts are sealed with is not in the keychain");
-    expect(s.keychain("lamport-sentinel-data-key")).toBeNull();
-    // with a key from an earlier run still in the keychain, a day when it cannot be read is not a failure, and the key is left as it is
-    const had = setup();
-    expect((await had.run("backup.sh")).code).toBe(0);
+    expect(s.did().filter((a) => a.startsWith("security add"))).toEqual([]);
+    // A key from an earlier day is still in the keychain and is left as it is. That does not make today's
+    // copy good: nothing says the server's key is still that one.
     const later = setup({ settingsFail: true });
-    writeFileSync(join(later.dir, "kc-lamport-sentinel-data-key-can"), KEY);
-    const again = await later.run("backup.sh");
-    expect(again.code).toBe(0);
-    expect(again.out).toContain("SENTINEL_DATA_KEY could not be read from can");
-    expect(later.keychain("lamport-sentinel-data-key")).toBe(KEY);
+    writeFileSync(join(later.dir, `kc-lamport-sentinel-data-key-can#${PRINT}`), KEY);
+    expect((await later.run("backup.sh")).code).toBe(2);
+    expect(later.keychain("lamport-sentinel-data-key", `can#${PRINT}`)).toBe(KEY);
   }, 30_000);
 
   it("stores nothing that could not be handed to the keychain whole", async () => {
@@ -125,7 +147,7 @@ describe("the copy kept off the server", () => {
     const r = await s.run("backup.sh");
     expect(r.out).toContain("what the server has for lamport-sentinel-ops-channel is not something that can be stored; left alone");
     expect(s.keychain("lamport-sentinel-ops-channel")).toBeNull();
-    expect(s.keychain("lamport-sentinel-data-key")).toBe(KEY);
+    expect(s.keychain("lamport-sentinel-data-key", `can#${PRINT}`)).toBe(KEY);
   }, 20_000);
 
   it("removes nothing, and says why, when the server's file has nobody in it and the copy before had several", async () => {
@@ -139,10 +161,13 @@ describe("the copy kept off the server", () => {
     writeFileSync(s.fixture, empty);
     const r = await s.run("backup.sh");
     expect(r.code).toBe(3);
-    expect(r.out).toContain("backup: the server's data has no wallets in it and the copy before had 6.");
+    expect(r.out).toContain("backup: the server's data has no wallets in it and a copy kept here has 6.");
     expect(r.out).toContain("No older copy is removed while this is so.");
     expect(existsSync(real)).toBe(true);
     expect(s.copies()).toHaveLength(2);
+    // and the day after, and the day after that: the copy before is by then an empty one, and the good one is still kept
+    for (let day = 0; day < 2; day++) expect((await s.run("backup.sh")).code).toBe(3);
+    expect(existsSync(real)).toBe(true);
     // and the look from here says it too
     const said = await s.run("watch-from-here.sh", [], { SENTINEL_HEALTH_URL: "http://127.0.0.1:9/none", SENTINEL_CHECK: join(root, "scripts", "check-live.mjs"), SENTINEL_CHECK_ARGS: "--once", SENTINEL_WATCH_AGAIN_AFTER: "0" });
     expect(said.out).toContain("watch: The newest copy of Sentinel's data has no wallets in it and an older copy has 6. If the server was lost and set up again, restore from the older copy.");
@@ -159,14 +184,14 @@ describe("the copy kept off the server", () => {
   it("writes the keychain only when what it holds is not what the server has", async () => {
     const s = setup();
     await s.run("backup.sh");
-    expect(s.did().filter((a) => a.startsWith("security add"))).toEqual(["security add lamport-sentinel-data-key can", "security add lamport-sentinel-ops-channel can"]);
+    expect(s.did().filter((a) => a.startsWith("security add"))).toEqual([`security add lamport-sentinel-data-key can#${PRINT}`, "security add lamport-sentinel-ops-channel can"]);
     await s.run("backup.sh");
     expect(s.did().filter((a) => a.startsWith("security add"))).toHaveLength(2);
     // under the name of the host it was asked to copy from
     const other = setup();
     await other.run("backup.sh", ["elsewhere"]);
-    expect(other.keychain("lamport-sentinel-data-key", "elsewhere")).toBe(KEY);
-    expect(other.keychain("lamport-sentinel-data-key")).toBeNull();
+    expect(other.keychain("lamport-sentinel-data-key", `elsewhere#${PRINT}`)).toBe(KEY);
+    expect(other.keychain("lamport-sentinel-data-key", `can#${PRINT}`)).toBeNull();
   }, 30_000);
 
   it("keeps nothing that is not the data file, and says so", async () => {
@@ -175,7 +200,7 @@ describe("the copy kept off the server", () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain("backup: what came back from can is not Sentinel's data file; nothing was kept");
     expect(readdirSync(garbage.dest)).toEqual([]);
-    expect(garbage.keychain("lamport-sentinel-data-key")).toBeNull();
+    expect(garbage.keychain("lamport-sentinel-data-key", `can#${PRINT}`)).toBeNull();
     // a file that unpacks and is something else
     const wrong = setup({ data: '{"hello":"world"}' });
     expect((await wrong.run("backup.sh")).code).toBe(1);
@@ -234,7 +259,8 @@ describe("the look from the machine that keeps the copies", () => {
     const acts = s.did().slice(before);
     expect(acts).toHaveLength(2);
     expect(acts[0]).toMatch(/^osascript .*\[display notification \(item 1 of argv\) with title "Warden Sentinel"\].*\[Seen from outside its server: Sentinel is not watching: the service did not answer in one try/);
-    expect(acts[1]).toMatch(/^curl \[-fsS\] \[-m\] \[10\] \[-H\] \[Title: Warden Sentinel: operations\] \[-d\] \[Seen from outside its server: .*\] \[https:\/\/ntfy\.sh\/operator-topic-123\]$/);
+    expect(acts[1]).toMatch(/^curl \[-fsS\] \[-m\] \[10\] \[-H\] \[Title: Warden Sentinel: operations\] \[-d\] \[Seen from outside its server: .*\] \[-K\] \[-\] <url = "https:\/\/ntfy\.sh\/operator-topic-123">$/);
+    expect(acts[1]!.replace(/<[^>]*>$/, "")).not.toContain("operator-topic-123"); // the address was not an argument
     // ten minutes later it is still down: not said again
     expect((await watch(s)).out).toBe("");
     expect(s.did().slice(before)).toHaveLength(2);
@@ -254,7 +280,7 @@ describe("the look from the machine that keeps the copies", () => {
     await s.run("backup.sh");
     answer = healthy();
     const r = await watch(s);
-    expect(r.out).toBe("watch: The key that Sentinel's stored alert channels are sealed with is not in this Mac's keychain, so the copies kept here cannot be restored in full. Run sentinel/backup.sh and read what it says.\n");
+    expect(r.out).toBe("watch: The key that the newest copy of Sentinel's data is sealed with is not in this Mac's keychain, so that copy cannot be restored in full. Run sentinel/backup.sh and read what it says.\n");
   }, 30_000);
 
   it("says so when no copy has been made for two days", async () => {

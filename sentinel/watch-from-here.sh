@@ -35,7 +35,9 @@ say() { # key, sentence: once an hour for each key
   channel=$(security find-generic-password -s lamport-sentinel-ops-channel -a "$HOST" -w 2>/dev/null || true)
   case "$channel" in
     https://discord.com/*|https://discordapp.com/*|https://hooks.slack.com/*) ;;
-    https://*/*) curl -fsS -m 10 -H "Title: Warden Sentinel: operations" -d "$2" "$channel" >/dev/null 2>&1 || true ;;
+    *'"'*|*' '*) ;;
+    # the channel's address is all it takes to read what is sent there: curl reads it from its input, not its arguments
+    https://*/*) printf 'url = "%s"\n' "$channel" | curl -fsS -m 10 -H "Title: Warden Sentinel: operations" -d "$2" -K - >/dev/null 2>&1 || true ;;
   esac
 }
 
@@ -59,8 +61,10 @@ if [ -n "$latest" ] && [ "$(wallets_in "$latest")" -eq 0 ]; then
   [ "$most" -ge "${SENTINEL_BACKUP_EMPTIED_FROM:-5}" ] && say backup-empty "The newest copy of Sentinel's data has no wallets in it and an older copy has $most. If the server was lost and set up again, restore from the older copy. Nothing is removed here while this is so."
 fi
 
-# without the key a restored file has lost every owner's alert channels
+# Without its key a restored file has lost every owner's alert channels. A copy's name says which key is its
+# own (backup.sh), and that key has to be in the keychain.
 if command -v security >/dev/null 2>&1 && [ -n "$latest" ]; then
-  security find-generic-password -s lamport-sentinel-data-key -a "$HOST" >/dev/null 2>&1 || say backup-key "The key that Sentinel's stored alert channels are sealed with is not in this Mac's keychain, so the copies kept here cannot be restored in full. Run sentinel/backup.sh and read what it says."
+  print=$(printf '%s' "$latest" | sed -n 's/.*-k\([0-9a-f]\{8\}\)\.json\.gz$/\1/p')
+  { [ -n "$print" ] && security find-generic-password -s lamport-sentinel-data-key -a "$HOST#$print" >/dev/null 2>&1; } || say backup-key "The key that the newest copy of Sentinel's data is sealed with is not in this Mac's keychain, so that copy cannot be restored in full. Run sentinel/backup.sh and read what it says."
 fi
 exit 0

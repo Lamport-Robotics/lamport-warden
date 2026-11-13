@@ -118,16 +118,18 @@ describe("a round of looking", () => {
     s.tick(60);
     await s.watcher.passAll();
     s.chain.took();
-    // the line kept is the one from before the pass, so the next look differs and the wallet is read through again
+    // the line kept is the one from before the pass, so the next look differs and the wallet is read through
+    // again: what was listed and could not be shown is asked for once more
     s.tick(60);
     await s.watcher.passAll();
-    expect(s.chain.took()).toContain("getSignaturesForAddress");
+    expect(s.chain.took()).toContain("getTransaction");
     s.tick(60);
     await s.watcher.passAll();
     // And a transaction that is listed and cannot be shown yet (this chain never shows one) is asked for
     // again on the wallet's next turn, though its accounts have not moved since: it is not left for ten minutes.
     expect(s.store.record(A).more).toBe(true);
-    expect(s.chain.took().slice(0, 3)).toEqual(["look×2", "getSignaturesForAddress", "getTransaction"]);
+    // (it is on the list of what is waiting: the list itself is not asked for again until that is read)
+    expect(s.chain.took().slice(0, 2)).toEqual(["look×2", "getTransaction"]);
   });
 
   it("still reads a wallet through now and then when every look finds it unchanged, and at once when told to", async () => {
@@ -217,18 +219,18 @@ describe("a round with more to read through than it has time for", () => {
     const passed = () => s.chain.took().filter((c) => c === "getSignaturesForAddress").length;
     const first = await s.watcher.passAll(undefined, { full: (w) => w === spoken, mostPasses: 3 });
     expect(passed()).toBe(3);
-    // the RPC's word, the unfinished pass, and one of the two that moved were read through; the other that
-    // moved and the new wallet were not read, and say so
-    expect(first.deferred.sort()).toEqual([moved2, fresh].sort());
-    for (const w of [spoken, unfinished, moved1]) expect(s.store.record(w).passedAt, w).toBe(s.now());
+    // The RPC's word and the two that moved were read through: news goes first. The new wallet and the one
+    // that is only catching up on what it left unread were not, and say so.
+    expect(first.deferred.sort()).toEqual([unfinished, fresh].sort());
+    for (const w of [spoken, moved1, moved2]) expect(s.store.record(w).passedAt, w).toBe(s.now());
     // the two routine ones were looked at, found as they were, and that is their read: not deferred, not passed
     for (const w of [routine1, routine2]) { expect(s.store.record(w).lastSeenAt, w).toBe(s.now()); expect(s.store.record(w).passedAt, w).toBe(s.now() - 600); }
-    expect(s.store.record(moved2).lastSeenAt).toBe(s.now() - 600); // not read is not marked read
+    expect(s.store.record(unfinished).lastSeenAt).toBe(s.now() - 600); // not read is not marked read
     // next round they are taken first, and then the routine passes get their turn
     s.tick(2);
     const second = await s.watcher.passAll(undefined, { mostPasses: 3 });
     expect(second.deferred).toEqual([]);
-    expect(s.store.record(moved2).passedAt).toBe(s.now());
+    expect(s.store.record(unfinished).passedAt).toBe(s.now());
     expect(s.store.record(fresh).passedAt).toBe(s.now());
     expect([routine1, routine2].filter((w) => s.store.record(w).passedAt === s.now())).toHaveLength(1); // one place was left for a routine pass
   });
