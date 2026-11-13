@@ -24,8 +24,10 @@ describe("when an alert is real", () => {
     const steps = [...real.matchAll(/<li><b>([^<]+)<\/b>/g)].map((m) => m[1]);
     expect(steps).toEqual(["Sign nothing you are sent.", "Make a new wallet with a new recovery phrase,", "Move what is left to it,", "Then what is locked:", "Tell Sentinel."]);
     expect(real).toContain("Not another account under the old phrase: the phrase is what leaked.");
-    expect(real).toContain("A transaction you never signed");
-    expect(real).toContain("A permission you gave without meaning to");
+    expect(real).toContain("Your wallet signed something you did not");
+    expect(real).toContain("A permission to spend, given or used");
+    // the alert for a delegate's taking says "a transaction your wallet did not sign": the page has to send that reader to the second case, not the first
+    expect(real).toContain("tokens left in a transaction your wallet did not sign, which is such a permission being used");
     expect(real).toContain("If you are not sure, treat it as the first.");
   });
 

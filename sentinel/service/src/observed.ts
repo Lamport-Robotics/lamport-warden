@@ -88,6 +88,11 @@ export function decode(tx: ObservedTx, wallet: string): ParsedTx | null {
   try { return parseMessage(tx.message, { owner: wallet, lookupTables: tablesOf(tx) }); } catch { return null; }
 }
 
+/** Who signed it, the one who paid its fee first. Empty when the message cannot be read. */
+export function signersOf(tx: ObservedTx): string[] {
+  return decode(tx, "")?.signers ?? [];
+}
+
 /** Every account of the transaction, in the order the balances are listed in. */
 export function accountKeys(tx: ObservedTx): string[] {
   if (tx.message[0] === 0x81) return decodeKeys(tx);
@@ -144,4 +149,37 @@ export function movementOf(tx: ObservedTx, wallet: string): Movement {
   const tokenReceivers = new Set<string>();
   for (const c of tokens) if (c.delta < 0n) for (const [owner, delta] of others.get(c.mint) ?? []) if (delta > 0n) tokenReceivers.add(owner);
   return { lamports, tokens, handedOver, tokenReceivers: [...tokenReceivers] };
+}
+
+export interface TokenLoss { account: string; mint: string; decimals: number; lost: bigint }
+
+/**
+ * `wallet`'s token accounts that held less after the transaction than before it, and by how much. An account
+ * that went to someone else in the transaction is not here: that is a handing over, and is reported as one.
+ */
+export function tokenLossesOf(tx: ObservedTx, wallet: string): TokenLoss[] {
+  const keys = accountKeys(tx);
+  const out: TokenLoss[] = [];
+  for (const a of tx.preTokenBalances) {
+    if (a.owner !== wallet) continue;
+    const b = tx.postTokenBalances.find((p) => p.accountIndex === a.accountIndex);
+    if (b && b.owner !== wallet) continue;
+    const lost = BigInt(a.amount) - BigInt(b?.amount ?? "0");
+    if (lost > 0n) out.push({ account: keys[a.accountIndex] ?? "", mint: a.mint, decimals: a.decimals, lost });
+  }
+  return out;
+}
+
+/** Every token account whose holding the transaction changed, and by how much. */
+export function tokenDeltasOf(tx: ObservedTx): Map<string, bigint> {
+  const keys = accountKeys(tx);
+  const out = new Map<string, bigint>();
+  for (const index of new Set([...tx.preTokenBalances, ...tx.postTokenBalances].map((b) => b.accountIndex))) {
+    const account = keys[index];
+    if (!account) continue;
+    const amount = (list: TokenBalance[]) => BigInt(list.find((b) => b.accountIndex === index)?.amount ?? "0");
+    const delta = amount(tx.postTokenBalances) - amount(tx.preTokenBalances);
+    if (delta !== 0n) out.set(account, delta);
+  }
+  return out;
 }

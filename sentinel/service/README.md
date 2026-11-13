@@ -29,7 +29,7 @@ Info is for the Sentinel page. Alert sends a push. Urgent pushes on every channe
 
 Signals are hard or soft. Hard: something was done to the wallet (a token account handed over, the wallet
 reassigned, value sent to a known drainer or a look-alike, an unlimited approval, a nonce someone else
-controls, Sentinel's permission replaced). Soft: this is unlike the wallet's past (a first large payment, a
+controls, Sentinel's permission replaced, tokens taken in a transaction the wallet did not sign). Soft: this is unlike the wallet's past (a first large payment, a
 program never used, a burst, an odd hour).
 
 - A transaction the owner's own browser reported as theirs keeps its hard signals and loses its soft ones.
@@ -99,6 +99,48 @@ push, and it is not counted in what a wallet costs.
 
 It has been run once against the public mainnet RPC (a first pass over a real account). The tests run it
 against a simulated RPC.
+
+## Tokens taken through a permission
+
+A delegate the wallet once approved can move its tokens in a transaction the wallet does not sign and that
+need not name the wallet at all. That transaction is in no list of the wallet's transactions, so reading the
+wallet's list, however often, never shows it. This is how an approval given to a bad site months ago turns
+into a theft.
+
+What shows it is the token account, which holds less. The record keeps what each token account held and the
+slot that was read at, and a pass compares:
+
+- It holds as much or more: nothing to do.
+- It holds less, and the wallet's own transactions since then took out at least that much: nothing to do.
+  The watcher remembers what each transaction it read did to each token account until that account is next
+  accounted for, so this costs no extra call. It is what happens on every ordinary payment.
+- It holds less than the wallet's own transactions explain: some other transaction took the rest. The token
+  account's own list of transactions is read from the slot on record, and every transaction on it that does
+  not name the wallet and took tokens raises `taken_by_permission`, Urgent and hard, once, with the amount,
+  whose permission it went under (from the record, because the Token program forgets a delegate that has
+  used all it was allowed), and who signed. One that does name the wallet is read with the wallet's own list
+  and raises the same signal there.
+
+What Sentinel's own delegate moves is a rescue and is not called a taking.
+
+A fall that cannot be explained yet (the RPC a moment behind, or more to read than one pass reads: five
+account lists and ten transactions) is kept on the record as it was and looked at again on the wallet's next
+turn. After ten minutes without finding the transaction, the owner gets `unexplained_loss` at Alert, and the
+new amount is taken as it is.
+
+What it does not see:
+
+- A taking that is made up, between two reads, by what other people paid into the same account. The account
+  did not fall, and nothing is looked for. When it is looking anyway, it reads everything that happened to
+  the account since the record, so a second taking behind a payment in is found then.
+- A wallet with more token accounts than a look takes in (99) has the ones most at risk looked at each turn:
+  those somebody holds a permission to spend from, then those that hold something. The rest are compared
+  when the wallet's accounts are next read in full, which for a quiet wallet is about every twenty minutes.
+- A record from before amounts were kept has nothing to compare with until its first read after the upgrade.
+
+`taken.test.ts` runs this against a chain written for it; `taken.validator.test.ts` runs it against a local
+validator and the Token program itself (a real approval, a real transfer by the delegate), and is part of
+`pnpm test:rescue`.
 
 ## How much it can watch, and keeping the pace
 
