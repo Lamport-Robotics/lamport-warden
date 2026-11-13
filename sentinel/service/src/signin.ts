@@ -15,8 +15,8 @@
 import { randomBytes } from "node:crypto";
 import { verifyWalletSignature } from "./crypto.js";
 
-export const SIGN_IN_STATEMENT = "Sign in to Warden Sentinel.";
-export const LINK_STATEMENT = "Add this wallet to my Warden Sentinel profile.";
+import { LINK_STATEMENT, SIGN_IN_STATEMENT } from "./signin-text.js";
+export { LINK_STATEMENT, SIGN_IN_STATEMENT, signInText } from "./signin-text.js";
 
 const HEADER = / wants you to sign in with your Solana account:$/;
 const FIELD = /^(URI|Version|Chain ID|Nonce|Issued At|Expiration Time|Not Before|Request ID): (.*)$/;
@@ -113,17 +113,4 @@ export function verifySignIn(input: { message: Uint8Array; signature: Uint8Array
   if (parsed.fields["Not Before"] && (notBefore === null || notBefore > now)) return { ok: false, why: "the text is not valid yet." };
   if (!verifyWalletSignature(input.address, input.message, input.signature)) return { ok: false, why: "the signature is not that wallet's." };
   return { ok: true, address: input.address, purpose };
-}
-
-/** The text a page asks a wallet to sign when the wallet has no sign-in feature of its own. The same words either way. */
-export function signInText(o: { host: string; address: string; nonce: string; purpose: Purpose["kind"]; issuedAt: string }): string {
-  return [
-    `${o.host} wants you to sign in with your Solana account:`,
-    o.address,
-    "",
-    o.purpose === "link" ? LINK_STATEMENT : SIGN_IN_STATEMENT,
-    "",
-    `Nonce: ${o.nonce}`,
-    `Issued At: ${o.issuedAt}`,
-  ].join("\n");
 }

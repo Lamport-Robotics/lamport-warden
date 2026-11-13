@@ -33,6 +33,7 @@
     "src",
     "test",
     "sentinel/service",
+    "sentinel/web/src",
     "vitest.config.ts",
     "vitest.browser.config.ts",
     "vitest.wallets.config.ts"
