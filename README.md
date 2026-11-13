@@ -24,6 +24,14 @@ There is no account and no model, and by default nothing goes to Lamport. Your p
 storage on this machine, one history per wallet address, and it grows only when a request you let through
 comes back signed.
 
+## See it work
+
+https://warden.lamportrobotics.com/try/ has a practice wallet that holds nothing, and eight requests a real
+site might make of it: a first payment, the same payment again, a look-alike address, an unlimited approval,
+a token account handed over, a sign-in for another site, a payment dressed up as a message, and an ordinary
+message. With Warden installed, each ends the way the page says it will. Nothing is sent to Solana.
+`site/try/` is the page; a new install is offered it once, from Warden's own settings page.
+
 ## Which wallets, and which doors
 
 A page can reach a wallet in more than one way. Warden is tested against the extensions as the Chrome Web

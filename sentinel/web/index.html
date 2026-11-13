@@ -83,6 +83,21 @@
       <p class="plain">Removing a wallet makes Sentinel forget what it learned about it and the alerts it raised. Removing the last one removes your profile. The service's own backups keep them for up to seven days more, and then they are gone from those too.</p>
     </section>
   </div>
+
+  <section id="real">
+    <h2>When an alert is real</h2>
+    <p class="plain">If Sentinel tells you about something you did not do, work out which of two things happened. If you are not sure, treat it as the first.</p>
+    <p class="plain"><b>A transaction you never signed</b> (a payment you did not make, an account handed to someone else, a sign-in to this page that was not you). Someone else has that wallet's key. A key that has leaked cannot be made safe again, but what is still in the wallet can be moved:</p>
+    <ol class="steps">
+      <li><b>Sign nothing you are sent.</b> After a theft, messages arrive offering to recover the money or "revoke access" through a link. They are the second theft. Sentinel never sends a link and never asks you to sign.</li>
+      <li><b>Make a new wallet with a new recovery phrase,</b> on a device you trust. Not another account under the old phrase: the phrase is what leaked.</li>
+      <li><b>Move what is left to it,</b> the most valuable first, and SOL last, because every transfer needs a little SOL for its fee. Check the new address against the new wallet itself, every character. Warden will stop and ask, because the old wallet has never paid it.</li>
+      <li><b>Then what is locked:</b> a stake or a position in a protocol has to be withdrawn by its own steps before it can be moved.</li>
+      <li><b>Tell Sentinel.</b> Add the new wallet here and remove the old one.</li>
+    </ol>
+    <p class="plain"><b>A permission you gave without meaning to</b> (a site got an approval to spend one of your tokens). The key may be fine, and the permission is the danger: whoever holds it can take those tokens whenever they like. Revoke it in your wallet, or move those tokens to another of your accounts, and do it before anything else.</p>
+    <p class="soft">If the alert was about something you did, sign in and press "This was me". Sentinel then treats whoever that paid as someone this wallet pays.</p>
+  </section>
 </main>
 
 <footer class="foot">

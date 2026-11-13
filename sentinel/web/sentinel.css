@@ -30,6 +30,9 @@ h2 { font-weight: 400; font-size: 24px; letter-spacing: -.035em; margin-bottom: 
 section { padding: 32px 0; border-top: 1px solid var(--line); }
 section.intro { border-top: 0; padding-top: 0; }
 
+ol.steps { color: var(--dim); max-width: 40em; margin: 0 0 16px; padding-left: 22px; }
+ol.steps li { padding: 5px 0; }
+ol.steps b { color: var(--bone); font-weight: 500; }
 .notice { margin: 0 0 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--raise); }
 .notice.bad { border-color: var(--stop); color: var(--stop); }
 
