@@ -82,6 +82,23 @@ export function rescueToken(o: { rescuer: PublicKey; owner: PublicKey; vault: Pu
   });
 }
 
+const UPGRADEABLE_LOADER = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111");
+/** Where the loader keeps the program's code and its upgrade authority. */
+export const programDataAddress = () => pda([PROGRAM.toBytes()], UPGRADEABLE_LOADER);
+
+/**
+ * Makes Lamport's shared set of rescuer keys. Once, by the program's upgrade authority. `admin` is who may
+ * replace the keys afterwards; a key in the set can move an owner's armed tokens into that owner's vault and
+ * do nothing else.
+ */
+export function initRescuerSet(authority: PublicKey, admin: PublicKey, rescuers: PublicKey[]): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: PROGRAM,
+    keys: [key(authority, true, true), key(rescuerSetAddress(), false, true), key(PROGRAM, false, false), key(programDataAddress(), false, false), key(SYSTEM, false, false)],
+    data: data("init_rescuer_set", admin.toBytes(), u32(rescuers.length), ...rescuers.map((r) => r.toBytes())),
+  });
+}
+
 // ---- planning a rescue
 
 /** One of the owner's token accounts, as the chain shows it. */
