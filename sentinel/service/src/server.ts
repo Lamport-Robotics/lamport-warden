@@ -15,7 +15,7 @@ import { Accounts, type Refusal } from "./accounts.js";
 import { PLANS } from "./plans.js";
 import { verifyStripeSignature, type Billing } from "./billing.js";
 import { addressBytes, looksLikeSignature } from "./crypto.js";
-import { channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, walletRemovedNotice } from "./notices.js";
+import { channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, takerTrustedNotice, walletRemovedNotice } from "./notices.js";
 import { NonceBook, verifySignIn } from "./signin.js";
 import type { MemoryStore, StoredEvent } from "./store.js";
 import type { Watcher } from "./watcher.js";
@@ -282,7 +282,12 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       if (answer !== "this_was_me" && answer !== "ignore") return no(400, "the answer is this_was_me or ignore.");
       store.answer(event.id!, answer);
       // who it paid becomes someone this wallet pays; read from the chain again, not taken from the page
-      if (answer === "this_was_me" && event.signature) void watcher.confirmOwn(event.wallet, event.signature).catch(() => undefined);
+      if (answer === "this_was_me" && event.signature) {
+        const takers = event.takers ?? [];
+        // For a taking under a permission it also makes that permission's holder familiar, which is less
+        // protection from then on: the profile's channels are told, once it has in fact been done.
+        void watcher.confirmOwn(event.wallet, event.signature).then((done) => { if (done && takers.length > 0) notice(session, takerTrustedNotice(takers, event.wallet, who!.wallet)); }).catch(() => undefined);
+      }
       return ok();
     }
 

@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { createPrivateKey, sign } from "node:crypto";
 import { Keypair } from "@solana/web3.js";
 import { Accounts } from "../src/accounts.js";
-import { channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, walletRemovedNotice } from "../src/notices.js";
+import { channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, takerTrustedNotice, walletRemovedNotice } from "../src/notices.js";
 import { ChannelNotifier, type Post } from "../src/notify.js";
 import { api, listen, networkOf, type ApiRequest } from "../src/server.js";
 import { NonceBook, signInText } from "../src/signin.js";
@@ -30,7 +30,7 @@ const NTFY = "https://ntfy.sh/alice-topic-123";
 // made-up addresses in each service's shape, put together here so no line reads as a real webhook to a secret scanner
 const DISCORD = ["https://discord.com/api", "webhooks", "123456789012345678", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-abcd"].join("/");
 
-function service(opts: { newProfilesPerDay?: number } = {}) {
+function service(opts: { newProfilesPerDay?: number; confirmOwn?: () => Promise<boolean> } = {}) {
   const store = new MemoryStore();
   const accounts = new Accounts(store, Buffer.alloc(32, 9));
   const nonces = new NonceBook();
@@ -38,7 +38,8 @@ function service(opts: { newProfilesPerDay?: number } = {}) {
   const post: Post = async (url, init) => { posts.push({ url, title: init.headers.Title ?? "", priority: init.headers.Priority, body: init.body }); return { ok: true, status: 200 }; };
   const notifier = new ChannelNotifier(accounts, post, { now: () => T0 });
   let now = T0;
-  const handle = api({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async () => true }, nonces, origin: ORIGIN, now: () => now, notice: (p, s, o) => notifier.notice(p, s, o), ...opts });
+  const { confirmOwn = async () => true, ...rest } = opts;
+  const handle = api({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn }, nonces, origin: ORIGIN, now: () => now, notice: (p, s, o) => notifier.notice(p, s, o), ...rest });
   const call = (method: string, path: string, body?: unknown, bearer: string | null = null, ip = "10.0.0.1") => handle({ method, path, body, bearer, ip } satisfies ApiRequest);
   const signIn = async (w: ReturnType<typeof walletOf>, o: { session?: string; ip?: string } = {}) => {
     const link = !!o.session;
@@ -57,6 +58,34 @@ function service(opts: { newProfilesPerDay?: number } = {}) {
 }
 
 describe("a change that makes a profile watch less", () => {
+  it("\"this was me\" on a taking under a permission is said, because that permission's takings are no longer alerted", async () => {
+    const holder = walletOf(9).address, other = walletOf(10).address;
+    const taking = (s: ReturnType<typeof service>, takers?: string[]) => {
+      s.store.addEvent({ wallet: alice.address, signature: `sig${Math.random()}`, slot: 5, at: T0, level: "urgent", signals: ["taken_by_permission"], sentence: "1 token left your wallet in a transaction your wallet did not sign.", rescueWorthy: true, ...(takers ? { takers } : {}) });
+      return s.store.events(alice.address).at(-1)!.id!;
+    };
+    const settle = () => new Promise((r) => setTimeout(r, 20));
+    const s = service();
+    const { session } = await s.withChannel();
+    expect((await s.call("POST", `/v1/events/${taking(s, [holder])}/answer`, { answer: "this_was_me" }, session)).status).toBe(200);
+    await settle();
+    expect(s.posts.map((p) => p.body)).toEqual([takerTrustedNotice([holder], alice.address, alice.address)]);
+    expect(s.posts[0]!.body).toBe(`"This was me" was answered to an alert about tokens taken from ${short(alice.address)} under a permission, by someone signed in with ${short(alice.address)}. What ${short(holder)} takes from that wallet under that permission is from now on listed on the Sentinel page and not alerted. If that was not you, someone else has the key to ${short(alice.address)}.`);
+    expect(takerTrustedNotice([holder, other], alice.address, null)).toContain(`What ${short(holder)} and ${short(other)} take from that wallet under those permissions is from now on listed`);
+    // "ignore" changes nothing and says nothing; nor does an alert that was not about a permission
+    s.posts.length = 0;
+    expect((await s.call("POST", `/v1/events/${taking(s, [holder])}/answer`, { answer: "ignore" }, session)).status).toBe(200);
+    expect((await s.call("POST", `/v1/events/${taking(s)}/answer`, { answer: "this_was_me" }, session)).status).toBe(200);
+    await settle();
+    expect(s.posts).toEqual([]);
+    // and when the transaction could not be read again from the chain, nothing was made familiar, so nothing is said
+    const unread = service({ confirmOwn: async () => false });
+    const u = await unread.withChannel();
+    expect((await unread.call("POST", `/v1/events/${taking(unread, [holder])}/answer`, { answer: "this_was_me" }, u.session)).status).toBe(200);
+    await settle();
+    expect(unread.posts).toEqual([]);
+  });
+
   it("removing a channel is said on that channel before it goes, naming the wallet that signed in", async () => {
     const s = service();
     const { session, channel } = await s.withChannel();

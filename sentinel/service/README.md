@@ -163,7 +163,9 @@ transaction moving the token under it: to the chain, the same thing as a theft. 
 Urgent, with what the wallet was paid in the same transaction, so that the owner recognises it. A payment
 does not soften the alert: a thief can send a wallet one lamport. What does is the owner. "This was me" on
 such an alert makes whoever holds that permission familiar for that wallet (`trustedTakers` on the record,
-the newest twenty), and what it takes afterwards is Info: on the page, and nobody's phone rings.
+the newest twenty), and what it takes afterwards is Info: on the page, and nobody's phone rings. Because
+that is less protection from then on, and anyone signed in to the profile can press it, the profile's
+channels are told when it is done (`takerTrustedNotice`), with the wallet that was signed in.
 
 ### What it does not see
 
