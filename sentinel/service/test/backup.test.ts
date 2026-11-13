@@ -19,7 +19,7 @@ const KEY = Buffer.alloc(32, 5).toString("base64");
 const OPS = "https://ntfy.sh/operator-topic-123";
 const now = () => Math.floor(Date.now() / 1000);
 
-function setup(opts: { data?: string | null; key?: string; ops?: string; sshFails?: boolean } = {}) {
+function setup(opts: { data?: string | null; key?: string; ops?: string; sshFails?: boolean; settingsFail?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "sentinel-backup-"));
   const bin = join(dir, "bin"), dest = join(dir, "backups"), home = join(dir, "home");
   mkdirSync(bin); mkdirSync(home);
@@ -33,11 +33,14 @@ printf 'ssh %s\\n' "$last" >> "${acts}"
 ${opts.sshFails ? "exit 255" : ""}
 case "$last" in
   gzip*) ${opts.data === null ? "printf 'no such file'" : `gzip -c "${fixture}"`} ;;
-  *SENTINEL_DATA_KEY*) printf '%s\\n' "${opts.key ?? KEY}" ;;
-  *SENTINEL_OPS_CHANNEL*) printf '%s\\n' "${opts.ops ?? OPS}" ;;
+  *SENTINEL_DATA_KEY*) ${opts.settingsFail ? "exit 255" : `printf '%s\\n' '${opts.key ?? KEY}'`} ;;
+  *SENTINEL_OPS_CHANNEL*) ${opts.settingsFail ? "exit 255" : `printf '%s\\n' '${opts.ops ?? OPS}'`} ;;
 esac`);
-  // the keychain: one file an entry, and what was asked without what was stored
-  script("security", `verb="$1"; shift
+  // the keychain: one file an entry. What it was asked on its command line is written down whole, so a test
+  // can see that a secret was never there; with -i it reads one command from its input, as the real one does.
+  script("security", `printf 'security-argv' >> "${acts}"; for a in "$@"; do printf ' [%s]' "$a" >> "${acts}"; done; printf '\\n' >> "${acts}"
+if [ "$1" = "-i" ]; then read -r line; eval "set -- $line"; fi
+verb="$1"; shift
 while [ $# -gt 0 ]; do case "$1" in -s) s="$2"; shift ;; -a) a="$2"; shift ;; -w) w="\${2-}"; [ $# -gt 1 ] && shift ;; -l) shift ;; esac; shift; done
 case "$verb" in
   find-generic-password) cat "${dir}/kc-$s-$a" 2>/dev/null || exit 44 ;;
@@ -52,10 +55,13 @@ esac`);
     child.stderr.on("data", (d) => { out += d; });
     child.on("close", (code) => resolve({ code, out }));
   });
-  const did = () => (existsSync(acts) ? readFileSync(acts, "utf8").trim().split("\n").filter(Boolean) : []);
+  const all = () => (existsSync(acts) ? readFileSync(acts, "utf8").trim().split("\n").filter(Boolean) : []);
+  /** What was done, without the record of the keychain tool's command lines (`argv` has those). */
+  const did = () => all().filter((a) => !a.startsWith("security-argv"));
+  const argv = () => all().filter((a) => a.startsWith("security-argv"));
   const copies = () => (existsSync(dest) ? readdirSync(dest).filter((f) => /^sentinel-.*\.json\.gz$/.test(f)).sort() : []);
   const keychain = (name: string, host = "can") => { try { return readFileSync(join(dir, `kc-${name}-${host}`), "utf8"); } catch { return null; } };
-  return { dir, dest, home, run, did, copies, keychain };
+  return { dir, dest, home, fixture, run, did, argv, copies, keychain };
 }
 
 describe("the copy kept off the server", () => {
@@ -83,6 +89,72 @@ describe("the copy kept off the server", () => {
     expect(asked.join("\n")).not.toMatch(/STRIPE|WEBHOOK/);
     expect(asked.slice(1).map((a) => /\^(SENTINEL_[A-Z_]+)=/.exec(a)![1])).toEqual(["SENTINEL_DATA_KEY", "SENTINEL_OPS_CHANNEL"]);
   }, 20_000);
+
+  it("never puts the key on a command line, where anything running on the machine could read it", async () => {
+    const s = setup();
+    await s.run("backup.sh");
+    expect(s.keychain("lamport-sentinel-data-key")).toBe(KEY);
+    const lines = s.argv();
+    expect(lines.length).toBeGreaterThan(2);
+    for (const line of lines) { expect(line).not.toContain(KEY); expect(line).not.toContain(OPS); }
+    // it went in by the tool's own input
+    expect(lines.filter((l) => l === "security-argv [-i]")).toHaveLength(2);
+  }, 20_000);
+
+  it("says so, and ends as a failure, when the copy was made and the key for it could not be", async () => {
+    const s = setup({ settingsFail: true });
+    const r = await s.run("backup.sh");
+    expect(r.code).toBe(2);
+    expect(s.copies()).toHaveLength(1); // the copy itself is good and is kept
+    expect(r.out).toContain("backup: SENTINEL_DATA_KEY could not be read from can");
+    expect(r.out).toContain("the key its sealed parts are sealed with is not in the keychain");
+    expect(s.keychain("lamport-sentinel-data-key")).toBeNull();
+    // with a key from an earlier run still in the keychain, a day when it cannot be read is not a failure, and the key is left as it is
+    const had = setup();
+    expect((await had.run("backup.sh")).code).toBe(0);
+    const later = setup({ settingsFail: true });
+    writeFileSync(join(later.dir, "kc-lamport-sentinel-data-key-can"), KEY);
+    const again = await later.run("backup.sh");
+    expect(again.code).toBe(0);
+    expect(again.out).toContain("SENTINEL_DATA_KEY could not be read from can");
+    expect(later.keychain("lamport-sentinel-data-key")).toBe(KEY);
+  }, 30_000);
+
+  it("stores nothing that could not be handed to the keychain whole", async () => {
+    const s = setup({ ops: 'https://ntfy.sh/a"b' });
+    const r = await s.run("backup.sh");
+    expect(r.out).toContain("what the server has for lamport-sentinel-ops-channel is not something that can be stored; left alone");
+    expect(s.keychain("lamport-sentinel-ops-channel")).toBeNull();
+    expect(s.keychain("lamport-sentinel-data-key")).toBe(KEY);
+  }, 20_000);
+
+  it("removes nothing, and says why, when the server's file has nobody in it and the copy before had several", async () => {
+    const full = JSON.stringify({ wallets: Array.from({ length: 6 }, (_, i) => ({ address: `W${i}` })), records: {}, events: [], accounts: { profiles: {}, owners: {}, channels: [], sessions: [] } });
+    const empty = JSON.stringify({ wallets: [], records: {}, events: [], accounts: { profiles: {}, owners: {}, channels: [], sessions: [] } });
+    const s = setup({ data: full });
+    expect((await s.run("backup.sh")).code).toBe(0);
+    const real = join(s.dest, s.copies()[0]!);
+    const t = now() - 9 * 86_400; utimesSync(real, t, t); // the last real copy, older than a week by now
+    // the server was lost and set up again: its file is new and empty
+    writeFileSync(s.fixture, empty);
+    const r = await s.run("backup.sh");
+    expect(r.code).toBe(3);
+    expect(r.out).toContain("backup: the server's data has no wallets in it and the copy before had 6.");
+    expect(r.out).toContain("No older copy is removed while this is so.");
+    expect(existsSync(real)).toBe(true);
+    expect(s.copies()).toHaveLength(2);
+    // and the look from here says it too
+    const said = await s.run("watch-from-here.sh", [], { SENTINEL_HEALTH_URL: "http://127.0.0.1:9/none", SENTINEL_CHECK: join(root, "scripts", "check-live.mjs"), SENTINEL_CHECK_ARGS: "--once", SENTINEL_WATCH_AGAIN_AFTER: "0" });
+    expect(said.out).toContain("watch: The newest copy of Sentinel's data has no wallets in it and an older copy has 6. If the server was lost and set up again, restore from the older copy.");
+    // a service that only ever had a wallet or two and now has none is not that: the old copy goes when it is due
+    const small = setup({ data: DATA });
+    await small.run("backup.sh");
+    const one = join(small.dest, small.copies()[0]!);
+    utimesSync(one, t, t);
+    writeFileSync(small.fixture, empty);
+    expect((await small.run("backup.sh")).code).toBe(0);
+    expect(existsSync(one)).toBe(false);
+  }, 60_000);
 
   it("writes the keychain only when what it holds is not what the server has", async () => {
     const s = setup();
@@ -175,6 +247,14 @@ describe("the look from the machine that keeps the copies", () => {
     answer = "nothing";
     await watch(s);
     expect(s.did().slice(before).map((a) => a.split(" ")[0])).toEqual(["osascript"]);
+  }, 30_000);
+
+  it("says so when the key the copies need is not in the keychain", async () => {
+    const s = setup({ settingsFail: true });
+    await s.run("backup.sh");
+    answer = healthy();
+    const r = await watch(s);
+    expect(r.out).toBe("watch: The key that Sentinel's stored alert channels are sealed with is not in this Mac's keychain, so the copies kept here cannot be restored in full. Run sentinel/backup.sh and read what it says.\n");
   }, 30_000);
 
   it("says so when no copy has been made for two days", async () => {

@@ -121,20 +121,51 @@ slot that was read at, and a pass compares:
   The watcher remembers what each transaction it read did to each token account until that account is next
   accounted for, so this costs no extra call. It is what happens on every ordinary payment.
 - It holds less than the wallet's own transactions explain: some other transaction took the rest. The token
-  account's own list of transactions is read from the slot on record, and every transaction on it that does
-  not name the wallet and took tokens raises `taken_by_permission`, Urgent and hard, once, with the amount,
-  whose permission it went under (from the record, because the Token program forgets a delegate that has
-  used all it was allowed), and who signed. One that does name the wallet is read with the wallet's own list
-  and raises the same signal there.
+  account's own list of transactions is read, back to the slot on record and the oldest first, and every
+  transaction on it that the wallet did not sign and that took tokens raises `taken_by_permission`, Urgent
+  and hard, once, with the amount, whose permission it went under (from the record, because the Token
+  program forgets a delegate that has used all it was allowed), who signed, and what the wallet received in
+  the same transaction if it received anything. A transaction that names the wallet without its signature
+  is also in the wallet's own list and raises the same signal there; whichever place comes upon it first
+  tells of it, and the other does not.
 
 What Sentinel's own delegate moves is a rescue and is not called a taking.
 
 A fall that cannot be explained yet (the RPC a moment behind, or more to read than one pass reads: five
 account lists and ten transactions) is kept on the record as it was and looked at again on the wallet's next
-turn. After ten minutes without finding the transaction, the owner gets `unexplained_loss` at Alert, and the
-new amount is taken as it is.
+turn; when more accounts hold less than one pass looks into, they take turns. After ten minutes without
+finding the transaction, the owner gets `unexplained_loss`, and the new amount is taken as it is.
 
-What it does not see:
+### Somebody trying to hide it
+
+The code is public, and a transaction costs a thief almost nothing, so each of these was tried:
+
+- **Dust after the taking**, to push it out of what is read. The account's list is read oldest first from the
+  slot on record, and as far back as three thousand signatures, so what took the tokens is read before
+  anything sent after it.
+- **Filling the wallet's own list** (thirty transactions a turn that merely name it), so that "the wallet's
+  own transactions are read first" never ends. A fall waits two minutes for the wallet's list and no longer;
+  then the account's own list is read regardless.
+- **Naming the wallet in the taking**, and burying it under a thousand more that name it, so the wallet's
+  list (which takes the newest thousand) never shows it. The taking is judged where it is found, on the
+  account's list, by who signed it and not by whom it names.
+- **A flood before the taking**, so that reading oldest first does not reach it in ten minutes.
+  `unexplained_loss` is then Urgent and says why: tokens left, the wallet did not move them, and there was
+  more than could be read, which is how one is hidden. Nobody can be named, and the owner is told to revoke.
+- Beside these the owner is told, at Alert, when more names the wallet than is being read: after ten minutes
+  of it, or at once when there was more than the list holds and the oldest go unread (`watch_behind`, at
+  most every six hours).
+
+### A sale is a taking too
+
+A marketplace that lists without taking the token away holds a permission, and a sale is the buyer's
+transaction moving the token under it: to the chain, the same thing as a theft. It is told as a taking, at
+Urgent, with what the wallet was paid in the same transaction, so that the owner recognises it. A payment
+does not soften the alert: a thief can send a wallet one lamport. What does is the owner. "This was me" on
+such an alert makes whoever holds that permission familiar for that wallet (`trustedTakers` on the record,
+the newest twenty), and what it takes afterwards is Info: on the page, and nobody's phone rings.
+
+### What it does not see
 
 - A taking that is made up, between two reads, by what other people paid into the same account. The account
   did not fall, and nothing is looked for. When it is looking anyway, it reads everything that happened to
@@ -143,10 +174,13 @@ What it does not see:
   those somebody holds a permission to spend from, then those that hold something. The rest are compared
   when the wallet's accounts are next read in full, which for a quiet wallet is about every twenty minutes.
 - A record from before amounts were kept has nothing to compare with until its first read after the upgrade.
+- Transactions the wallet itself signs are read from its own list, twenty-five a pass, oldest first. A flood
+  of transactions naming the wallet delays alerts about those (the owner is told it is behind, as above);
+  what happened to its balances and permissions is still seen by the look, every turn.
 
-`taken.test.ts` runs this against a chain written for it; `taken.validator.test.ts` runs it against a local
-validator and the Token program itself (a real approval, a real transfer by the delegate), and is part of
-`pnpm test:rescue`.
+`taken.test.ts` runs all of this against a chain written for it; `taken.validator.test.ts` runs the plain
+case against a local validator and the Token program itself (a real approval, a real transfer by the
+delegate), and is part of `pnpm test:rescue`.
 
 ## How much it can watch, and keeping the pace
 
@@ -301,9 +335,15 @@ lost server. For that there is a copy somewhere else:
   into a folder only that user can read (`~/Library/Application Support/Lamport Sentinel/backups`), and
   removes copies older than seven days, which is what the privacy policy says backups hold. What comes back
   is kept only if it unpacks and is the service's own file.
-- On a Mac it also puts into the login keychain, never into a file, the two things a restored file is no
-  use without: the data key (the stored alert channels are sealed with it) and the address of the operator's
-  channel. Stripe's keys are not copied: they can be made again at Stripe.
+- On a Mac it also puts into the login keychain, never into a file and never onto a command line, the two
+  things a restored file is no use without: the data key (the stored alert channels are sealed with it) and
+  the address of the operator's channel. Stripe's keys are not copied: they can be made again at Stripe. A
+  process running as that user on that Mac can read both the copies and the key; the keychain keeps the key
+  out of the folder, out of other backups of the folder, and out of anything that reads files.
+- Nothing is removed when a copy fails, so a server that is gone does not take its backups with it a week
+  later. Nothing is removed either when the server's file has no wallets in it and the copy before had
+  several: a server that was lost and set up again looks like that, and the script and the look both say so.
+- It ends with 2 when the copy was made and the key for it is not in the keychain and could not be read.
 - `sentinel/watch-from-here.sh` asks the deployed service the same question as the check from GitHub, from
   that machine, and looks at the copies: it says so, as a notification there and on the operator's ntfy
   channel, when the service does not answer or is not watching, and when no copy has been made for two days.

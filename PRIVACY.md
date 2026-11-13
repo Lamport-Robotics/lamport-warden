@@ -69,7 +69,7 @@ What it keeps, on that server:
 - If you turned on "Tell Sentinel which signatures were mine": the signatures your browser reported, for 30
   days.
 - Where your alerts go: the address of each channel you gave (an ntfy topic, or a Discord or Slack webhook),
-  encrypted under a key that is not stored with it, and when it last took a message or since when it has
+  encrypted under a key that is not in that file, and when it last took a message or since when it has
   refused them.
 - Your sign-ins: each session as a hash, for seven days, with which of your wallets signed it in; and, for a
   wallet you linked to the extension, the hash of the token it reports with.
@@ -94,7 +94,8 @@ Who else receives something:
 Removing a wallet on the Sentinel page deletes what is kept about it. Removing the last one deletes the
 profile, its channels and its sessions. Sentinel's daily backups hold them for up to seven days more, and
 then they are gone from those too. The backups are copies of the same file: one set on the server, and one
-on a second computer that Lamport keeps, in case the server is lost. Stripe keeps its own record of
+on a second computer that Lamport keeps, in case the server is lost. If the server is lost or cannot be
+reached, the copies on the second computer are kept until it is back. Stripe keeps its own record of
 payments.
 
 The practice page at `/try/` sends nothing anywhere. With Warden installed, Warden remembers the practice

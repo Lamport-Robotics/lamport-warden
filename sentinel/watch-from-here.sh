@@ -8,7 +8,9 @@
 # while it is awake. It says something when:
 #
 #   - the service does not answer from outside, or answers that it is not watching (twice, half a minute apart);
-#   - the newest backup here is more than two days old, or there is none.
+#   - the newest backup here is more than two days old, or there is none;
+#   - the newest backup has no wallets in it and an older one has several (a server lost and set up again);
+#   - the key the backups' sealed parts are sealed with is not in this Mac's keychain.
 #
 # It says it as a notification on this Mac and, when the operator's channel is in the keychain (backup.sh puts
 # it there) and is an ntfy topic, on that channel: once an hour at most for each.
@@ -47,4 +49,18 @@ fi
 
 newest=$(find "$DEST" -name 'sentinel-*.json.gz' -type f -mtime "-$STALE_DAYS" 2>/dev/null | head -1)
 [ -n "$newest" ] || say backup "No copy of Sentinel's data has been made here for $STALE_DAYS days. The copies on the server are on the same disk as the data."
+
+# the newest copy against the fullest of the others: emptied is what a lost server set up again looks like
+wallets_in() { gzip -dc "$1" 2>/dev/null | node -e 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{try{console.log(JSON.parse(s).wallets.length)}catch{console.log(-1)}})' 2>/dev/null || echo -1; }
+latest=$(ls -1t "$DEST"/sentinel-*.json.gz 2>/dev/null | head -1)
+if [ -n "$latest" ] && [ "$(wallets_in "$latest")" -eq 0 ]; then
+  most=0
+  for f in "$DEST"/sentinel-*.json.gz; do [ "$f" = "$latest" ] && continue; n=$(wallets_in "$f"); [ "$n" -gt "$most" ] && most=$n; done
+  [ "$most" -ge "${SENTINEL_BACKUP_EMPTIED_FROM:-5}" ] && say backup-empty "The newest copy of Sentinel's data has no wallets in it and an older copy has $most. If the server was lost and set up again, restore from the older copy. Nothing is removed here while this is so."
+fi
+
+# without the key a restored file has lost every owner's alert channels
+if command -v security >/dev/null 2>&1 && [ -n "$latest" ]; then
+  security find-generic-password -s lamport-sentinel-data-key -a "$HOST" >/dev/null 2>&1 || say backup-key "The key that Sentinel's stored alert channels are sealed with is not in this Mac's keychain, so the copies kept here cannot be restored in full. Run sentinel/backup.sh and read what it says."
+fi
 exit 0

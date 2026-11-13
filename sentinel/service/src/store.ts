@@ -32,6 +32,8 @@ export interface StoredEvent {
   signals: SignalKind[];
   sentence: string;
   rescueWorthy: boolean;
+  /** For a taking: whose permissions it went under. */
+  takers?: string[];
   /** What the owner said about it. */
   answer?: "this_was_me" | "rescue" | "ignore";
   /** True when it was pushed and no channel took it (or there was none): the owner has only the page for it. */
@@ -56,6 +58,11 @@ export interface WalletRecord {
   more?: boolean;
   /** True while one of its token accounts holds less than the transactions found so far account for: the next turn is a pass, which looks again. */
   unsettled?: boolean;
+  /** Since when its list of transactions has had more in it than a pass reads, and when its owner was last told so. */
+  moreSince?: number;
+  behindToldAt?: number;
+  /** Holders of a permission whose takings the owner called their own doing ("this was me"): the newest twenty. */
+  trustedTakers?: string[];
   /**
    * What its accounts looked like at the last look (watcher.ts, `glance`): the wallet's balance and owner, and
    * each token account's amount and who may spend or close it, as one line of text. A look that finds the

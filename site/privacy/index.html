@@ -149,7 +149,7 @@
     <li><b>What is normal for each.</b> Worked out from its public history on the chain: the addresses it has paid, the programs it has used, how much it usually sends, the hours it transacts in, and its token accounts as last seen.</li>
     <li><b>Alerts.</b> The alerts it raised about a wallet, and what you answered to each.</li>
     <li><b>Reported signatures.</b> If you turned on "Tell Sentinel which signatures were mine": the signatures your browser reported, for 30 days.</li>
-    <li><b>Where your alerts go.</b> The address of each channel you gave (an ntfy topic, or a Discord or Slack webhook), encrypted under a key that is not stored with it, and when it last took a message or since when it has refused them.</li>
+    <li><b>Where your alerts go.</b> The address of each channel you gave (an ntfy topic, or a Discord or Slack webhook), encrypted under a key that is not in that file, and when it last took a message or since when it has refused them.</li>
     <li><b>Your sign-ins.</b> Each session as a hash, for seven days, with which of your wallets signed it in; and, for a wallet you linked to the extension, the hash of the token it reports with.</li>
     <li><b>Your plan.</b> If you pay: Stripe's ids for the customer and the subscription, the price, its status and its dates. Not your card, your name or your email address: those are with Stripe and never reach Sentinel.</li>
   </ul>
@@ -160,7 +160,7 @@
     <li><b>The channel you chose</b> (ntfy.sh, Discord or Slack) receives each alert: one sentence about what happened, which can name the addresses involved, and the first and last four characters of your wallet's address. The same channel is told when someone signs in to your profile or changes it, and what your plan does. On ntfy, anyone who knows a topic's name can read what is sent to it.</li>
     <li><b>Stripe</b>, if you pay. It takes the payment under its own privacy policy. Sentinel gives Stripe a random id that stands for your profile, and learns from Stripe whether the plan is paid.</li>
   </ul>
-  <p>Removing a wallet on the Sentinel page deletes what is kept about it. Removing the last one deletes the profile, its channels and its sessions. Sentinel's daily backups hold them for up to seven days more, and then they are gone from those too. The backups are copies of the same file: one set on the server, and one on a second computer that Lamport keeps, in case the server is lost. Stripe keeps its own record of payments.</p>
+  <p>Removing a wallet on the Sentinel page deletes what is kept about it. Removing the last one deletes the profile, its channels and its sessions. Sentinel's daily backups hold them for up to seven days more, and then they are gone from those too. The backups are copies of the same file: one set on the server, and one on a second computer that Lamport keeps, in case the server is lost. If the server is lost or cannot be reached, the copies on the second computer are kept until it is back. Stripe keeps its own record of payments.</p>
   <p>The practice page at <code>/try/</code> sends nothing anywhere. With Warden installed, Warden remembers the practice wallet's payments as it would any wallet's, in your browser; the settings page can forget them.</p>
 
   <h2>Changes and contact</h2>
