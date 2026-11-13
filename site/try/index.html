@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Try Warden</title>
+<meta name="description" content="See what Lamport Warden does with a signing request, using a practice wallet that holds nothing. Nothing is sent to Solana.">
+<meta name="theme-color" content="#0b0b0a">
+<!-- Nothing runs here but this page's own script, and it talks to nothing at all. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="/site/mark.svg">
+<link rel="stylesheet" href="/sentinel/sentinel.css">
+<link rel="stylesheet" href="try.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="/" aria-label="Lamport Warden"><img src="/site/mark.svg" alt="" width="15" height="20"><span>Lamport Warden</span></a>
+  <nav class="nav" aria-label="Site">
+    <a href="/">Warden</a>
+    <a href="/sentinel/">Sentinel</a>
+    <a href="/privacy/">Privacy</a>
+  </nav>
+</header>
+
+<main class="page">
+  <section class="intro">
+    <p class="eyebrow">Try it</p>
+    <h1>Watch it read a request.</h1>
+    <p class="lede">Each button below asks a wallet to sign something a real site might ask for. Some are ordinary. Most are how wallets get emptied. With Warden in your browser, you see what it does with each one.</p>
+    <p class="plain"><b>Nothing here is real.</b> The wallet is a practice wallet that this page made a moment ago. It holds nothing, its key is thrown away when you leave, and nothing is sent to Solana. You do not need a wallet of your own, or any crypto.</p>
+    <p class="notice" id="warden" role="status">Looking for Warden in this browser…</p>
+    <p class="soft">Practice wallet: <span class="addr" id="address"></span></p>
+  </section>
+
+  <section>
+    <h2>Requests</h2>
+    <ul class="tries" id="tries"></ul>
+    <noscript><p class="plain">This page needs its script to make the practice wallet.</p></noscript>
+  </section>
+
+  <section>
+    <h2>What you just saw</h2>
+    <p class="plain">Warden sits in front of the wallet. A request is read before the wallet is asked, by rules that run in your browser, and the sentence you saw is written from what the request does, not from what the site says about it.</p>
+    <p class="plain">It remembers who you have paid, per wallet, in your browser and nowhere else. That is why the second payment went through without a word and the look-alike did not. Warden kept that for the practice wallet too; its settings page can forget it.</p>
+    <p class="plain">Warden is a second pair of eyes, not a guarantee. A page can still reach a wallet in ways an extension never sees.</p>
+  </section>
+</main>
+
+<footer class="foot">
+  <span>© 2026 Lamport Robotics</span>
+  <nav aria-label="More from Lamport"><a href="/">Warden</a><a href="/sentinel/">Sentinel</a><a href="/privacy/">Privacy</a><a href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">Source</a></nav>
+</footer>
+<script src="try.js"></script>
+</body>
+</html>
