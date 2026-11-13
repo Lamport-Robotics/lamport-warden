@@ -21,10 +21,11 @@ import type { Page } from "playwright";
 import { WARDEN, launch, type Browser } from "./harness.js";
 import { Accounts } from "../../sentinel/service/src/accounts.js";
 import { Billing, Stripe, type BillingConfig, type StripeFetch } from "../../sentinel/service/src/billing.js";
-import { LAMPORT_MINT } from "../../sentinel/service/src/main.js";
+import { LAMPORT_MINT, telegramLinking } from "../../sentinel/service/src/main.js";
 import { PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, purchaseTerms, renewalTerms } from "../../sentinel/service/src/plans.js";
 import type { Rpc } from "../../sentinel/service/src/rpc.js";
-import { listen } from "../../sentinel/service/src/server.js";
+import { listen, type ApiDeps } from "../../sentinel/service/src/server.js";
+import { LinkCodes, answer, linkedTo } from "../../sentinel/service/src/telegram.js";
 import { NonceBook } from "../../sentinel/service/src/signin.js";
 import { MemoryStore } from "../../sentinel/service/src/store.js";
 
@@ -100,6 +101,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
   };
   const billing = new Billing(billingCfg, accounts, chain, new Stripe(billingCfg.secretKey, stripeFetch));
   let apiPort = 0;
+  /** What the service is made of, kept so that a test can give it a Telegram bot part-way through. */
+  let apiDeps: ApiDeps;
   /** What the service says of its own watching: the page tells the owner. */
   const healthNow: { lastPassAt: number | null; blind: number; late: number; push: "on" | "down" | "off" } = { lastPassAt: 1, blind: 0, late: 0, push: "off" };
   /** Stripe telling the service something, signed as Stripe signs it. */
@@ -110,7 +113,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
   };
 
   beforeAll(async () => {
-    back = await listen({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async (w, s) => { confirmed.push([w, s]); return true; } }, nonces: new NonceBook(), origin: ARMING, billing: { api: billing, webhookSecret: WHSEC }, testChannel: async (profile, id) => { testsSent.push([profile, id]); return { ok: true }; }, health: () => healthNow }, { port: 0 });
+    apiDeps = { accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async (w, s) => { confirmed.push([w, s]); return true; } }, nonces: new NonceBook(), origin: ARMING, billing: { api: billing, webhookSecret: WHSEC }, testChannel: async (profile, id) => { testsSent.push([profile, id]); return { ok: true }; }, health: () => healthNow };
+    back = await listen(apiDeps, { port: 0 });
     apiPort = (back.address() as { port: number }).port;
     const dir = mkdtempSync(join(tmpdir(), "warden-cert-"));
     execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem"), "-days", "2", "-subj", "/CN=warden.lamportrobotics.com"], { stdio: "ignore" });
@@ -327,6 +331,35 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     await expect.poll(() => row.locator(".what span").innerText(), { timeout: 8000 }).toBe("Discord channel. Alerts are sent here.");
     expect(await page.content()).not.toContain("abcdefghijklmnopqrstuvwxyzABCDEF");
     expect(accounts.channelsFor(W1).map((c) => c.kind)).toEqual(["ntfy", "discord"]);
+
+    // Telegram is not offered while the service has no bot to send through
+    expect(await page.locator("#addTelegram").isVisible()).toBe(false);
+    // it gets one: the page offers it, and says a chat is one of the kinds this plan takes
+    const codes = new LinkCodes();
+    apiDeps.telegram = { username: "WardenSentinelTestBot", codes };
+    await page.reload();
+    await expect.poll(() => page.locator("#channelLimit").innerText(), { timeout: 10_000 }).toBe("Up to 5 channels on this plan: ntfy topics, Telegram chats, Discord webhooks and Slack webhooks.");
+    expect(await page.locator("#telegramHelp").innerText()).toContain("The bot only delivers alerts: it never sends a link, and never asks you to sign anything or to tell it anything.");
+    await page.getByRole("button", { name: "Connect Telegram" }).click();
+    const link = page.locator("#telegramLink a");
+    await expect.poll(() => link.getAttribute("href"), { timeout: 8000 }).toMatch(/^https:\/\/t\.me\/WardenSentinelTestBot\?start=[A-Za-z0-9_-]{24}$/);
+    expect(await link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(await page.locator("#telegramLink").innerText()).toContain("The link works once, for 15 minutes.");
+    // nothing is a channel yet. Then the chat presses Start, which sends the bot the code from the link
+    expect(accounts.channelsFor(W1).map((c) => c.kind)).toEqual(["ntfy", "discord"]);
+    const code = new URL((await link.getAttribute("href"))!).searchParams.get("start")!;
+    expect(await answer({ chat: "5550001234", text: `/start ${code}` }, { codes, ...telegramLinking(accounts, async () => undefined) }, Math.floor(Date.now() / 1000))).toBe(linkedTo(accounts.walletsOf(accounts.profileOf(W1)!), false));
+    // the page finds it by asking, and says so
+    const chat = page.locator("#channels li").filter({ hasText: "Telegram chat …1234" });
+    await expect.poll(() => chat.locator(".what span").innerText().catch(() => ""), { timeout: 12_000 }).toBe("Telegram chat. Alerts are sent here.");
+    await expect.poll(() => page.locator("#notice").innerText(), { timeout: 8000 }).toBe("Connected. Alerts will be sent to that chat.");
+    expect(await page.locator("#telegramLink").isVisible()).toBe(false);
+    expect(await page.content()).not.toContain("5550001234"); // the chat's number is not on the page
+    // taken out again, and the bot with it, so the rest of this goes as it did
+    for (const c of accounts.telegramChannels("5550001234")) accounts.removeChannel(c.profile, c.id);
+    delete apiDeps.telegram;
+    await page.reload();
+    await expect.poll(() => page.locator("#channelLimit").innerText(), { timeout: 10_000 }).toBe("Up to 5 channels on this plan: ntfy topics, Discord webhooks and Slack webhooks.");
 
     // the card and cancelling are on Stripe's own page
     await page.getByRole("button", { name: "Change card or cancel" }).click();

@@ -15,6 +15,7 @@ and answer them. It holds no signing key and moves nothing. There is no rescuer 
 | `src/signin.ts` | Sign In With Solana, the service's side: the text a wallet signs, the one-time number in it, and the checks that make a signature count. |
 | `src/accounts.ts` | Profiles, their wallets, their alert channels, sessions, and the token an owner's browser reports with. |
 | `src/notify.ts` | Sends an alert to the owner's channels. |
+| `src/telegram.ts` | Telegram as a channel: the bot's three calls, the one-time codes that tie a chat to a profile, and what the bot answers. |
 | `src/server.ts` | The HTTP API. |
 | `src/main.ts`, `src/cli.ts` | The process: the watcher on a timer and the API beside it. |
 | `src/billing.ts` | The paid plan: a monthly Stripe subscription at one of two prices, the webhook that moves a profile between tiers, and the daily look at who holds the token. |
@@ -288,6 +289,47 @@ can sign with one of them.
   profile, its channels and its sessions. The daily snapshots (below) still hold them for up to seven days,
   and then they are gone from those too.
 - Watch, the free tier, watches three wallets per profile.
+
+## Telegram
+
+An owner's other channels are addresses they paste in. A Telegram chat has no address: a bot can only write
+to a chat that wrote to it first. So it goes the other way round.
+
+- The page asks for a link (`POST /v1/channels/telegram`). The service makes a one-time code for the profile
+  (random, kept as a hash, good for fifteen minutes, three at most for a profile) and answers with
+  `https://t.me/<the bot>?start=<code>`.
+- The owner opens it and presses Start. Telegram sends the bot `/start <code>` from their chat. The chat
+  that sent it becomes a channel of that profile, the profile's channels are told as for any channel added,
+  and the bot says so in the chat, naming the wallets that profile watches: someone who was sent a link by a
+  stranger and pressed Start sees that the wallets are not theirs, and is told that `/stop` ends it.
+- There is no other way in. A chat typed into the address field is refused, so nobody can point the bot at
+  a chat that is not theirs.
+- `/stop` in the chat ends it, after the profile's channels are told. The page removes it like any channel.
+  In a group `/stop` ends nothing: any member could type it, and it would end every owner's alerts to that
+  group. A group is taken out on the page, by whoever connected it.
+- The chat's number is sealed in the data file like any channel's address. Telegram sends the bot the
+  sender's name with each message; the service reads the chat's number and the text and keeps nothing else.
+
+The bot reads its messages by asking for them (a long poll), so nothing has to be opened to the internet
+for Telegram to reach. When Telegram stops answering that asking (the token was taken back, something else
+is reading the bot's messages), the bot is deaf and a chat that pressed Start would wait for ever: after
+five minutes the page stops offering Telegram and whoever runs the service is told, and both are as they
+were when it answers again. Telegram numbers messages in order except after a week with none, so the bot
+follows the numbering down as well as up, and after three quiet days asks without a number. A group that
+Telegram makes into a supergroup gets a new number; the channel follows it the first time the old one is
+written to, and the alert is sent again there. It answers a code, `/stop`, and anything else with one line saying what it is for; a
+chat gets five answers a minute. Like every message Sentinel sends, what it sends has no link in it, and is
+written so that Telegram makes nothing in it tappable (an address, a mention, a command, a cashtag quoted
+from the chain).
+
+It is on both plans (a chat counts as one of the plan's channels) and is offered only where the service
+has a bot: without `SENTINEL_TELEGRAM_BOT_TOKEN` the page shows no Telegram button and `/v1/me` does not
+list the kind. `sentinel/telegram-setup.sh [ssh-host]` gives the deployed service its bot: it asks for the
+token BotFather gave (not shown, never an argument of any command), asks Telegram whose it is, writes it
+into the root-only settings file on the server and restarts the service. When Telegram does not accept the
+token at start, or cannot be reached, Telegram is not offered on the page, whoever runs the service is told,
+and it is asked again every five minutes; chats already connected are still written to. What was sent to
+the bot while the service was not running is left unread: a code from before a restart is nobody's by then.
 
 ## What an owner is told about the profile itself
 

@@ -68,7 +68,8 @@ What it keeps, on that server:
 - The alerts it raised about a wallet, and what you answered to each.
 - If you turned on "Tell Sentinel which signatures were mine": the signatures your browser reported, for 30
   days.
-- Where your alerts go: the address of each channel you gave (an ntfy topic, or a Discord or Slack webhook),
+- Where your alerts go: the address of each channel you gave (an ntfy topic, a Discord or Slack webhook, or
+  the number of a Telegram chat you connected),
   encrypted under a key that is not in that file, and when it last took a message or since when it has
   refused them.
 - Your sign-ins: each session as a hash, for seven days, with which of your wallets signed it in; and, for a
@@ -84,10 +85,13 @@ Who else receives something:
 
 - The Solana RPC at `api.mainnet-beta.solana.com` is asked, by Lamport's server, about the addresses you
   added. It sees the server, not you.
-- The channel you chose (ntfy.sh, Discord or Slack) receives each alert: one sentence about what happened,
+- The channel you chose (ntfy.sh, Telegram, Discord or Slack) receives each alert: one sentence about what happened,
   which can name the addresses involved, and the first and last four characters of your wallet's address.
   The same channel is told when someone signs in to your profile or changes it, and what your plan does. On
   ntfy, anyone who knows a topic's name can read what is sent to it.
+- Telegram, if you connect a chat. Telegram learns that your account spoke to Sentinel's bot, and sends the
+  bot your Telegram name with the message. Sentinel keeps the chat's number, encrypted like any channel's
+  address, and nothing else about the account.
 - Stripe, if you pay. It takes the payment under its own privacy policy. Sentinel gives Stripe a random id
   that stands for your profile, and learns from Stripe whether the plan is paid.
 

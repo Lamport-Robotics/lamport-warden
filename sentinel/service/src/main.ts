@@ -38,6 +38,8 @@
  *   SENTINEL_STRIPE_PRICE_FULL, SENTINEL_STRIPE_PRICE_HOLDER   the two monthly price ids (scripts/stripe-sentinel-setup.mjs)
  *   SENTINEL_STRIPE_PORTAL_CONFIG   the customer portal the setup script made (optional)
  *   SENTINEL_CHECKOUT          "open" to sell; anything else keeps checkout closed and honours existing subscriptions
+ *   SENTINEL_TELEGRAM_BOT_TOKEN  the token BotFather gave for the bot alerts are sent through. With it, owners can
+ *                              connect a Telegram chat from the page; without it Telegram is not offered.
  *   SENTINEL_CHECKOUT_TESTERS  wallet addresses, comma-separated (twenty at most), that may buy while checkout is
  *                              closed: a profile one of them is in. For running a real payment before selling.
  *   SENTINEL_PRICE_CENTS, SENTINEL_HOLDER_PRICE_CENTS          what the page shows (default 1500 and 1000)
@@ -54,13 +56,15 @@ import { ChannelNotifier } from "./notify.js";
 import { Ops } from "./ops.js";
 import { PLANS, type ChannelKind, type Tier } from "./plans.js";
 import { Push, pushUrlFor } from "./push.js";
+import { LinkCodes, TOKEN_SHAPE, TelegramBot, listen as hearTelegram, type TelegramDeps } from "./telegram.js";
+import { channelAddedNotice, channelRemovedNotice } from "./notices.js";
 import { HttpRpc, PUBLIC_RPC_PACE, type Pace } from "./rpc.js";
 import { listen } from "./server.js";
 import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore, type StoredEvent } from "./store.js";
 import { ACCOUNTS_PER_CALL, Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: ChannelKind; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -126,6 +130,9 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const readers = Number(env.SENTINEL_READERS ?? 3);
   if (!Number.isInteger(readers) || readers < 1 || readers > 32) return { ok: false, why: "SENTINEL_READERS has to be a whole number from 1 to 32." };
   const opsChannel = env.SENTINEL_OPS_CHANNEL ? cleanTarget(env.SENTINEL_OPS_CHANNEL, ntfyHosts) : null;
+  const telegramToken = (env.SENTINEL_TELEGRAM_BOT_TOKEN ?? "").trim() || null;
+  // said without repeating it: a token that is wrong is still a secret
+  if (telegramToken && !TOKEN_SHAPE.test(telegramToken)) return { ok: false, why: "SENTINEL_TELEGRAM_BOT_TOKEN is not a bot token as BotFather gives them (a number, a colon, and a long secret)." };
   if (env.SENTINEL_OPS_CHANNEL && !opsChannel) return { ok: false, why: "SENTINEL_OPS_CHANNEL has to be an ntfy topic on an allowed host, or a Discord or Slack webhook." };
   const billing = billingFrom(env, origin, rpcUrl);
   if (!billing.ok) return billing;
@@ -139,7 +146,7 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const reads: ReadBudget | null = perMinute > 0
     ? { perMinute, cost: { watch: 60 / pollSeconds, pro: 60 / proPollSeconds }, reservedForPro: billing.billing ? Math.floor(perMinute * (reservedForPro / maxWallets)) : 0 }
     : null;
-  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
+  return { ok: true, config: { telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -328,6 +335,32 @@ export const nearlyOutOfReads = (promised: number, open: number, inAll: number =
     ? `The wallets Sentinel watches are promised ${Math.round(promised)} of the ${open} reads a minute it gives to anyone${inAll > open ? ` (${inAll - open} more are kept for the paid plan)` : ""}. New owners are turned away when they are all promised; a faster RPC is what makes room.`
     : null;
 
+/**
+ * What a code sent to the bot, and "/stop" sent to it, do to the profiles: a chat becomes a channel, or stops
+ * being one, and the profile's channels are told, as they are when the page does it.
+ */
+export function telegramLinking(accounts: Accounts, notice: (profile: string, sentence: string) => Promise<void>, now: () => number = () => Math.floor(Date.now() / 1000)): Pick<TelegramDeps, "link" | "unlink"> {
+  const sentence = (why: string) => why.charAt(0).toUpperCase() + why.slice(1);
+  return {
+    async link(profile, chat) {
+      const r = accounts.addTelegram(profile, chat, now());
+      if (!r.ok) return { ok: false, why: sentence(r.why) };
+      // every channel of the profile hears it, the new one among them
+      if (!r.already) await notice(profile, channelAddedNotice(r.channel.hint, null));
+      return { ok: true, wallets: accounts.walletsOf(profile) };
+    },
+    async unlink(chat) {
+      const channels = accounts.telegramChannels(chat);
+      for (const c of channels) {
+        // said first, to the channels the profile still has and to the chat that is going
+        if (c.active) await notice(c.profile, channelRemovedNotice(c.hint, null));
+        accounts.removeChannel(c.profile, c.id);
+      }
+      return channels.length > 0;
+    },
+  };
+}
+
 /** The wallets whose plan has them read as soon as the network reports a transaction in them: the push line listens for these and no others. */
 export const pushedWallets = (wallets: string[], tierOf: (wallet: string) => Tier): string[] => wallets.filter((w) => PLANS[tierOf(w)].push);
 
@@ -368,7 +401,8 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const cfg = read.config;
   const store = new FileStore(join(cfg.dataDir, "sentinel.json"));
   const accounts = new Accounts(store, cfg.dataKey, { ntfyHosts: cfg.ntfyHosts, maxWallets: cfg.maxWallets, reservedForPro: cfg.reservedForPro, ...(cfg.reads ? { reads: cfg.reads } : {}) });
-  const notifier = new ChannelNotifier(accounts);
+  const bot = cfg.telegramToken ? new TelegramBot(cfg.telegramToken) : null;
+  const notifier = new ChannelNotifier(accounts, undefined, bot ? { telegram: bot } : {});
   const ops = new Ops(cfg.opsChannel, store.said, { saved: () => store.flush() });
   // one client for one RPC, so that everything asked of it is counted against the same pace
   const rpc = new HttpRpc(cfg.rpcUrl, undefined, { pace: cfg.rpcPace });
@@ -421,16 +455,55 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
     if (moved || failed) console.error(`sentinel: holder prices checked, ${moved} moved, ${failed} could not be checked`);
   }, 86_400) : () => undefined;
 
+  // Telegram: the bot is asked its name (the link on the page is made of it), and then listens for chats
+  // that send it a code. A token Telegram does not know leaves Telegram switched off, and says so.
+  // It is offered once that has worked, and tried again every five minutes until it has.
+  const offered: { telegram?: { username: string; codes: LinkCodes } } = {};
+  let stopTelegram = () => undefined as void, telegramStopped = false;
+  const startTelegram = async (): Promise<void> => {
+    if (!bot || telegramStopped) return;
+    const username = await bot.username();
+    if (telegramStopped) return;
+    if (!username || !(await bot.skipWaiting())) {
+      void ops.say("Telegram did not accept the bot's token, or could not be reached. Telegram alerts are not offered on the page until it answers (it is asked again every five minutes); chats already connected are still written to.", "telegram-off", 6 * 3600);
+      const again = setTimeout(() => void startTelegram(), 300_000);
+      again.unref?.();
+      stopTelegram = () => { telegramStopped = true; clearTimeout(again); };
+      return;
+    }
+    const codes = new LinkCodes();
+    const on = { username, codes };
+    // A bot that is asked for its messages and not answered (the token was taken back, something else is
+    // reading them) is deaf: a chat that pressed Start would wait for ever. After five minutes of that the
+    // page stops handing out links and whoever runs the service is told; when Telegram answers again, both
+    // are as they were. Alerts to chats already connected do not depend on it.
+    let deafSince: number | null = null;
+    const heard = (ok: boolean, why?: string) => {
+      const t = Math.floor(Date.now() / 1000);
+      if (ok) { deafSince = null; offered.telegram = on; return; }
+      deafSince ??= t;
+      if (t - deafSince < 300) return;
+      delete offered.telegram;
+      void ops.say(`Telegram is not answering the bot's asking for its messages (${(why ?? "no reason given").slice(0, 80)}). Chats cannot be connected until it does, and the page has stopped offering it; alerts to chats already connected are still sent.`, "telegram-deaf", 6 * 3600);
+    };
+    const hearing = hearTelegram({ bot, codes, heard, ...telegramLinking(accounts, (profile, sentence) => notifier.notice(profile, sentence)) });
+    stopTelegram = () => { telegramStopped = true; hearing.stop(); };
+    offered.telegram = on;
+  };
+  await startTelegram();
+
   const server = await listen({
     accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => ({ ...state, push: push ? (push.state.connected ? "on" as const : "down" as const) : "off" as const }),
     testChannel: (profile, id) => notifier.test(profile, id),
     notice: (profile, sentence, opts) => notifier.notice(profile, sentence, opts),
     webhookFailed: (why) => { void ops.say(`A webhook from Stripe could not be applied (${why.slice(0, 120)}). Stripe sends it again; if this repeats, a plan may not be starting or ending when it should.`, "webhook-failed", 3600); },
     ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}),
+    // read when a request comes in, so that a bot that answers later is offered from then on
+    get telegram() { return offered.telegram; },
   }, { port: cfg.port, trustProxy: cfg.trustProxy });
   const started = `watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : `set up, checkout closed${cfg.billing.checkoutTesters?.length ? ` to all but ${cfg.billing.checkoutTesters.length} tester wallet(s)` : ""}`) : "not set up"}`;
   // said at most every ten minutes, so a service that keeps falling over does not fill the channel
   void ops.say(`Sentinel started: ${started}.`, "started", 600);
   // on the way out, what was waiting to be written (when each wallet was last looked at) is written
-  return async () => { stopRounds(); push?.stop(); stopHourly(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); store.flush(); };
+  return async () => { stopRounds(); push?.stop(); stopTelegram(); stopHourly(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); store.flush(); };
 }
