@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WardenRejected, installLegacyHook, installStandardHook, serializeForGuard, wrapLegacyProvider, wrapStandardWallet, type Guard, type GuardRequest } from "../src/intercept.js";
+import { WardenRejected, fromBase58, installLegacyHook, installStandardHook, messageToTransaction, patchProviderInPlace, patchStandardWalletInPlace, requestsOf, serializeForGuard, wrapLegacyProvider, wrapStandardWallet, type Guard, type GuardRequest } from "../src/intercept.js";
 
 /** A guard that records what it was asked and what it was told afterwards. */
 function recorder(decide: (r: GuardRequest) => boolean = () => true) {
@@ -92,43 +92,117 @@ function fakeWindow() {
   return w as unknown as Window & { CustomEvent: typeof CustomEvent };
 }
 
+/** Wallets as the three real ones are built (see test/browser for the real ones themselves). */
+const sign = (calls: string[]) => ({ "solana:signTransaction": { version: "1.0.0", signTransaction: async (...i: any[]) => { calls.push("signTransaction"); return i.map((x) => ({ signedTransaction: x.transaction })); } }, "solana:signMessage": { version: "1.0.0", signMessage: async (...i: any[]) => { calls.push("signMessage"); return i; } }, "standard:connect": { version: "1.0.0", connect: async () => ({ accounts: [account] }) } });
+/** Phantom: a frozen instance, `features` a getter on the class that builds a new object each time. */
+const phantomLike = () => { class PhantomLike { #calls: string[] = []; readonly name = "Phantom"; constructor() { Object.freeze(this); } get calls() { return this.#calls; } get features() { return sign(this.#calls); } } return new PhantomLike(); }; // a class per page: the getter on it is what gets replaced
+/** Solflare: an open instance with the same kind of getter. */
+class SolflareLike { #calls: string[] = []; readonly name = "Solflare"; get calls() { return this.#calls; } get features() { return sign(this.#calls); } }
+/** Backpack: `features` is an own, writable property. */
+const backpackLike = () => { const calls: string[] = []; return { name: "Backpack", calls, features: sign(calls) }; };
+
+/** An app as @wallet-standard/app writes it: listen for wallets, then announce yourself. */
+function app(win: Window) {
+  const registered: any[] = [];
+  const api = Object.freeze({ register: (...ws: any[]) => { for (const w of ws) if (!registered.includes(w)) registered.push(w); return () => {}; } });
+  win.addEventListener("wallet-standard:register-wallet", (e) => (e as CustomEvent).detail(api));
+  win.dispatchEvent(new UnstoppableEvent("wallet-standard:app-ready", api));
+  return registered;
+}
+/** A wallet as @wallet-standard/wallet writes it: announce yourself, then listen for apps. */
+function announce(win: Window, wallet: object) {
+  const callback = ({ register }: any) => register(wallet);
+  win.dispatchEvent(new UnstoppableEvent("wallet-standard:register-wallet", callback));
+  win.addEventListener("wallet-standard:app-ready", (e) => callback((e as CustomEvent).detail));
+}
+
+/**
+ * The events as @wallet-standard/wallet and @wallet-standard/app publish them: they refuse to be stopped.
+ * (The published classes also override stopPropagation; Node's own stopImmediatePropagation calls that one,
+ * which a browser's does not, so it is left out here. test/browser runs the real classes in Chromium.)
+ */
+class UnstoppableEvent extends Event {
+  #detail: unknown;
+  get detail() { return this.#detail; }
+  constructor(type: string, detail: unknown) { super(type, { bubbles: false, cancelable: false, composed: false }); this.#detail = detail; }
+  override preventDefault(): never { throw new Error("preventDefault cannot be called"); }
+  override stopImmediatePropagation(): never { throw new Error("stopImmediatePropagation cannot be called"); }
+}
+
 describe("the Wallet Standard hook", () => {
-  it("wraps a wallet that announces itself to an app that is already listening", async () => {
-    const win = fakeWindow(), r = recorder(), w = new FakeWallet();
-    installStandardHook(win, r.guard); // first, as at document_start
-    const registered: any[] = [];
-    const api = { register: (...ws: any[]) => { registered.push(...ws); return () => {}; } };
-    win.addEventListener("wallet-standard:register-wallet", (e) => (e as CustomEvent).detail(api)); // the app
-    win.dispatchEvent(new CustomEvent("wallet-standard:register-wallet", { detail: (a: any) => a.register(w) })); // the wallet
-    expect(registered).toHaveLength(1);
-    expect(registered[0]).not.toBe(w);
-    await registered[0].features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(9) });
+  const makers: [string, () => any][] = [["Phantom", phantomLike], ["Solflare", () => new SolflareLike()], ["Backpack", backpackLike]];
+  // every order the three scripts can load in: the wallet's, Warden's, the page's app
+  const orders: [string, (win: Window, w: object, guard: Guard) => any[]][] = [
+    ["Warden, wallet, app", (win, w, g) => { installStandardHook(win as any, g); announce(win, w); return app(win); }],
+    ["wallet, Warden, app", (win, w, g) => { announce(win, w); installStandardHook(win as any, g); return app(win); }],
+    ["Warden, app, wallet", (win, w, g) => { installStandardHook(win as any, g); const r = app(win); announce(win, w); return r; }],
+  ];
+  for (const [walletName, make] of makers) {
+    for (const [orderName, run] of orders) {
+      it(`guards ${walletName} in place (${orderName})`, async () => {
+        const win = fakeWindow(), r = recorder(), w = make();
+        const registered = run(win, w, r.guard);
+        expect(registered).toEqual([w]);   // once, and the wallet's own object: nothing was swapped or doubled
+        expect(registered[0]).toBe(w);
+        await registered[0].features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(9) });
+        await w.features["solana:signMessage"].signMessage({ account, message: Uint8Array.of(8) }); // by a reference the page kept from before
+        expect(r.asked.map((a) => [a.kind, a.bytes[0]])).toEqual([["tx", 9], ["msg", 8]]);
+        expect(w.calls).toEqual(["signTransaction", "signMessage"]);
+        expect(r.done).toEqual([true, true]);
+        expect((await w.features["standard:connect"].connect()).accounts).toEqual([account]);
+      });
+    }
+  }
+
+  it("asks once per request however many times the wallet is met", async () => {
+    const win = fakeWindow(), r = recorder(), w = new SolflareLike();
+    const hook = installStandardHook(win as any, r.guard);
+    announce(win, w);
+    app(win); app(win); // two libraries on one page
+    announce(win, w);
+    await w.features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(1) });
     expect(r.asked).toHaveLength(1);
-    expect(w.calls).toEqual(["signTransaction"]);
+    expect(hook.seen()).toEqual({ wallets: 1, standIns: 0 });
   });
 
-  it("wraps a wallet that answers an app's ready call", async () => {
-    const win = fakeWindow(), r = recorder(), w = new FakeWallet();
-    installStandardHook(win, r.guard);
-    win.addEventListener("wallet-standard:app-ready", (e) => (e as CustomEvent).detail.register(w)); // the wallet
-    const registered: any[] = [];
-    win.dispatchEvent(new CustomEvent("wallet-standard:app-ready", { detail: { register: (...ws: any[]) => { registered.push(...ws); return () => {}; } } })); // the app
+  it("gives the app a stand-in for a wallet frozen through and through, when that wallet loads after Warden", async () => {
+    const win = fakeWindow(), r = recorder();
+    const calls: string[] = [];
+    const w = Object.freeze({ name: "Frozen", features: Object.freeze({ "solana:signTransaction": Object.freeze({ version: "1.0.0", signTransaction: async (...i: any[]) => { calls.push("sign"); return i; } }) }) });
+    const hook = installStandardHook(win as any, r.guard);
+    const registered = app(win);
+    announce(win, w);
     expect(registered).toHaveLength(1);
     expect(registered[0]).not.toBe(w);
-    await registered[0].features["solana:signMessage"].signMessage({ account, message: Uint8Array.of(1) });
-    expect(r.asked[0]!.kind).toBe("msg");
+    expect(registered[0].name).toBe("Frozen");
+    await registered[0].features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(1) });
+    expect(r.asked).toHaveLength(1);
+    expect(calls).toEqual(["sign"]);
+    expect(hook.seen()).toEqual({ wallets: 1, standIns: 1 });
   });
 
-  it("hands each listener the wrapped form once, never the wallet itself", () => {
-    const win = fakeWindow(), r = recorder(), w = new FakeWallet();
-    installStandardHook(win, r.guard);
-    let seen = 0;
-    const got: any[] = [];
-    win.addEventListener("wallet-standard:register-wallet", (e) => { seen++; (e as CustomEvent).detail({ register: (x: any) => { got.push(x); return () => {}; } }); });
-    win.dispatchEvent(new CustomEvent("wallet-standard:register-wallet", { detail: (a: any) => a.register(w) }));
-    expect(seen).toBe(1);
-    expect(got).toHaveLength(1);
-    expect(got[0]).not.toBe(w);
+  it("guards a frozen wallet in place when the methods inside its features are still open", async () => {
+    const r = recorder(), calls: string[] = [];
+    const w = Object.freeze({ name: "HalfFrozen", features: Object.freeze({ "solana:signMessage": { version: "1.0.0", signMessage: async (...i: any[]) => { calls.push("msg"); return i; } } }) });
+    expect(patchStandardWalletInPlace(w, r.guard)).toBe(true);
+    await w.features["solana:signMessage"].signMessage({ account, message: Uint8Array.of(1) });
+    expect(r.asked).toHaveLength(1);
+    expect(patchStandardWalletInPlace(w, r.guard)).toBe(true);
+    await w.features["solana:signMessage"].signMessage({ account, message: Uint8Array.of(1) });
+    expect(r.asked).toHaveLength(2); // still once per request
+  });
+
+  it("stand-in: a frozen wallet whose features are its own frozen property reads through unchanged", async () => {
+    const r = recorder();
+    const calls: string[] = [];
+    const w = Object.freeze({ name: "Frozen", accounts: Object.freeze([account]), features: Object.freeze({ "solana:signTransaction": Object.freeze({ version: "1.0.0", signTransaction: async (...i: any[]) => { calls.push("sign"); return i; } }), "solana:signOffchainMessage": Object.freeze({ version: "1.0.0", signOffchainMessage: async (...i: any[]) => { calls.push("offchain"); return i; } }) }) });
+    const wrapped = wrapStandardWallet(w as any, r.guard);
+    await wrapped.features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(1) });
+    await wrapped.features["solana:signOffchainMessage"].signOffchainMessage({ account, message: Uint8Array.of(2) });
+    expect(r.asked.map((a) => a.kind)).toEqual(["tx", "msg"]);
+    expect(calls).toEqual(["sign", "offchain"]);
+    expect(wrapped.name).toBe("Frozen");
+    expect(Object.keys(wrapped)).toEqual(["name", "accounts", "features"]);
   });
 });
 
@@ -171,18 +245,132 @@ describe("older injected providers", () => {
     expect(serializeForGuard(null)).toEqual(new Uint8Array(0));
   });
 
-  it("wraps a provider however the wallet puts it on the page", async () => {
+  /** Phantom: one object, own arrow-function methods, put on the window with defineProperty. */
+  const injectPhantom = (win: Record<string, any>) => {
+    const p = provider();
+    Object.defineProperty(win, "solana", { value: p, writable: false });
+    if (!("phantom" in win)) Object.defineProperty(win, "phantom", { value: {}, writable: false });
+    Object.defineProperty(win.phantom, "solana", { value: p, writable: false });
+    return p;
+  };
+  /** Solflare: a class instance whose methods are bound own properties, frozen behind a proxy. */
+  const injectSolflare = (win: Record<string, any>, descriptor: PropertyDescriptor = { enumerable: true }) => {
+    const p = provider();
+    const frozen = Object.freeze(new Proxy(p, { deleteProperty: () => true, get: (t: any, k) => t[k] }));
+    Object.defineProperty(win, "solflare", { ...descriptor, value: frozen });
+    return p;
+  };
+  /** Backpack: a frozen container whose signing calls forward to the provider under .solana. */
+  const injectBackpack = (win: Record<string, any>) => {
+    const inner = provider();
+    const box: any = { solana: inner, ethereum: { untouched: true } };
+    const z = new Proxy(Object.freeze(box), { get: (t: any, k) => { if (Reflect.has(t, k)) return Reflect.get(t, k); const v = t.solana[k]; return typeof v === "function" ? v.bind(t.solana) : v; } });
+    Object.defineProperty(win, "backpack", { value: z });
+    return inner;
+  };
+
+  it("defines nothing on the window before a wallet does", () => {
+    const win: Record<string, any> = {};
+    installLegacyHook(win, recorder().guard).sweep();
+    expect(Object.keys(win)).toEqual([]);
+    expect("solana" in win).toBe(false);
+    expect("phantom" in win).toBe(false);
+  });
+
+  it("guards Phantom's provider where it stands, whichever of the two loaded first", async () => {
+    for (const walletFirst of [true, false]) {
+      const r = recorder(), win: Record<string, any> = {};
+      let p: ReturnType<typeof provider>;
+      if (walletFirst) { p = injectPhantom(win); installLegacyHook(win, r.guard); }
+      else { const hook = installLegacyHook(win, r.guard); p = injectPhantom(win); hook.sweep(); }
+      expect(win.solana).toBe(p);                 // the wallet's own object, not a copy
+      expect(win.solana).toBe(win.phantom.solana);
+      await win.solana.signMessage(Uint8Array.of(1));
+      await win.phantom.solana.signTransaction(legacyTx(2));
+      const detached = win.solana.signAndSendTransaction; // a page that copied the method out
+      await detached(versionedTx(3));
+      expect(r.asked.map((a) => [a.kind, a.bytes[0], a.owner])).toEqual([["msg", 1, account.address], ["tx", 2, account.address], ["tx", 3, account.address]]);
+      expect(p.calls).toEqual(["signMessage", "signTransaction", "signAndSendTransaction"]);
+    }
+  });
+
+  it("guards a frozen provider with a stand-in when the wallet left the global open, and says so when it did not", async () => {
+    const r = recorder(), win: Record<string, any> = {};
+    const hook = installLegacyHook(win, r.guard);
+    const p = injectSolflare(win, { enumerable: true, configurable: true });
+    hook.sweep();
+    await win.solflare.signTransaction(legacyTx(7));
+    expect(r.asked.map((a) => a.bytes[0])).toEqual([7]);
+    expect(p.calls).toEqual(["signTransaction"]);
+    expect(win.solflare.isPhantom).toBe(true); // everything else reads through
+    expect(hook.unguarded()).toEqual([]);
+
+    const r2 = recorder(), win2: Record<string, any> = {};
+    const hook2 = installLegacyHook(win2, r2.guard);
+    injectSolflare(win2); // as Solflare ships: not configurable, not writable, frozen
+    hook2.sweep();
+    await win2.solflare.signTransaction(legacyTx(8));
+    expect(r2.asked).toEqual([]);
+    expect(hook2.unguarded()).toEqual(["solflare"]); // known, and reported, not silently missed
+  });
+
+  it("guards Backpack through the provider its frozen container forwards to", async () => {
+    const r = recorder(), win: Record<string, any> = {};
+    const hook = installLegacyHook(win, r.guard);
+    const inner = injectBackpack(win);
+    hook.sweep();
+    await win.backpack.signMessage(Uint8Array.of(4));
+    await win.backpack.solana.signTransaction(legacyTx(5));
+    expect(r.asked.map((a) => a.bytes[0])).toEqual([4, 5]);
+    expect(inner.calls).toEqual(["signMessage", "signTransaction"]);
+    expect(win.backpack.ethereum).toEqual({ untouched: true });
+    expect(hook.unguarded()).toEqual([]);
+  });
+
+  it("guards a method that lives on the wallet's class, without touching the class", async () => {
     const r = recorder();
-    const win: Record<string, any> = { backpack: provider() }; // already there when we load
+    class P { calls: string[] = []; publicKey = { toBase58: () => account.address }; async signTransaction(tx: any) { this.calls.push("signTransaction"); return tx; } }
+    const a = new P(), b = new P();
+    expect(patchProviderInPlace(a, r.guard)).toEqual({ patched: ["signTransaction"], stuck: [] });
+    await a.signTransaction(legacyTx(1));
+    await b.signTransaction(legacyTx(2));
+    expect(r.asked.map((x) => x.bytes[0])).toEqual([1]);
+    expect(a.calls).toEqual(["signTransaction"]);
+    expect(patchProviderInPlace(a, r.guard).patched).toEqual(["signTransaction"]); // twice is once
+    await a.signTransaction(legacyTx(3));
+    expect(r.asked).toHaveLength(2);
+  });
+
+  it("guards the generic request door, and lets everything that is not signing straight through", async () => {
+    const r = recorder(), win: Record<string, any> = {};
+    const seen: any[] = [];
+    const p = { publicKey: { toBase58: () => account.address }, request: async (a: any) => { seen.push(a.method); return "ok"; } };
+    Object.defineProperty(win, "solana", { value: p, writable: false });
     installLegacyHook(win, r.guard);
-    win.solana = provider();                                    // assigned later
-    win.phantom = { solana: provider(), ethereum: { untouched: true } };
-    await win.solana.signMessage(Uint8Array.of(1));
-    await win.phantom.solana.signMessage(Uint8Array.of(2));
-    await win.backpack.signMessage(Uint8Array.of(3));
-    expect(r.asked.map((a) => a.bytes[0])).toEqual([1, 2, 3]);
-    expect(win.phantom.ethereum).toEqual({ untouched: true });
-    win.solana = undefined;
-    expect(win.solana).toBeUndefined();
+    // a legacy message: one signer, then enough bytes to be a message
+    const message = Uint8Array.of(1, 0, 1, 2, ...new Array(40).fill(7));
+    const b58 = (b: Uint8Array) => { let n = 0n; for (const x of b) n = n * 256n + BigInt(x); let o = ""; const A = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"; while (n > 0n) { o = A[Number(n % 58n)] + o; n /= 58n; } for (const x of b) { if (x !== 0) break; o = "1" + o; } return o; };
+    await win.solana.request({ method: "connect" });
+    await win.solana.request({ method: "signAndSendTransaction", params: { message: b58(message) } });
+    await win.solana.request({ method: "signMessage", params: { message: Uint8Array.of(9, 9), display: "hex" } });
+    await win.solana.request({ method: "signTransaction", params: { somethingElse: true } });
+    expect(seen).toEqual(["connect", "signAndSendTransaction", "signMessage", "signTransaction"]);
+    expect(r.asked.map((a) => a.kind)).toEqual(["tx", "msg", "opaque"]);
+    expect(r.asked[0]!.bytes).toEqual(messageToTransaction(message));
+    expect(r.asked[0]!.bytes.length).toBe(1 + 64 + message.length);
+    expect(r.asked[0]!.owner).toBe(account.address);
+    expect(requestsOf({ method: "signIn", params: {} }, "")).toBeNull();
+    expect(requestsOf({ method: "disconnect" }, "")).toBeNull();
+  });
+
+  it("decodes base58 and builds the empty-signature form of each message version", () => {
+    expect(fromBase58("11")).toEqual(Uint8Array.of(0, 0));
+    expect(fromBase58("2NEpo7TZRRrLZSi2U")).toEqual(new TextEncoder().encode("Hello World!"));
+    expect(fromBase58("0OIl")).toBeNull();
+    const v0 = Uint8Array.of(0x80, 2, 0, 1, 5, 5, 5);
+    expect(messageToTransaction(v0).length).toBe(1 + 128 + v0.length);
+    expect(messageToTransaction(v0)[0]).toBe(2);
+    const v1 = Uint8Array.of(0x81, 1, 0, 0, 9, 9);
+    expect(messageToTransaction(v1)).toEqual(Uint8Array.of(0x81, 1, 0, 0, 9, 9, ...new Array(64).fill(0)));
   });
 });

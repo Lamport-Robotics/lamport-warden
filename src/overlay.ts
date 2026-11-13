@@ -2,7 +2,7 @@
  * The prompt. Drawn by the isolated-world script inside a closed shadow root, so the page's scripts cannot
  * read it, restyle it or reach its buttons, and a click only counts when the browser says a person made it.
  */
-import type { WardenVerdict } from "../pincer1/daemon/src/warden/index.js";
+import type { WireVerdict } from "./messages.js";
 
 const CSS = `
 :host { all: initial; }
@@ -24,7 +24,7 @@ button:disabled { opacity: 0.35; cursor: default; }
 const LABEL = { block: "Blocked", confirm: "Check this carefully", explain: "Before you sign", allow: "" } as const;
 
 /** Resolves true when the owner lets the request go on to the wallet. A blocked request only resolves false. */
-export function prompt(verdict: WardenVerdict, origin: string): Promise<boolean> {
+export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
   return new Promise((resolve) => {
     const host = document.createElement("div");
     const root = host.attachShadow({ mode: "closed" });

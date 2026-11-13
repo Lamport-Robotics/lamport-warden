@@ -1,7 +1,8 @@
 /**
- * The two halves together, as they load in a page: the page-world script wraps a wallet, the isolated-world
- * script judges and prompts, and they find each other through the handshake. Runs in Node with a window, a
- * storage area and just enough of a document for the prompt.
+ * The three parts together, as they load: the page-world script wraps a wallet, the isolated-world script
+ * prompts, the background worker judges and keeps the history, and the first two find each other through the
+ * handshake. Runs in Node with a window, a storage area, a message bus and just enough of a document for the
+ * prompt. test/browser runs the built extension in Chromium.
  */
 import "../src/polyfill.js";
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -40,10 +41,25 @@ function world() {
   vi.stubGlobal("window", win);
   vi.stubGlobal("location", { origin: "https://shop.example" });
   vi.stubGlobal("document", { createElement: () => el(), documentElement: root });
-  vi.stubGlobal("chrome", { storage: { local: {
-    get: async (k: string) => (k in storage ? { [k]: storage[k] } : {}),
-    set: async (o: Record<string, unknown>) => { Object.assign(storage, o); },
-  } } });
+  // chrome.runtime as far as the two halves use it: a message from the page's tab, answered now or later
+  const listeners: ((m: unknown, sender: unknown, respond: (r: unknown) => void) => unknown)[] = [];
+  const sender = { id: "warden", tab: { id: 1 }, origin: "https://shop.example" };
+  vi.stubGlobal("chrome", {
+    runtime: {
+      id: "warden",
+      onMessage: { addListener: (f: (typeof listeners)[number]) => { listeners.push(f); } },
+      sendMessage: (m: unknown) => new Promise((resolve) => {
+        let later = false;
+        for (const l of listeners) if (l(structuredClone(m), sender, resolve) === true) later = true;
+        if (!later) resolve(undefined);
+      }),
+      openOptionsPage: async () => {},
+    },
+    storage: { local: {
+      get: async (k: string | string[]) => Object.fromEntries((Array.isArray(k) ? k : [k]).filter((x) => x in storage).map((x) => [x, storage[x]])),
+      set: async (o: Record<string, unknown>) => { Object.assign(storage, o); },
+    } },
+  });
   return win;
 }
 
@@ -68,7 +84,7 @@ async function knownFriend() {
   storage[`memory:${OWNER}`] = m.toJSON();
 }
 
-describe.each([["content script first", ["content", "inpage"]], ["page script first", ["inpage", "content"]]])("the extension in a page (%s)", (_name, order) => {
+describe.each([["content script first", ["background", "content", "inpage"]], ["page script first", ["background", "inpage", "content"]]])("the extension in a page (%s)", (_name, order) => {
   let win: any;
   beforeEach(async () => {
     vi.resetModules();
@@ -79,7 +95,7 @@ describe.each([["content script first", ["content", "inpage"]], ["page script fi
   it("wraps the wallet, lets a familiar payment through silently, and remembers it once signed", async () => {
     await knownFriend();
     const { calls, wallet, raw } = connect(win);
-    expect(wallet).not.toBe(raw);
+    expect(wallet).toBe(raw); // the wallet's own object, guarded where it stands
     const out = await wallet.features["solana:signTransaction"].signTransaction({ account, transaction: pay(friend, 0.2) });
     expect(out).toHaveLength(1);
     expect(calls).toHaveLength(1);

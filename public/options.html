@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lamport Warden</title>
+<style>
+  :root { --paper: #f2eee3; --ink: #14130f; --soft: #5c5a50; --line: #cfc9b8; --field: #fffdf6; --warn: #a1260d; color-scheme: light dark; }
+  @media (prefers-color-scheme: dark) { :root { --paper: #171613; --ink: #f2eee3; --soft: #a8a495; --line: #3a382f; --field: #211f1b; --warn: #ff8a70; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 36px 0 6px; }
+  p { margin: 0 0 12px; }
+  .soft { color: var(--soft); font-size: 13px; }
+  label.choice { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; }
+  input[type=text], input[type=url] { width: 100%; font: inherit; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--field); color: inherit; }
+  .row { display: flex; gap: 8px; margin: 8px 0 4px; }
+  .row input { flex: 1; min-width: 0; }
+  button { font: inherit; font-weight: 600; border-radius: 999px; padding: 8px 16px; border: 1px solid var(--ink); background: transparent; color: var(--ink); cursor: pointer; white-space: nowrap; }
+  button.go { background: var(--ink); color: var(--paper); }
+  button.small { padding: 3px 10px; font-size: 12px; font-weight: 500; }
+  ul.plain { list-style: none; margin: 8px 0; padding: 0; }
+  ul.plain li { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .note { min-height: 20px; font-size: 13px; color: var(--soft); }
+  .note.bad { color: var(--warn); }
+  details { border-top: 1px solid var(--line); padding: 8px 0; }
+  summary { cursor: pointer; overflow-wrap: anywhere; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 8px 0; }
+  th, td { text-align: left; padding: 4px 12px 4px 0; white-space: nowrap; }
+  th { color: var(--soft); font-weight: 500; }
+  td.addr { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Lamport Warden</h1>
+  <p class="soft" id="version"></p>
+
+  <h2>Reading lookup tables</h2>
+  <p>Most swaps name their accounts by position in a table stored on chain. To say where the money goes, Warden has to read that table from a Solana RPC. This is the only network call it makes. The RPC learns which table was asked for and your IP address. It does not learn your wallet address, the transaction or the site.</p>
+  <label class="choice"><input type="radio" name="rpc" value="public"> <span>The public Solana RPC</span></label>
+  <label class="choice"><input type="radio" name="rpc" value="own"> <span>My own RPC</span></label>
+  <div class="row"><input type="url" id="rpcUrl" placeholder="https://…" spellcheck="false" autocomplete="off" aria-label="RPC address"></div>
+  <label class="choice"><input type="radio" name="rpc" value="off"> <span>Off. A transaction that uses a table is then shown as partly unread, every time.</span></label>
+  <div class="row"><button class="go" id="saveRpc">Save</button></div>
+  <p class="note" id="rpcNote" role="status"></p>
+
+  <h2>Sites allowed to ask for your Privacy Rings keys</h2>
+  <p>A Privacy Rings wallet derives its keys from one signature. Whoever gets that signature can read your private balance and history for good. Warden blocks the request from every site that is not on this list, and asks you to confirm it on the ones that are.</p>
+  <ul class="plain" id="sites"></ul>
+  <div class="row"><input type="text" id="site" placeholder="app.example.com" spellcheck="false" autocomplete="off" aria-label="Site to allow"><button id="addSite">Allow</button></div>
+  <p class="note" id="siteNote" role="status"></p>
+
+  <h2>What Warden remembers</h2>
+  <p>For each wallet address, the addresses it has paid and how often. It learns one only when a request you let through comes back signed. It is kept in this browser and sent nowhere.</p>
+  <div id="memory"></div>
+</main>
+<script src="options.js"></script>
+</body>
+</html>

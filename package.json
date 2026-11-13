@@ -1,6 +1,6 @@
 {
   "name": "lamport-warden",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Lamport Warden browser extension: reads every Solana signature request before your wallet does, says in one sentence what it will do, and stops it when that is not what you meant.",
   "type": "module",
@@ -12,7 +12,10 @@
   "packageManager": "pnpm@10.30.3",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:fixtures": "node scripts/build-fixtures.mjs",
     "test": "vitest run",
+    "test:browser": "node scripts/build.mjs && node scripts/build-fixtures.mjs && vitest run --config vitest.browser.config.ts",
+    "test:wallets": "node scripts/build.mjs && node scripts/build-fixtures.mjs && vitest run --config vitest.wallets.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -22,6 +25,9 @@
   "devDependencies": {
     "@types/chrome": "0.3.5",
     "@types/node": "24.10.1",
+    "@wallet-standard/app": "1.1.0",
+    "@wallet-standard/wallet": "1.1.0",
+    "playwright": "1.56.1",
     "typescript": "5.9.3",
     "vite": "7.3.7",
     "vitest": "5.0.3"

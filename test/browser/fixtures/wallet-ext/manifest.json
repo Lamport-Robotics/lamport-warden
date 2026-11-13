@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "Warden test wallets",
+  "version": "1.0.0",
+  "description": "Stand-in wallets for Lamport Warden's browser tests. They sign nothing: they record that they were asked.",
+  "content_scripts": [
+    { "matches": ["http://localhost/*", "http://127.0.0.1/*"], "js": ["wallets.js"], "run_at": "document_start", "world": "MAIN", "all_frames": true }
+  ]
+}

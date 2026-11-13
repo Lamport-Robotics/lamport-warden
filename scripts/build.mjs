@@ -1,5 +1,6 @@
-// Builds dist/ as a loadable unpacked MV3 extension: two single-file IIFE bundles (content scripts cannot
-// import), the manifest and the icons. Not minified: anyone can read what runs on every page.
+// Builds dist/ as a loadable unpacked MV3 extension: one single-file IIFE bundle per script (content scripts
+// cannot import), the manifest, the settings page and the icons. Not minified: anyone can read what runs on
+// every page.
 import { build } from 'vite';
 import { cp, mkdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -10,7 +11,7 @@ const dist = join(root, 'dist');
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });
 
-for (const name of ['inpage', 'content']) {
+for (const name of ['inpage', 'content', 'background', 'options']) {
   await build({
     root,
     configFile: false,
@@ -36,5 +37,6 @@ for (const name of ['inpage', 'content']) {
   console.log(`built ${name}.js`);
 }
 await cp(join(root, 'manifest.json'), join(dist, 'manifest.json'));
+await cp(join(root, 'public', 'options.html'), join(dist, 'options.html'));
 await cp(join(root, 'public', 'icons'), join(dist, 'icons'), { recursive: true });
 console.log('dist/ is ready: chrome://extensions -> Load unpacked');

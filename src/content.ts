@@ -1,12 +1,10 @@
 /**
- * Isolated world. Holds the engine, the owner's history (chrome.storage.local, on this machine only) and the
- * prompt. The page cannot run code here.
+ * Isolated world, on every page. Carries a signing request from the page-world script to the background
+ * worker and draws the prompt. No engine and no history here; the page cannot run code here.
  */
-import "./polyfill.js";
-import { HANDSHAKE, HELLO, channelFor, fromBase64, newSecret, type DoneMessage, type ReplyMessage, type RequestMessage } from "./channel.js";
-import { judge, recordSigned, type Judged, type Store } from "./judge.js";
+import { HANDSHAKE, HELLO, channelFor, newSecret, type DoneMessage, type ReplyMessage, type RequestMessage } from "./channel.js";
 import { prompt } from "./overlay.js";
-import type { MemoryState } from "../pincer1/daemon/src/warden/index.js";
+import type { JudgeReply, ToBackground, WireRequest, WireVerdict } from "./messages.js";
 
 const secret = newSecret();
 const channel = channelFor(secret);
@@ -17,14 +15,19 @@ window.addEventListener(channel.ack, () => window.removeEventListener(HELLO, han
 window.addEventListener(HELLO, hand);
 hand();
 
-const store: Store = {
-  async load(owner) { const k = `memory:${owner}`; return (await chrome.storage.local.get(k))[k]; },
-  async save(owner, state: MemoryState) { await chrome.storage.local.set({ [`memory:${owner}`]: state }); },
-  async ringSites() { const v = (await chrome.storage.local.get("ringSites")).ringSites; return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; },
-};
+const UNCHECKED: WireVerdict = { level: "confirm", sentence: "Something went wrong while I was reading this request, so I can't tell you what it does.", reasons: ["the check failed."], confirm: { kind: "acknowledge", expect: "I understand" } };
+
+async function ask(req: WireRequest): Promise<WireVerdict> {
+  try {
+    const r = (await chrome.runtime.sendMessage({ type: "judge", req } satisfies ToBackground)) as JudgeReply | undefined;
+    return r && r.ok ? r.verdict : UNCHECKED;
+  } catch {
+    return UNCHECKED; // the extension was reloaded or turned off under this page
+  }
+}
 
 /** Requests the owner let through, waiting to hear whether the wallet signed. */
-const approved = new Map<string, Judged>();
+const approved = new Map<string, WireRequest>();
 let queue: Promise<void> = Promise.resolve();
 
 const reply = (m: ReplyMessage) => window.dispatchEvent(new CustomEvent(channel.reply, { detail: JSON.stringify(m) }));
@@ -32,17 +35,17 @@ const reply = (m: ReplyMessage) => window.dispatchEvent(new CustomEvent(channel.
 window.addEventListener(channel.request, (e) => {
   let m: RequestMessage;
   try { m = JSON.parse(String((e as CustomEvent).detail)); } catch { return; }
-  if (!m || typeof m.id !== "string" || (m.kind !== "tx" && m.kind !== "msg") || typeof m.bytes !== "string") return;
+  if (!m || typeof m.id !== "string" || (m.kind !== "tx" && m.kind !== "msg" && m.kind !== "opaque") || typeof m.bytes !== "string") return;
+  const req: WireRequest = { kind: m.kind, bytes: m.bytes, owner: String(m.owner ?? "") };
   // one prompt at a time, in the order the wallet was asked
   queue = queue.then(async () => {
     let ok = false;
     try {
-      const judged = await judge({ kind: m.kind, bytes: fromBase64(m.bytes), owner: String(m.owner ?? "") }, location.origin, store);
-      ok = judged.verdict.level === "allow" ? true : await prompt(judged.verdict, location.origin);
-      if (ok) { approved.set(m.id, judged); if (approved.size > 64) approved.delete(approved.keys().next().value!); }
+      const verdict = await ask(req);
+      ok = verdict.level === "allow" ? true : await prompt(verdict, location.origin);
+      if (ok) { approved.set(m.id, req); if (approved.size > 64) approved.delete(approved.keys().next().value!); }
     } catch (err) {
-      console.warn("Lamport Warden could not check a request", err);
-      ok = await prompt({ level: "confirm", sentence: "Something went wrong while I was reading this request, so I can't tell you what it does.", reasons: ["the check failed."], confirm: { kind: "acknowledge", expect: "I understand" } }, location.origin).catch(() => false);
+      console.warn("Lamport Warden could not show its prompt", err);
     }
     reply({ id: m.id, ok });
   });
@@ -51,8 +54,8 @@ window.addEventListener(channel.request, (e) => {
 window.addEventListener(channel.done, (e) => {
   let m: DoneMessage;
   try { m = JSON.parse(String((e as CustomEvent).detail)); } catch { return; }
-  const judged = m && typeof m.id === "string" ? approved.get(m.id) : undefined;
-  if (!judged) return;
+  const req = m && typeof m.id === "string" ? approved.get(m.id) : undefined;
+  if (!req) return;
   approved.delete(m.id);
-  if (m.signed) void recordSigned(judged, store, Math.floor(Date.now() / 1000)).catch((err) => console.warn("Lamport Warden could not save your history", err));
+  if (m.signed) void chrome.runtime.sendMessage({ type: "signed", req } satisfies ToBackground).catch(() => undefined);
 });

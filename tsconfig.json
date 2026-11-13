@@ -32,6 +32,8 @@
   "include": [
     "src",
     "test",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "vitest.browser.config.ts",
+    "vitest.wallets.config.ts"
   ]
 }

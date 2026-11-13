@@ -5,6 +5,6 @@ export default defineConfig({
   resolve: { dedupe: ['@solana/web3.js', 'buffer'] },
   test: {
     environment: 'node',
-    include: ['test/**/*.test.ts'],
+    include: ['test/*.test.ts'], // test/browser needs Chromium: pnpm test:browser
   },
 });

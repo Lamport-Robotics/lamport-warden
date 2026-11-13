@@ -47,4 +47,20 @@ const guard: Guard = async (req) => {
 };
 
 installStandardHook(window, guard);
-installLegacyHook(window as unknown as Record<string, any>, guard);
+
+// Injected providers arrive whenever the wallet's own script runs: at document_start beside this one, or later
+// from a script tag. There is no event for it, so the window is looked at again at every moment a page script
+// could be about to run or a person could be about to click: while the document is parsed (the observer's
+// callback runs before the next parser-inserted script does), on the load events, on every pointer and key
+// press before the page's own handlers, and on a slow timer.
+const legacy = installLegacyHook(window as unknown as Record<string, any>, guard);
+const sweep = () => { try { legacy.sweep(); } catch { /* a page that booby-traps its globals only loses the guard on them */ } };
+try {
+  const parsing = new MutationObserver(sweep);
+  parsing.observe(document, { childList: true, subtree: true });
+  add("load", () => { sweep(); setTimeout(() => parsing.disconnect(), 5000); }, { once: true });
+} catch { /* no observer: the events and the timer still run */ }
+for (const type of ["phantom#initialized", "DOMContentLoaded", "pointerdown", "keydown", "touchstart", "focus"]) add(type, sweep, true);
+let ticks = 0;
+const timer = setInterval(() => { sweep(); if (++ticks === 100) { clearInterval(timer); setInterval(sweep, 2000); } }, 100);
+(timer as { unref?: () => void }).unref?.(); // under test in Node: do not hold the process open
