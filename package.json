@@ -1,6 +1,6 @@
 {
   "name": "lamport-warden",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "Lamport Warden browser extension: reads every Solana signature request before your wallet does, says in one sentence what it will do, and stops it when that is not what you meant.",
   "type": "module",

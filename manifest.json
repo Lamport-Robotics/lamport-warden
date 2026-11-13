@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lamport Warden",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Reads every Solana signature request before your wallet does, says in one sentence what it will do, and stops it when that is not what you meant.",
   "minimum_chrome_version": "116",
   "icons": {

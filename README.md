@@ -70,7 +70,7 @@ stricter. A transaction made only of instructions Warden reads in full is never 
 | `src/inpage.ts` | the page | Guards every wallet the page can reach, and asks before a signing call goes through. No engine, no history. |
 | `src/intercept.ts` | the page | The guarding itself. Pure, tested in Node and in Chromium. |
 | `src/content.ts` | isolated, on every page (7 KB) | Carries the request to the background worker and draws the prompt. |
-| `src/overlay.ts` | isolated | The prompt, in a closed shadow root. Only clicks and typing the browser marks as coming from a person count. |
+| `src/overlay.ts` | isolated | The prompt, in a closed shadow root in the browser's top layer. A click counts only when the browser marks it as a person's, and Continue only when the browser reports the button was on screen, uncovered and unaltered. |
 | `src/background.ts` | the extension's worker | The engine, the history, the lookup-table call. Keeps nothing between messages it could not lose. |
 | `src/judge.ts` | worker | Request in, verdict out; records a signed send. Pure, tested in Node. |
 | `src/rpc.ts` | worker | Reads lookup tables, and only accounts the lookup table program owns. |

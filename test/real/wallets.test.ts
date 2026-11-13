@@ -87,6 +87,20 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
       expect(await settled(page, "signin")).toBe("WardenRejected");
     });
 
+    it("hands an approved request on to the wallet's own code", async () => {
+      // No wallet is set up, so the wallet will refuse or open its own window: either way the answer is the
+      // wallet's, not Warden's, which shows the call went through the guarded method intact.
+      const door = wallet.guarded[0]!;
+      await page.evaluate(([d, t]) => (window as any).__app.start("through", d, "msg", t), [door, text] as const);
+      expect((await prompt.text(6000))?.sentence).toContain("Sign in to the test shop");
+      await prompt.click("Continue to wallet");
+      await page.waitForTimeout(2500);
+      const outcome = await page.evaluate(() => (window as any).__results.through);
+      console.log(`${wallet.name}: after Continue the wallet answered "${outcome}"`);
+      expect(outcome).not.toBe("WardenRejected");
+      expect(await prompt.shown()).toBe(false);
+    });
+
     it.each(wallet.gap)("known gap: %s goes to the wallet without Warden", async (door) => {
       await page.evaluate(([d, t]) => (window as any).__app.start(d, d, "msg", t), [door, text] as const);
       expect(await prompt.text(2000)).toBeNull(); // when this fails the gap has closed: move the door to `guarded`

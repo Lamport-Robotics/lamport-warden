@@ -8,6 +8,7 @@ import { createServer, type Server } from "node:http";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { inflateSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -119,14 +120,33 @@ export class Prompt {
 
   async shown(): Promise<boolean> { return (await this.card()) !== null; }
 
-  /** Clicks a button of the prompt with the mouse. */
+  /** Clicks a button of the prompt with the mouse, after the moment a person takes to read it. */
   async click(label: string): Promise<void> {
+    // "Continue" counts only once the browser has reported the button visible for a moment (overlay.ts)
+    if (label === "Continue to wallet") await this.page.waitForTimeout(750);
     const card = await this.card();
     const button = card && find(card, (n) => n.nodeName === "BUTTON" && texts(n).join("") === label)[0];
     if (!button) throw new Error(`the prompt has no "${label}" button`);
     const { model } = (await this.cdp.send("DOM.getBoxModel", { backendNodeId: button.backendNodeId })) as { model: { content: number[] } };
     const [x1, y1, , , x3, y3] = model.content as [number, number, number, number, number, number];
     await this.page.mouse.click((x1 + x3) / 2, (y1 + y3) / 2);
+  }
+
+  /**
+   * What is actually painted where the Continue button is, from a screenshot: true when it is the button's own
+   * dark fill. A page can cover or fade the prompt without touching it, and only the pixels say so.
+   */
+  async continueIsPainted(): Promise<boolean> {
+    const card = await this.card();
+    const button = card && find(card, (n) => n.nodeName === "BUTTON" && texts(n).join("") === "Continue to wallet")[0];
+    if (!button) return false;
+    const { model } = (await this.cdp.send("DOM.getBoxModel", { backendNodeId: button.backendNodeId })) as { model: { border: number[] } };
+    const [x1, y1, , , , y3] = model.border as [number, number, number, number, number, number];
+    // just inside the left end of the pill, clear of the label
+    let png: Buffer;
+    try { png = await this.page.screenshot({ clip: { x: Math.round(x1 + 9), y: Math.round((y1 + y3) / 2), width: 1, height: 1 } }); } catch { return false; } // not on the screen at all
+    const [r, g, b] = onePixel(png);
+    return r < 40 && g < 40 && b < 40; // #14130f
   }
 
   /** Types into the prompt's confirmation field with the keyboard. */
@@ -146,6 +166,18 @@ export class Prompt {
     const go = card && find(card, (n) => n.nodeName === "BUTTON" && texts(n).join("") === "Continue to wallet")[0];
     return !!go && attr(go, "disabled") === undefined;
   }
+}
+
+/** The colour of a 1 x 1 PNG. */
+function onePixel(png: Buffer): [number, number, number] {
+  let at = 8, data = Buffer.alloc(0);
+  while (at < png.length) {
+    const len = png.readUInt32BE(at), type = png.toString("latin1", at + 4, at + 8);
+    if (type === "IDAT") data = Buffer.concat([data, png.subarray(at + 8, at + 8 + len)]);
+    at += 12 + len;
+  }
+  const raw = inflateSync(data); // one filter byte, then the pixel
+  return [raw[1]!, raw[2]!, raw[3]!];
 }
 
 const attr = (n: Node, name: string): string | undefined => { const a = n.attributes ?? []; for (let i = 0; i < a.length; i += 2) if (a[i] === name) return a[i + 1]; return undefined; };

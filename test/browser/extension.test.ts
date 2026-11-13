@@ -287,6 +287,55 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     await page.close();
   });
 
+  it.each([
+    ["a layer with the highest z-index, added after the prompt", `const d = document.createElement("div"); d.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:#fff;pointer-events:none"; d.textContent = "Click to claim"; document.documentElement.append(d);`],
+    ["a popover in the browser's top layer, raised again and again", `const d = document.createElement("div"); d.popover = "manual"; d.style.cssText = "position:fixed;inset:0;width:100vw;height:100vh;max-width:none;max-height:none;margin:0;border:0;background:#fff;pointer-events:none"; d.textContent = "Click to claim"; document.documentElement.append(d); d.showPopover(); setInterval(() => { d.hidePopover(); d.showPopover(); }, 30);`],
+    ["a stylesheet that makes the prompt transparent", `const s = document.createElement("style"); s.textContent = "html > div { opacity: 0 !important }"; document.documentElement.append(s);`],
+    ["its own inline style on the prompt's element, kept there", `setInterval(() => { for (const e of document.documentElement.children) if (e.tagName === "DIV") e.style.setProperty("opacity", "0", "important"); }, 20);`],
+    ["a transform that slides the prompt off the screen", `setInterval(() => { for (const e of document.documentElement.children) if (e.tagName === "DIV") e.style.setProperty("transform", "translateX(-200vw)", "important"); }, 20);`],
+    ["a transparent copy of itself under a bait the page draws", `setInterval(() => { for (const e of document.documentElement.children) if (e.tagName === "DIV") e.style.setProperty("opacity", "0.02", "important"); }, 20); const b = document.createElement("div"); b.style.cssText = "position:fixed;inset:0;background:#fff;pointer-events:none;z-index:1"; b.textContent = "Click to claim"; document.body.append(b);`],
+  ])("is never approved unseen: the page tries %s", async (what, attack) => {
+    const { page, prompt } = await open();
+    await start(page, "cover", "standard:FixturePhantom", "tx", pay(Keypair.generate().publicKey, 0.3)); // an address never paid: the prompt must come up
+    expect((await prompt.text())?.buttons).toEqual(["Cancel", "Continue to wallet"]);
+    await page.evaluate(attack);
+    await page.waitForTimeout(900);
+    // Either the prompt held its ground and is what is painted there, or the click does nothing. What must never
+    // happen is an approval from a click on a button the person could not see.
+    const painted = await prompt.continueIsPainted();
+    await prompt.click("Continue to wallet").catch(() => undefined); // where the button is, as a person aiming at the bait would click
+    await page.waitForTimeout(400);
+    const approved = (await result(page, "cover")) === "signed";
+    // approved only if it was there to be seen; a page that fights the prompt may also simply get no approval
+    if (approved) expect({ what, painted }).toEqual({ what, painted: true });
+    else expect(await calls(page)).toEqual([]);
+    await page.close();
+  });
+
+  it.each([
+    ["inverts its colours with a filter on the whole document, as dark-mode extensions do", `document.documentElement.style.filter = "invert(1) hue-rotate(180deg)";`],
+    ["is zoomed with a transform on the whole document", `document.documentElement.style.transform = "scale(0.9)"; document.documentElement.style.transformOrigin = "0 0";`],
+    ["dims its body and scrolls", `document.body.style.opacity = "0.5"; document.body.style.height = "4000px"; window.scrollTo(0, 900);`],
+  ])("still lets a person continue on a page that %s", async (_what, setup) => {
+    const { page, prompt } = await open();
+    await page.evaluate(setup);
+    await start(page, "styled", "standard:FixturePhantom", "tx", pay(Keypair.generate().publicKey, 0.3));
+    expect((await prompt.text())?.buttons).toEqual(["Cancel", "Continue to wallet"]);
+    await prompt.click("Continue to wallet");
+    expect(await settled(page, "styled")).toBe("signed");
+    await page.close();
+  });
+
+  it("treats a prompt the page removed as a refusal, not as silence", async () => {
+    const { page, prompt } = await open();
+    await start(page, "gone", "standard:FixturePhantom", "tx", pay(person(230 + order.indexOf(WARDEN)), 0.3));
+    expect(await prompt.text()).not.toBeNull();
+    await page.evaluate(() => { for (const e of [...document.documentElement.children]) if (e.tagName === "DIV") e.remove(); });
+    expect(await settled(page, "gone")).toBe("WardenRejected");
+    expect(await calls(page)).toEqual([]);
+    await page.close();
+  });
+
   it("lists on the settings page a wallet door it could not guard", async () => {
     const { page } = await open(); // the stand-in for Solflare's frozen window.solflare is on this page
     await page.waitForTimeout(500);

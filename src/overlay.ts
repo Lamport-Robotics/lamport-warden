@@ -1,6 +1,12 @@
 /**
  * The prompt. Drawn by the isolated-world script inside a closed shadow root, so the page's scripts cannot
- * read it, restyle it or reach its buttons, and a click only counts when the browser says a person made it.
+ * read it or reach its buttons, and a click only counts when the browser says a person made it.
+ *
+ * The page still owns everything around it: it can paint a layer on top with a bait that lets clicks fall
+ * through, or make the prompt's element transparent. So "Continue" also needs the browser's own word that the
+ * button has been on screen, unobscured and unaltered, for a moment before the click (IntersectionObserver
+ * with trackVisibility, which exists for exactly this). A prompt the page hides can only be cancelled, and a
+ * prompt the page removes is a refusal.
  */
 import type { WireVerdict } from "./messages.js";
 
@@ -47,7 +53,17 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
       card.append(ul);
     }
 
-    const finish = (ok: boolean) => { host.remove(); resolve(ok); };
+    let done = false;
+    let watching: { disconnect(): void }[] = [];
+    let raising: ReturnType<typeof setInterval> | undefined;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      for (const w of watching) w.disconnect();
+      if (raising !== undefined) clearInterval(raising);
+      host.remove();
+      resolve(ok);
+    };
     const row = el("div", "row", "");
     const cancel = el("button", "", verdict.level === "block" ? "Close" : "Cancel") as HTMLButtonElement;
     cancel.addEventListener("click", (e) => { if (e.isTrusted) finish(false); });
@@ -68,12 +84,49 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
         card.append(lab, input);
         queueMicrotask(() => input.focus());
       }
-      go.addEventListener("click", (e) => { if (e.isTrusted && !go.disabled) finish(true); });
+      // Seen by a person: the browser reports when the button is fully on screen with nothing painted over it
+      // and no effect (opacity, transform, filter) altering it. Where the browser cannot say, a trusted click is
+      // all there is to go on.
+      const tracked = typeof IntersectionObserver === "function" && typeof IntersectionObserverEntry === "function" && "isVisible" in IntersectionObserverEntry.prototype;
+      let seenSince: number | null = null;
+      if (tracked) {
+        const io = new IntersectionObserver((entries) => {
+          const last = entries[entries.length - 1] as IntersectionObserverEntry & { isVisible?: boolean };
+          seenSince = last.isIntersecting && last.isVisible ? (seenSince ?? performance.now()) : null;
+        }, { threshold: 1, trackVisibility: true, delay: 100 } as IntersectionObserverInit);
+        io.observe(go);
+        watching.push(io);
+      }
+      const SEEN_FOR_MS = 400;
+      go.addEventListener("click", (e) => {
+        if (!e.isTrusted || go.disabled) return;
+        if (tracked && (seenSince === null || performance.now() - seenSince < SEEN_FOR_MS)) return; // covered, altered, or only just shown
+        finish(true);
+      });
       row.append(go);
     }
     card.append(row);
     veil.append(card);
     root.append(style, veil);
-    (document.documentElement ?? document).append(host);
+    const parent = document.documentElement ?? document;
+    parent.append(host);
+    // In the browser's top layer, above every z-index the page can set, and put back on top of anything the page
+    // raises after it. This is for the owner's sake, so the prompt can be read; the visibility check above is what
+    // refuses a click when the page wins that race.
+    const raise = () => { try { if (host.matches(":popover-open")) host.hidePopover(); host.showPopover(); } catch { /* no top layer here: the prompt stays where it is */ } };
+    try {
+      host.setAttribute("popover", "manual");
+      // the browser's own popover styling gives it a size, a border and a background: none of that
+      host.style.cssText = "all:initial !important;position:fixed !important;inset:0 !important;width:auto !important;height:auto !important;max-width:none !important;max-height:none !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;overflow:visible !important;";
+      raise();
+      raising = setInterval(() => { if (!done) raise(); }, 250);
+      (raising as { unref?: () => void }).unref?.();
+    } catch { /* an older browser: an ordinary fixed layer */ }
+    // taken out of the page by the page: nobody can answer it any more, so it is a refusal
+    if (typeof MutationObserver === "function") {
+      const mo = new MutationObserver(() => { if (!done && !host.isConnected) finish(false); });
+      mo.observe(parent, { childList: true, subtree: true });
+      watching.push(mo);
+    }
   });
 }
