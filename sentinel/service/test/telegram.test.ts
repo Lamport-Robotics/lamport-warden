@@ -84,6 +84,24 @@ describe("the bot's calls", () => {
   });
 });
 
+describe("after a restart", () => {
+  it("leaves unread what was sent while nobody was listening, so nothing is answered twice", async () => {
+    const asked: any[] = [];
+    let round = 0;
+    const t = telegram({ getUpdates: (body) => { asked.push(body); return { json: { ok: true, result: round++ === 0 ? [{ update_id: 41, message: { text: "/start old-code-from-before", chat: { id: 111 } } }] : [] } }; } });
+    expect(await t.bot.skipWaiting()).toBe(true);
+    expect(asked[0]).toEqual({ offset: -1, timeout: 0, allowed_updates: ["message"] }); // the last one only, which also marks all before it as seen
+    expect(await t.bot.incoming(30)).toEqual([]);
+    expect(asked[1].offset).toBe(42); // and that one is behind it too
+    // nothing was waiting: nothing to skip, and that is fine
+    const quiet = telegram({ getUpdates: () => ({ json: { ok: true, result: [] } }) });
+    expect(await quiet.bot.skipWaiting()).toBe(true);
+    // Telegram could not say: the caller is told, and does not start listening on a guess
+    expect(await telegram({ getUpdates: () => ({ status: 401, json: { ok: false } }) }).bot.skipWaiting()).toBe(false);
+    expect(await telegram({ getUpdates: () => "throw" }).bot.skipWaiting()).toBe(false);
+  });
+});
+
 describe("the one-time codes", () => {
   it("tie one chat to one profile, once, for a quarter of an hour", () => {
     const codes = new LinkCodes();
@@ -152,6 +170,9 @@ describe("what the bot answers", () => {
     expect(await s.say("/start")).toBe(SAID.help);
     expect(s.linked).toHaveLength(1);
     for (const sentence of Object.values(SAID)) expect(sentence).not.toMatch(/https?:|www\.|t\.me/);
+    // in a group, /stop is anybody's to type and so is nobody's: the owner ends it on the page
+    expect(await s.say("/stop", "-100200")).toBe(SAID.inGroup);
+    expect(s.unlinked).not.toContain("-100200");
   });
 });
 

@@ -457,16 +457,26 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
 
   // Telegram: the bot is asked its name (the link on the page is made of it), and then listens for chats
   // that send it a code. A token Telegram does not know leaves Telegram switched off, and says so.
-  let telegram: { username: string; codes: LinkCodes } | null = null;
-  let stopTelegram = () => undefined as void;
-  if (bot) {
+  // It is offered once that has worked, and tried again every five minutes until it has.
+  const offered: { telegram?: { username: string; codes: LinkCodes } } = {};
+  let stopTelegram = () => undefined as void, telegramStopped = false;
+  const startTelegram = async (): Promise<void> => {
+    if (!bot || telegramStopped) return;
     const username = await bot.username();
-    if (!username) void ops.say("Telegram did not accept the bot's token, or could not be reached, when Sentinel started. Telegram alerts are not offered until it is started again with one that works; chats already connected are still written to.", "telegram-off", 3600);
-    else {
-      telegram = { username, codes: new LinkCodes() };
-      stopTelegram = hearTelegram({ bot, codes: telegram.codes, ...telegramLinking(accounts, (profile, sentence) => notifier.notice(profile, sentence)) }).stop;
+    if (telegramStopped) return;
+    if (!username || !(await bot.skipWaiting())) {
+      void ops.say("Telegram did not accept the bot's token, or could not be reached. Telegram alerts are not offered on the page until it answers (it is asked again every five minutes); chats already connected are still written to.", "telegram-off", 6 * 3600);
+      const again = setTimeout(() => void startTelegram(), 300_000);
+      again.unref?.();
+      stopTelegram = () => { telegramStopped = true; clearTimeout(again); };
+      return;
     }
-  }
+    const codes = new LinkCodes();
+    const hearing = hearTelegram({ bot, codes, ...telegramLinking(accounts, (profile, sentence) => notifier.notice(profile, sentence)) });
+    stopTelegram = () => { telegramStopped = true; hearing.stop(); };
+    offered.telegram = { username, codes };
+  };
+  await startTelegram();
 
   const server = await listen({
     accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => ({ ...state, push: push ? (push.state.connected ? "on" as const : "down" as const) : "off" as const }),
@@ -474,7 +484,8 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
     notice: (profile, sentence, opts) => notifier.notice(profile, sentence, opts),
     webhookFailed: (why) => { void ops.say(`A webhook from Stripe could not be applied (${why.slice(0, 120)}). Stripe sends it again; if this repeats, a plan may not be starting or ending when it should.`, "webhook-failed", 3600); },
     ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}),
-    ...(telegram ? { telegram } : {}),
+    // read when a request comes in, so that a bot that answers later is offered from then on
+    get telegram() { return offered.telegram; },
   }, { port: cfg.port, trustProxy: cfg.trustProxy });
   const started = `watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : `set up, checkout closed${cfg.billing.checkoutTesters?.length ? ` to all but ${cfg.billing.checkoutTesters.length} tester wallet(s)` : ""}`) : "not set up"}`;
   // said at most every ten minutes, so a service that keeps falling over does not fill the channel

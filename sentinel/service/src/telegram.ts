@@ -61,6 +61,18 @@ export class TelegramBot {
     return { ok: r.ok, status: r.status };
   }
 
+  /**
+   * Leaves unread whatever was sent while nobody was listening. A code from before a restart is nobody's by
+   * now, and the last messages before one would otherwise be answered a second time. False when Telegram
+   * could not say.
+   */
+  async skipWaiting(): Promise<boolean> {
+    const r = await this.call("getUpdates", { offset: -1, timeout: 0, allowed_updates: ["message"] });
+    if (!r.ok || !Array.isArray(r.result)) return false;
+    for (const u of r.result) if (typeof u?.update_id === "number") this.offset = Math.max(this.offset, u.update_id + 1);
+    return true;
+  }
+
   /** Waits up to `seconds` for messages people sent the bot, and hands each over once. Throws when Telegram refuses. */
   async incoming(seconds = 50): Promise<Incoming[]> {
     const r = await this.call("getUpdates", { offset: this.offset, timeout: seconds, allowed_updates: ["message"] }, (seconds + 15) * 1000);
@@ -108,6 +120,7 @@ export const SAID = {
   stale: "That link has run out or was already used. Press Connect Telegram on the Sentinel page for a new one.",
   stopped: "This chat no longer gets alerts from Warden Sentinel.",
   notLinked: "This chat was not getting alerts from Warden Sentinel.",
+  inGroup: "In a group, alerts are stopped on the Sentinel page, by whoever connected the group there.",
   help: "I only deliver alerts from Warden Sentinel. To connect this chat, press Connect Telegram on the Sentinel page. I never send links and never ask you to sign anything.",
 } as const;
 
@@ -136,7 +149,12 @@ export async function answer(message: Incoming, deps: Pick<TelegramDeps, "codes"
     const linked = await deps.link(profile, message.chat);
     return linked.ok ? SAID.linked : linked.why;
   }
-  if (/^\/stop(?:@\w+)?\s*$/.test(text)) return (await deps.unlink(message.chat)) ? SAID.stopped : SAID.notLinked;
+  if (/^\/stop(?:@\w+)?\s*$/.test(text)) {
+    // A group has members who are not the owners that send their alerts to it, and any of them could type
+    // this. Only a chat with one person in it can end its own alerts from inside. (A group's number is negative.)
+    if (message.chat.startsWith("-")) return SAID.inGroup;
+    return (await deps.unlink(message.chat)) ? SAID.stopped : SAID.notLinked;
+  }
   return SAID.help;
 }
 

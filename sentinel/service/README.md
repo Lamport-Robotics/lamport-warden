@@ -304,6 +304,8 @@ to a chat that wrote to it first. So it goes the other way round.
 - There is no other way in. A chat typed into the address field is refused, so nobody can point the bot at
   a chat that is not theirs.
 - `/stop` in the chat ends it, after the profile's channels are told. The page removes it like any channel.
+  In a group `/stop` ends nothing: any member could type it, and it would end every owner's alerts to that
+  group. A group is taken out on the page, by whoever connected it.
 - The chat's number is sealed in the data file like any channel's address. Telegram sends the bot the
   sender's name with each message; the service reads the chat's number and the text and keeps nothing else.
 
@@ -317,9 +319,10 @@ It is on both plans (a chat counts as one of the plan's channels) and is offered
 has a bot: without `SENTINEL_TELEGRAM_BOT_TOKEN` the page shows no Telegram button and `/v1/me` does not
 list the kind. `sentinel/telegram-setup.sh [ssh-host]` gives the deployed service its bot: it asks for the
 token BotFather gave (not shown, never an argument of any command), asks Telegram whose it is, writes it
-into the root-only settings file on the server and restarts the service. A token Telegram does not accept
-at start leaves Telegram switched off and tells whoever runs the service; chats already connected are
-still written to.
+into the root-only settings file on the server and restarts the service. When Telegram does not accept the
+token at start, or cannot be reached, Telegram is not offered on the page, whoever runs the service is told,
+and it is asked again every five minutes; chats already connected are still written to. What was sent to
+the bot while the service was not running is left unread: a code from before a restart is nobody's by then.
 
 ## What an owner is told about the profile itself
 

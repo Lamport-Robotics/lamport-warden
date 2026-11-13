@@ -200,8 +200,12 @@ describe("leaving", () => {
     expect((await s.call("DELETE", `/v1/channels/${id}`, undefined, b)).status).toBe(404); // not bob's to remove
     expect((await s.call("DELETE", `/v1/channels/${id}`, undefined, a)).status).toBe(200);
     expect(s.accounts.telegramChannels("-1009876543210").map((c) => c.profile)).toEqual([pb]);
-    // /stop in the chat ends what is left of it
-    expect(await s.says("-1009876543210", "/stop")).toBe(SAID.stopped);
+    // /stop typed in a group ends nothing: any member could type it, and it would end every owner's alerts there
+    expect(await s.says("-1009876543210", "/stop")).toBe(SAID.inGroup);
+    expect(await s.says("-1009876543210", "/stop@WardenSentinelBot")).toBe(SAID.inGroup);
+    expect(s.accounts.telegramChannels("-1009876543210").map((c) => c.profile)).toEqual([pb]);
+    // bob ends his on the page
+    expect((await s.call("DELETE", `/v1/channels/${s.accounts.channelViews(pb)[0]!.id}`, undefined, b)).status).toBe(200);
     expect(s.accounts.channelViews(pb)).toEqual([]);
   });
 });
