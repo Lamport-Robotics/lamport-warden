@@ -27,7 +27,8 @@ jobs:
 
   browser:
     # the built extension in Chromium, in front of wallets that inject the way Phantom, Solflare and Backpack do
-    runs-on: ubuntu-latest
+    # 24.04 by name: the Playwright version pinned here has no browser build for the 26.04 that "latest" now means
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
