@@ -165,14 +165,14 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const pace = pacer((w) => accounts.profile(accounts.profileOf(w) ?? "")?.tier ?? "watch", { watch: cfg.pollSeconds, pro: cfg.proPollSeconds });
   const stopRounds = startRounds(watchRound({ watcher, store, notifier, pace, blindness: new Blindness(), state }), Math.min(cfg.pollSeconds, cfg.proPollSeconds));
 
-  const billing = cfg.billing ? new Billing(cfg.billing, accounts, new HttpRpc(cfg.billing.holderRpcUrl), new Stripe(cfg.billing.secretKey)) : null;
+  const billing = cfg.billing ? new Billing(cfg.billing, accounts, new HttpRpc(cfg.billing.holderRpcUrl), new Stripe(cfg.billing.secretKey), { notice: (profile, sentence) => notifier.notice(profile, sentence) }) : null;
   // once a day: whoever stopped holding the token moves to the full price from their next bill, and the other way round
   const stopReprice = billing ? startRounds(async () => {
     const { moved, failed } = await billing.reprice();
     if (moved || failed) console.error(`sentinel: holder prices checked, ${moved} moved, ${failed} could not be checked`);
   }, 86_400) : () => undefined;
 
-  const server = await listen({ accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => state, testChannel: (profile, id) => notifier.test(profile, id), ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}) }, { port: cfg.port, trustProxy: cfg.trustProxy });
+  const server = await listen({ accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => state, testChannel: (profile, id) => notifier.test(profile, id), notice: (profile, sentence, opts) => notifier.notice(profile, sentence, opts), ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}) }, { port: cfg.port, trustProxy: cfg.trustProxy });
   console.error(`sentinel: watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : "set up, checkout closed") : "not set up"}`);
   return async () => { stopRounds(); stopReprice(); await new Promise<void>((r) => server.close(() => r())); };
 }

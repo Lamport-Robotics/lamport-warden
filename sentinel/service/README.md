@@ -76,12 +76,61 @@ can sign with one of them.
   profile, its channels and its sessions.
 - Watch, the free tier, watches three wallets per profile.
 
+## What an owner is told about the profile itself
+
+A stolen key is what Sentinel is for, and whoever has one can sign in here with it. The first thing worth
+doing with that is switching the alerts off. So whatever makes a profile watch less, or tell fewer places, is
+said to the channels it had a moment before (`src/notices.ts`):
+
+- a sign-in to a profile that already exists, quietly (a line in the channel, no sound), a few times an hour
+  at most;
+- an alert channel removed, said on that channel before it goes, and a channel added;
+- a wallet removed, and the profile's end when it was the last one;
+- a browser linked to report a wallet's signatures as its owner's;
+- the paid plan starting, a payment failing, the plan ending (said before its extra channels and wallets go),
+  and the price changing for the next bill.
+
+Each names the wallet whose signature started the session: "by someone signed in with AbCd..WxYz. If that was
+not you, someone else has the key to AbCd..WxYz." Like every alert, a notice is one plain sentence with no
+link in it. The addresses are taken at the moment a notice is called for and it is sent without waiting, so a
+removal is announced even on a slow channel, and a channel that is down does not stop its owner removing it.
+
+What a notice does not stop: someone with the key can still read the profile (its other wallets' addresses,
+its alerts) and can answer an alert with "this was me". The owner has heard of the sign-in by then.
+
+## Limits
+
+In memory, per process: a restart forgives everyone.
+
+| What | How many |
+|---|---|
+| Sign-in numbers | 30 a minute per network |
+| Sign-in attempts | 10 a minute per network |
+| New profiles | 5 a day per network (`newProfilesPerDay`) |
+| Wallets added to a profile | 10 a day |
+| Changes that send a notice (a channel added or removed, a wallet removed, a browser linked) | 20 an hour per profile; the next is refused, not done silently |
+| Test alerts | 5 in ten minutes per profile |
+| Reports from the extension | 240 an hour per wallet |
+| Checkout and portal pages | 10 in ten minutes per profile |
+| Everything else with a session | 300 a minute per profile |
+
+A network is an IPv4 address or an IPv6 /64: one subscriber is handed a whole /64, so counting its addresses
+one by one would count nothing. Behind a proxy (`SENTINEL_TRUST_PROXY=1`), the caller is the last address in
+`X-Forwarded-For`, the one the proxy wrote; anything before it is whatever the caller sent. The limits on new
+profiles and added wallets are there because the service has room for only so many wallets and a wallet's
+first read costs a few hundred RPC calls: without them one visitor could take every place, or have the RPC
+spent on wallets made up for the purpose.
+
+Ids that arrive from outside (a path, a webhook's profile) are looked up as own entries only: `__proto__`,
+`constructor` and the like are not profiles, wallets or records.
+
 ## What the stored file gives away
 
 One JSON file, mode 0600. Someone who reads it learns which wallet addresses are watched and what alerts they
 raised, which is what the chain already says. They do not get in:
 
-- a session and a report token are stored as SHA-256 hashes;
+- a session and a report token are stored as SHA-256 hashes; beside a session, which of the profile's wallets
+  signed it in (so that a change made in it can be reported as made with that wallet);
 - where alerts go is sealed with AES-256-GCM under `SENTINEL_DATA_KEY`, which is not in the file. The page is
   shown only the host and the last four characters of a topic.
 
@@ -132,6 +181,15 @@ of the customer and the subscription.
   them, and are read again when there is room.
 - **The last wallet cannot be removed while the plan runs**, because that removes the profile and the
   subscription would go on charging with nobody behind it.
+- **Only a subscription to this plan counts.** The Stripe account can sell other things; a subscription whose
+  one item is not one of the plan's two prices changes nothing here, whatever profile it names.
+- **One checkout page at a time, good for half an hour.** Opening another closes the one before at Stripe, so
+  a page left open in another tab cannot be paid as well and start a second subscription. If the earlier page
+  was just paid and Stripe's word has not arrived, no new page is opened. Someone who had the plan before
+  comes back as the same Stripe customer.
+- **The owner hears what the plan does** through the profile's channels: that it started, that a payment
+  failed, that it ended (and how many wallets are no longer watched), and, before the bill that carries it,
+  that the price changes because the wallets now hold, or no longer hold, enough $LAMPORT.
 - **Checkout is closed unless `SENTINEL_CHECKOUT=open`.** With the Stripe settings in place and checkout
   closed, the page shows the prices and existing subscriptions are honoured, and nothing is sold.
 

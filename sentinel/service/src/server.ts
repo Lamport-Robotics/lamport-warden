@@ -15,6 +15,7 @@ import { Accounts, type Refusal } from "./accounts.js";
 import { PLANS } from "./plans.js";
 import { verifyStripeSignature, type Billing } from "./billing.js";
 import { addressBytes, looksLikeSignature } from "./crypto.js";
+import { channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, walletRemovedNotice } from "./notices.js";
 import { NonceBook, verifySignIn } from "./signin.js";
 import type { MemoryStore, StoredEvent } from "./store.js";
 import type { Watcher } from "./watcher.js";
@@ -49,6 +50,29 @@ export interface ApiDeps {
   billing?: { api: Billing; webhookSecret: string };
   /** Sends a test to one of a profile's channels. */
   testChannel?: (profile: string, channelId: string) => Promise<{ ok: true } | { ok: false; status: number; why: string }>;
+  /**
+   * Tells a profile's owner, through the channels it has at the moment of the call, that the profile changed
+   * (notices.ts). The addresses are taken when it is called, so a notice about a removal is called for first.
+   */
+  notice?: (profile: string, sentence: string, opts?: { quiet?: boolean }) => Promise<void>;
+  /** How many new profiles one network may start in a day (default 5). */
+  newProfilesPerDay?: number;
+}
+
+/**
+ * One caller, for the limits. An IPv4 address stands for itself. An IPv6 address stands for its /64: one
+ * subscriber is handed a whole /64, and counting each of its addresses separately would count nothing.
+ */
+export function networkOf(ip: string): string {
+  const bare = ip.split("%")[0]!.trim().toLowerCase();
+  const v4 = /^(?:::ffff:)?(\d{1,3}(?:\.\d{1,3}){3})$/.exec(bare);
+  if (v4) return v4[1]!;
+  if (!bare.includes(":")) return bare;
+  const [head = "", tail] = bare.split("::");
+  const front = head ? head.split(":") : [];
+  const back = tail ? tail.split(":") : [];
+  const groups = tail === undefined ? front : [...front, ...Array<string>(Math.max(0, 8 - front.length - back.length)).fill("0"), ...back];
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, "")).join(":")}::/64`;
 }
 
 /** So many per window, per key. In memory: a restart forgives everyone, which is fine for what these guard. */
@@ -70,6 +94,7 @@ const ok = (body: unknown = { ok: true }, status = 200): ApiResponse => ({ statu
 const no = (status: number, why: string): ApiResponse => ({ status, body: { error: why } });
 const refused = (r: Refusal): ApiResponse => no(r.status, r.why);
 const SLOW_DOWN = no(429, "too many requests. Wait a minute and try again.");
+const TOO_MANY_CHANGES = no(429, "this profile was changed many times in the last hour. Wait a while and try again.");
 const text = (v: unknown, max = 4096): string | null => (typeof v === "string" && v.length > 0 && v.length <= max ? v : null);
 const bytes = (v: unknown, max: number): Uint8Array | null => {
   const s = text(v, max * 2);
@@ -85,6 +110,8 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
   const limiter = deps.limiter ?? new RateLimiter();
   const now = () => (deps.now ? deps.now() : Math.floor(Date.now() / 1000));
   const host = new URL(deps.origin).host;
+  // sent, not waited for: the addresses are read as this is called, and the answer does not wait on a slow channel
+  const notice = (profile: string, sentence: string, opts?: { quiet?: boolean }) => { void deps.notice?.(profile, sentence, opts).catch(() => undefined); };
 
   const me = (profile: string) => {
     const p = accounts.profile(profile)!;
@@ -107,6 +134,7 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
 
   return async (req) => {
     const t = now();
+    const from = networkOf(req.ip);
     const parts = req.path.split("/").filter(Boolean);
     if (parts[0] !== "v1") return no(404, "there is nothing at that address.");
     const route = `${req.method} /${parts.slice(1).join("/")}`;
@@ -141,17 +169,18 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
     }
 
     // ---- signing in
-    const session = accounts.session(req.bearer, t);
+    const who = accounts.sessionOf(req.bearer, t);
+    const session = who?.profile ?? null;
 
     if (route === "POST /nonce") {
-      if (!limiter.allow(`nonce:${req.ip}`, 30, 60, t)) return SLOW_DOWN;
+      if (!limiter.allow(`nonce:${from}`, 30, 60, t)) return SLOW_DOWN;
       const purpose = field(req.body, "purpose") === "link" ? "link" : "signin";
       if (purpose === "link" && !session) return no(401, "sign in first.");
       return ok({ nonce: nonces.issue(purpose === "link" ? { kind: "link", profile: session! } : { kind: "signin" }, t), host });
     }
 
     if (route === "POST /signin") {
-      if (!limiter.allow(`signin:${req.ip}`, 10, 60, t)) return SLOW_DOWN;
+      if (!limiter.allow(`signin:${from}`, 10, 60, t)) return SLOW_DOWN;
       const address = text(field(req.body, "address"), 44);
       const message = bytes(field(req.body, "message"), 2000);
       const signature = bytes(field(req.body, "signature"), 64);
@@ -161,12 +190,19 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       if (result.purpose.kind === "link") {
         // the number was issued to a signed-in profile, and only that profile may spend it
         if (session !== result.purpose.profile) return no(401, "sign in first.");
+        // a wallet's first read costs a few hundred RPC calls: adding and removing one in a loop is not allowed to spend them
+        if (accounts.profileOf(result.address) === undefined && !limiter.allow(`link:${session}`, 10, 86_400, t)) return no(429, "this profile added many wallets today. Try again tomorrow.");
         const linked = accounts.admit(result.address, session, t);
         return linked.ok ? ok(me(session)) : refused(linked);
       }
+      // There is room for only so many wallets, and each new one is read from its history. One network starts a
+      // few profiles a day, so that one visitor cannot take every place or spend the RPC on wallets made up for it.
+      if (accounts.profileOf(result.address) === undefined && !limiter.allow(`create:${from}`, deps.newProfilesPerDay ?? 5, 86_400, t)) return no(429, "too many new profiles were started from this network today. Try again tomorrow.");
       const admitted = accounts.admit(result.address, null, t);
       if (!admitted.ok) return refused(admitted);
-      return ok({ session: accounts.startSession(admitted.profile, t), ...me(admitted.profile) });
+      // the owner hears of every sign-in to a profile that already had channels; a few an hour, then no more is said
+      if (!admitted.created && limiter.allow(`signin-notice:${admitted.profile}`, 6, 3600, t)) notice(admitted.profile, signedInNotice(result.address), { quiet: true });
+      return ok({ session: accounts.startSession(admitted.profile, t, result.address), ...me(admitted.profile) });
     }
 
     // ---- everything below needs a session
@@ -179,21 +215,41 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
     if (parts[1] === "wallets" && parts[2]) {
       const wallet = parts[2];
       if (req.method === "DELETE" && parts.length === 3) {
+        const may = accounts.mayRemoveWallet(session, wallet);
+        if (!may.ok) return refused(may);
+        if (!limiter.allow(`change:${session}`, 20, 3600, t)) return TOO_MANY_CHANGES;
+        // said first, to the channels the profile still has
+        notice(session, walletRemovedNotice(wallet, may.last, who!.wallet));
         const r = accounts.removeWallet(session, wallet);
         return r.ok ? ok({ ok: true, profileRemoved: r.profileRemoved }) : refused(r);
       }
       if (parts[3] === "report-token" && parts.length === 4) {
-        if (req.method === "POST") { const r = accounts.newReportToken(session, wallet); return r.ok ? ok({ token: r.token }) : refused(r); }
+        if (req.method === "POST") {
+          if (accounts.profileOf(wallet) === session && !limiter.allow(`change:${session}`, 20, 3600, t)) return TOO_MANY_CHANGES;
+          const r = accounts.newReportToken(session, wallet);
+          if (!r.ok) return refused(r);
+          // what this browser reports from now on softens alerts, so the owner hears that one was linked
+          notice(session, reportLinkedNotice(wallet, who!.wallet));
+          return ok({ token: r.token });
+        }
         if (req.method === "DELETE") return accounts.dropReportToken(session, wallet) ? ok() : no(404, "that wallet is not in this profile.");
       }
     }
 
     if (route === "POST /channels") {
       // what kind of channel it is, is read from the address itself, never taken from the caller
+      if (!limiter.allow(`change:${session}`, 20, 3600, t)) return TOO_MANY_CHANGES;
       const r = accounts.addChannel(session, field(req.body, "target"), t);
-      return r.ok ? ok(r.channel, 201) : refused(r);
+      if (!r.ok) return refused(r);
+      notice(session, channelAddedNotice(r.channel.hint, who!.wallet));
+      return ok(r.channel, 201);
     }
     if (req.method === "DELETE" && parts[1] === "channels" && parts[2] && parts.length === 3) {
+      const channel = accounts.channelView(session, parts[2]);
+      if (!channel) return no(404, "there is no such channel.");
+      if (!limiter.allow(`change:${session}`, 20, 3600, t)) return TOO_MANY_CHANGES;
+      // said first, and to the channel that is going: a channel alerts do not go to is removed without a word
+      if (channel.active) notice(session, channelRemovedNotice(channel.hint, who!.wallet));
       return accounts.removeChannel(session, parts[2]) ? ok() : no(404, "there is no such channel.");
     }
     if (req.method === "POST" && parts[1] === "channels" && parts[2] && parts[3] === "test" && parts.length === 4) {
@@ -242,11 +298,13 @@ function readBody(req: IncomingMessage, keepRaw: boolean): Promise<{ ok: true; b
     const limit = keepRaw ? 256 * 1024 : MAX_BODY; // Stripe's events are larger than anything the page sends
     req.on("data", (c: Buffer) => {
       size += c.length;
-      if (size > limit) { finish({ ok: false, status: 413, why: "that request is too large." }); req.destroy(); return; }
+      // the rest is read and dropped, so the caller gets the answer instead of a closed connection
+      if (size > limit) { chunks.length = 0; finish({ ok: false, status: 413, why: "that request is too large." }); return; }
       chunks.push(c);
     });
     req.on("error", () => finish({ ok: false, status: 400, why: "the request could not be read." }));
     req.on("end", () => {
+      if (done) return;
       if (size === 0) return finish({ ok: true, body: undefined });
       const raw = Buffer.concat(chunks).toString("utf8");
       // a webhook is parsed after its signature is checked, from these same bytes
@@ -280,15 +338,21 @@ export function listen(deps: ApiDeps, opts: { port: number; host?: string; trust
         if (req.method === "OPTIONS") { res.writeHead(204, headers); res.end(); return; }
         const webhook = url.pathname === "/v1/stripe/webhook";
         const read = await readBody(req, webhook);
-        if (!read.ok) return send(no(read.status, read.why));
+        if (!read.ok) {
+          // nothing more is taken on this connection once it has sent too much
+          if (read.status === 413) { res.setHeader("Connection", "close"); res.once("finish", () => req.destroy()); }
+          return send(no(read.status, read.why));
+        }
         const auth = typeof req.headers.authorization === "string" ? /^Bearer ([A-Za-z0-9_-]{20,200})$/.exec(req.headers.authorization) : null;
-        const forwarded = opts.trustProxy && typeof req.headers["x-forwarded-for"] === "string" ? req.headers["x-forwarded-for"].split(",")[0]!.trim() : "";
+        // the last address is the one the proxy in front wrote; anything before it is whatever the caller sent
+        const forwarded = opts.trustProxy && typeof req.headers["x-forwarded-for"] === "string" ? req.headers["x-forwarded-for"].split(",").at(-1)!.trim() : "";
         const stripeSignature = webhook && typeof req.headers["stripe-signature"] === "string" ? req.headers["stripe-signature"] : undefined;
         send(await handle({ method: req.method ?? "GET", path: url.pathname, bearer: auth ? auth[1]! : null, body: read.body, ip: forwarded || req.socket.remoteAddress || "unknown", raw: read.raw, stripeSignature }));
       } catch (e) {
         // what went wrong stays in the log; the caller is told only that something did
         console.error("sentinel: a request failed", e);
-        send(no(500, "something went wrong here."));
+        // an answer that was already under way is cut off; nothing here may throw, or the process would end
+        try { if (res.headersSent) res.destroy(); else send(no(500, "something went wrong here.")); } catch { res.destroy(); }
       }
     })();
   });

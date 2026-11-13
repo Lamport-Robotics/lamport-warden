@@ -44,6 +44,13 @@ describe.skipIf(!usable)("the paid plan against Stripe in test mode", () => {
     expect(full).toMatchObject({ ok: true, url: expect.stringMatching(/^https:\/\/checkout\.stripe\.com\//) });
     balances[wallet] = 250_000;
     expect(await billing.checkout(profile)).toMatchObject({ ok: true, url: expect.stringMatching(/^https:\/\/checkout\.stripe\.com\//) });
+    // one page at a time: Stripe itself now has the first one closed and the second open for about half an hour
+    const pages = async () => ((await call("GET", "/checkout/sessions", [["limit", "20"]])).data as any[]).filter((c) => c.client_reference_id === profile).sort((a, b) => a.created - b.created || (a.status === "open" ? 1 : -1));
+    const [first, second] = await pages();
+    expect(first.status).toBe("expired");
+    expect(second.status).toBe("open");
+    expect(second.expires_at - second.created).toBeGreaterThanOrEqual(30 * 60);
+    expect(second.expires_at - second.created).toBeLessThanOrEqual(33 * 60);
 
     // what Stripe has after someone pays: a customer with a card and an active subscription at the holder price
     const customer = await call("POST", "/customers", [["description", "Warden Sentinel integration test"], ["payment_method", "pm_card_visa"], ["invoice_settings[default_payment_method]", "pm_card_visa"]]);
@@ -70,6 +77,17 @@ describe.skipIf(!usable)("the paid plan against Stripe in test mode", () => {
       await fetch(`https://api.stripe.com/v1/subscriptions/${sub.id}`, { method: "DELETE", headers: { authorization: `Bearer ${key}` } });
       await billing.onEvent({ type: "customer.subscription.deleted", data: { object: { id: sub.id } } });
       expect(accounts.profile(profile)).toMatchObject({ tier: "watch", billing: { status: "canceled" } });
+
+      // coming back: the new checkout page is for the same Stripe customer
+      expect(await billing.checkout(profile)).toMatchObject({ ok: true });
+      expect((await pages()).at(-1)).toMatchObject({ status: "open", customer: customer.id });
+      // and when Stripe no longer has that customer, a page is made all the same
+      await fetch(`https://api.stripe.com/v1/customers/${customer.id}`, { method: "DELETE", headers: { authorization: `Bearer ${key}` } });
+      expect(await billing.checkout(profile)).toMatchObject({ ok: true });
+      const last = (await pages()).at(-1);
+      expect(last.status).toBe("open");
+      expect(last.customer).toBeNull();
+      await call("POST", `/checkout/sessions/${last.id}/expire`);
     } finally {
       await fetch(`https://api.stripe.com/v1/customers/${customer.id}`, { method: "DELETE", headers: { authorization: `Bearer ${key}` } });
     }

@@ -11,7 +11,7 @@
 import { randomBytes } from "node:crypto";
 import { hashToken, randomToken, sameHash, seal, unseal } from "./crypto.js";
 import { PLANS, type ChannelKind } from "./plans.js";
-import type { Channel, MemoryStore, Profile, StoredEvent } from "./store.js";
+import type { Channel, MemoryStore, Profile, StoredEvent, WalletOwner } from "./store.js";
 
 export const SESSION_SECONDS = 7 * 86_400;
 
@@ -54,13 +54,16 @@ export class Accounts {
 
   private get data() { return this.store.accounts; }
   private get ntfyHosts(): ReadonlySet<string> { return this.opts.ntfyHosts ?? new Set(["ntfy.sh"]); }
+  // Ids arrive from outside (a path, a webhook). Only a profile or wallet that was put here is found: a name
+  // every object answers to, like "constructor", is not one.
+  private owner(wallet: string): WalletOwner | undefined { return Object.hasOwn(this.data.owners, wallet) ? this.data.owners[wallet] : undefined; }
 
-  profile(id: string): Profile | undefined { return this.data.profiles[id]; }
-  profileOf(wallet: string): string | undefined { return this.data.owners[wallet]?.profile; }
+  profile(id: string): Profile | undefined { return Object.hasOwn(this.data.profiles, id) ? this.data.profiles[id] : undefined; }
+  profileOf(wallet: string): string | undefined { return this.owner(wallet)?.profile; }
   walletsOf(profile: string): string[] { return Object.entries(this.data.owners).filter(([, o]) => o.profile === profile).map(([address]) => address); }
   channelsOf(profile: string): Channel[] { return this.data.channels.filter((c) => c.profile === profile); }
-  reporting(wallet: string): boolean { return !!this.data.owners[wallet]?.reportTokenHash; }
-  paused(wallet: string): boolean { return this.data.owners[wallet]?.paused === true; }
+  reporting(wallet: string): boolean { return !!this.owner(wallet)?.reportTokenHash; }
+  paused(wallet: string): boolean { return this.owner(wallet)?.paused === true; }
   profiles(): Profile[] { return Object.values(this.data.profiles); }
 
   /**
@@ -68,7 +71,7 @@ export class Accounts {
    * wallet stays in the profile with what was learned about it, and is read again when there is room.
    */
   enforce(profile: string): void {
-    const p = this.data.profiles[profile];
+    const p = this.profile(profile);
     if (!p) return;
     const mine = Object.entries(this.data.owners).filter(([, o]) => o.profile === profile).sort((a, b) => a[1].addedAt - b[1].addedAt);
     mine.forEach(([address, owner], i) => {
@@ -80,14 +83,14 @@ export class Accounts {
 
   /** Changes what the profile pays for. Moving down pauses the wallets over the limit; moving up reads them again. */
   setTier(profile: string, tier: Profile["tier"]): void {
-    const p = this.data.profiles[profile];
+    const p = this.profile(profile);
     if (!p || p.tier === tier) return;
     p.tier = tier;
     this.enforce(profile);
   }
 
   setBilling(profile: string, billing: Profile["billing"] | null): void {
-    const p = this.data.profiles[profile];
+    const p = this.profile(profile);
     if (!p) return;
     if (billing === null) delete p.billing; else p.billing = billing;
     this.store.flush();
@@ -102,7 +105,7 @@ export class Accounts {
    * in it. Linking: it joins the profile that asked, unless it is already someone else's.
    */
   admit(wallet: string, into: string | null, now: number): { ok: true; profile: string; created: boolean } | Refusal {
-    const owner = this.data.owners[wallet];
+    const owner = this.owner(wallet);
     if (into === null) {
       if (owner) return { ok: true, profile: owner.profile, created: false };
       if (this.full()) return refuse(503, "Sentinel is watching as many wallets as it can for now. Try again later.");
@@ -113,7 +116,7 @@ export class Accounts {
       this.store.flush();
       return { ok: true, profile: id, created: true };
     }
-    const profile = this.data.profiles[into];
+    const profile = this.profile(into);
     if (!profile) return refuse(401, "sign in again.");
     if (owner) return owner.profile === into ? { ok: true, profile: into, created: false } : refuse(409, "that wallet is already watched under another profile.");
     if (this.full()) return refuse(503, "Sentinel is watching as many wallets as it can for now. Try again later.");
@@ -124,12 +127,20 @@ export class Accounts {
     return { ok: true, profile: into, created: false };
   }
 
+  /** Whether a wallet could be removed now, and whether it is the profile's last: asked before anyone is told it was. */
+  mayRemoveWallet(profile: string, wallet: string): { ok: true; last: boolean } | Refusal {
+    if (this.owner(wallet)?.profile !== profile) return refuse(404, "that wallet is not in this profile.");
+    const last = this.walletsOf(profile).length === 1;
+    // the last wallet takes the profile with it, and a subscription with nobody behind it would go on charging
+    const billing = this.profile(profile)?.billing;
+    if (last && billing && ["active", "trialing", "past_due"].includes(billing.status)) return refuse(409, "this is the profile's last wallet and the paid plan is still running. Cancel the plan first, then remove it.");
+    return { ok: true, last };
+  }
+
   /** Stops watching a wallet and forgets it. The last one takes the profile with it. */
   removeWallet(profile: string, wallet: string): { ok: true; profileRemoved: boolean } | Refusal {
-    if (this.data.owners[wallet]?.profile !== profile) return refuse(404, "that wallet is not in this profile.");
-    // the last wallet takes the profile with it, and a subscription with nobody behind it would go on charging
-    const billing = this.data.profiles[profile]?.billing;
-    if (this.walletsOf(profile).length === 1 && billing && ["active", "trialing", "past_due"].includes(billing.status)) return refuse(409, "this is the profile's last wallet and the paid plan is still running. Cancel the plan first, then remove it.");
+    const may = this.mayRemoveWallet(profile, wallet);
+    if (!may.ok) return may;
     delete this.data.owners[wallet];
     this.store.forget(wallet);
     const profileRemoved = this.walletsOf(profile).length === 0;
@@ -145,23 +156,28 @@ export class Accounts {
 
   // ---- sessions
 
-  startSession(profile: string, now: number): string {
+  /** `wallet` is the one whose signature started it: a change made in this session is reported as made with that wallet. */
+  startSession(profile: string, now: number, wallet?: string): string {
     const token = randomToken();
     this.data.sessions = this.data.sessions.filter((s) => s.expiresAt > now);
     // a handful per profile: the oldest gives way
     const mine = this.data.sessions.filter((s) => s.profile === profile);
     if (mine.length >= 5) this.data.sessions.splice(this.data.sessions.indexOf(mine[0]!), 1);
-    this.data.sessions.push({ tokenHash: hashToken(token), profile, expiresAt: now + SESSION_SECONDS });
+    this.data.sessions.push({ tokenHash: hashToken(token), profile, expiresAt: now + SESSION_SECONDS, ...(wallet ? { wallet } : {}) });
     this.store.flush();
     return token;
   }
 
   /** The profile a session token stands for, or null. */
-  session(token: string | null, now: number): string | null {
+  session(token: string | null, now: number): string | null { return this.sessionOf(token, now)?.profile ?? null; }
+
+  /** The same, with the wallet that signed in, when it is still one of the profile's. */
+  sessionOf(token: string | null, now: number): { profile: string; wallet: string | null } | null {
     if (!token) return null;
     const hash = hashToken(token);
     const s = this.data.sessions.find((x) => sameHash(x.tokenHash, hash));
-    return s && s.expiresAt > now && this.data.profiles[s.profile] ? s.profile : null;
+    if (!s || s.expiresAt <= now || !this.profile(s.profile)) return null;
+    return { profile: s.profile, wallet: s.wallet && this.profileOf(s.wallet) === s.profile ? s.wallet : null };
   }
 
   endSession(token: string): void {
@@ -174,7 +190,7 @@ export class Accounts {
 
   /** A new token for the owner's browser to report with. Shown once; the old one stops working. */
   newReportToken(profile: string, wallet: string): { ok: true; token: string } | Refusal {
-    const owner = this.data.owners[wallet];
+    const owner = this.owner(wallet);
     if (owner?.profile !== profile) return refuse(404, "that wallet is not in this profile.");
     const token = randomToken();
     owner.reportTokenHash = hashToken(token);
@@ -183,7 +199,7 @@ export class Accounts {
   }
 
   dropReportToken(profile: string, wallet: string): boolean {
-    const owner = this.data.owners[wallet];
+    const owner = this.owner(wallet);
     if (owner?.profile !== profile) return false;
     delete owner.reportTokenHash;
     this.store.flush();
@@ -192,7 +208,7 @@ export class Accounts {
 
   /** True when this token is the one issued for this wallet. */
   mayReport(wallet: string, token: string | null): boolean {
-    const stored = this.data.owners[wallet]?.reportTokenHash;
+    const stored = this.owner(wallet)?.reportTokenHash;
     return !!token && !!stored && sameHash(stored, hashToken(token));
   }
 
@@ -203,7 +219,7 @@ export class Accounts {
    * past that stays stored and unused, so that a plan that lapses and comes back loses nothing.
    */
   private active(profile: string): Channel[] {
-    const p = this.data.profiles[profile];
+    const p = this.profile(profile);
     if (!p) return [];
     const plan = PLANS[p.tier];
     return this.channelsOf(profile).filter((c) => plan.kinds.includes(c.kind)).sort((a, b) => a.addedAt - b.addedAt).slice(0, plan.channels);
@@ -226,7 +242,7 @@ export class Accounts {
   }
 
   addChannel(profile: string, target: unknown, now: number): { ok: true; channel: { id: string; kind: ChannelKind; hint: string } } | Refusal {
-    const p = this.data.profiles[profile];
+    const p = this.profile(profile);
     if (!p) return refuse(401, "sign in again.");
     const plan = PLANS[p.tier];
     const clean = cleanTarget(target, this.ntfyHosts);
@@ -254,12 +270,20 @@ export class Accounts {
    */
   channelsFor(wallet: string): { kind: ChannelKind; url: string }[] {
     const profile = this.profileOf(wallet);
-    if (!profile) return [];
+    return profile ? this.channelsOfProfile(profile) : [];
+  }
+  /** Where a notice about the profile itself goes: the channels its alerts go to now. */
+  channelsOfProfile(profile: string): { kind: ChannelKind; url: string; hint: string }[] {
     return this.active(profile).flatMap((c) => {
       const url = unseal(this.dataKey, c.target);
       const clean = url === null ? null : cleanTarget(url, this.ntfyHosts);
-      return clean && clean.kind === c.kind && clean.url === url ? [clean] : [];
+      return clean && clean.kind === c.kind && clean.url === url ? [{ ...clean, hint: c.hint }] : [];
     });
+  }
+  /** How one of the profile's channels is shown, and whether alerts go to it now. Null when it has no such channel. */
+  channelView(profile: string, id: string): { kind: ChannelKind; hint: string; active: boolean } | null {
+    const v = this.channelViews(profile).find((c) => c.id === id);
+    return v ? { kind: v.kind, hint: v.hint, active: v.active } : null;
   }
   targetsFor(wallet: string): string[] { return this.channelsFor(wallet).map((c) => c.url); }
 
