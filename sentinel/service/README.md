@@ -59,9 +59,64 @@ another's profile was also removed in turn, to see a test fail for it.
 - When the RPC fails the wallet is reported as not being watched, the cursor stays where it was, and the next
   pass reads on from there. A transaction the RPC lists but cannot show yet is waited for, not skipped.
 - A notifier that fails does not stop the watching, and the alert is on record either way.
+- A quiet wallet costs one call a pass: the list of what is new. Its accounts (who may spend a token account,
+  who owns it, which program owns the wallet) change only by a transaction the wallet signs, and every such
+  transaction is in that list. So the accounts are read when the list has something new, on the first pass,
+  and every quarter of an hour regardless, in case that reasoning has a hole.
 
 It has been run once against the public mainnet RPC (a first pass over a real account). The tests run it
 against a simulated RPC.
+
+## How much it can watch, and keeping the pace
+
+A plan's pace is a promise: Watch says each wallet is read every minute, Pro every twenty seconds. Whether
+that can be kept is a matter of how much the RPC will take, and the public Solana RPC takes little. Measured
+from the server on 2026-11-13:
+
+| Call | What the public RPC took |
+|---|---|
+| `getSignaturesForAddress` (what is new for a wallet) | about 10 in ten seconds; at two a second, half were refused |
+| `getTokenAccountsByOwner` | the same |
+| `getAccountInfo` | four a second without a refusal |
+| several calls in one batch request | refused every time |
+
+Each refusal came with "retry after 10 seconds", and the signature list took over a second to answer. Read
+the old way (four calls a wallet, one wallet after another) that is about thirty wallets a minute, not the
+hundred the first deployment allowed itself.
+
+What the service does about it:
+
+- **It asks at a pace the RPC takes** (`src/rpc.ts`): the two rationed calls on one lane, everything else on
+  another, each spaced evenly. A refusal is waited out for as long as the RPC says, by every call of that
+  kind. The public RPC's measured pace is the default when that is the RPC; a paid RPC is told its own
+  (`SENTINEL_RPC_HEAVY_PER_10S`, `SENTINEL_RPC_LIGHT_PER_10S`).
+- **A quiet wallet costs one call**, as above, so the rationed lane is spent on reads and not on asking again
+  for accounts that cannot have changed.
+- **The wallet furthest behind its own promise is read first**, in short rounds one after another, a few
+  wallets at a time (`SENTINEL_READERS`). A paid wallet promised twenty seconds is then not kept waiting
+  behind sixty free ones: with twenty paid wallets among eighty free ones on an RPC that takes three reads
+  a second, each kind is read within a fifth of its promise (the test runs exactly that).
+- **A wallet is taken only when its reads fit** (`SENTINEL_READS_PER_MINUTE`). A free wallet is one read a
+  minute, a paid one three. Unless set, four fifths of the rationed pace is promised and the rest is kept
+  for what a read leads to: a new transaction to fetch, a first look at a new wallet's history. On the public
+  RPC that is 43 reads a minute: forty-three free wallets, or fourteen paid ones, or a mix.
+- **A new wallet takes its turn.** Its first read costs three of the rationed calls and up to two hundred
+  light ones for its history. It is due at once and is behind by how long it has waited, so many arriving
+  together are read among the wallets already here and do not push them all back.
+- **Run for real**, from a laptop against the public RPC, with new empty wallets all added in the same
+  second: with 24, every wallet was read within its minute from the start and nothing was refused. With 60,
+  which is more than the 43 it would promise, nothing was refused either; the first look at all of them took
+  about five minutes, during which up to 27 were counted late, and after that none was: each was read every
+  70 to 90 seconds.
+- **When the promise is not kept, that is said.** `/v1/health` counts the wallets read later than twice their
+  promise (`late`), and after a quarter of an hour of it whoever runs the service is told, with the worst
+  case in seconds.
+
+The honest size of this deployment on the free public RPC is therefore a few dozen wallets, and one or two
+paying profiles with ten wallets each would take all of it. Selling the paid plan needs an RPC that takes
+more: with one that takes a hundred signature lists in ten seconds, the same code promises 480 reads a
+minute. Notifications pushed by the RPC instead of polling would take far less again, and are where this
+should go.
 
 ## Who an owner is
 
@@ -164,7 +219,8 @@ act on (`src/ops.ts`). Without it the same lines are only in the log.
 | Wallets have gone unread for fifteen minutes (how many, and what the RPC answered), and when all are read again | hourly |
 | It started from a snapshot, because the data file was missing or unreadable | every time |
 | Today's snapshot could not be written | every six hours |
-| It is watching nine tenths of the wallets it has room for | daily |
+| It is watching nine tenths of the wallets it has room for, or has promised nine tenths of the reads it gives | daily |
+| Wallets have been read later than their plan promises for a quarter of an hour (how many, and the worst case) | hourly |
 | A webhook Stripe signed could not be applied | hourly |
 | A subscription is being paid and belongs to no profile here | daily, per subscription |
 | Stripe could not be read for the daily check | daily |
@@ -178,7 +234,8 @@ All of the above is the service speaking for itself, and the one thing it cannot
 So it is also asked from somewhere else. `.github/workflows/sentinel-watch.yml` runs
 `scripts/check-live.mjs` four times an hour on GitHub's machines: it reads the public `/v1/health` and fails
 when the service does not answer in three tries, when it has not finished a round of reading wallets in ten
-minutes (the API is up and the watcher is not), or when none of the watched wallets can be read. A failed run
+minutes (the API is up and the watcher is not), or when none of the watched wallets can be read. It prints
+how many are read later than promised, and does not fail on that: lateness is the operator's line above. A failed run
 is the notice: GitHub tells whoever watches the repository's workflows. It holds no secret and reads nothing
 that names a wallet or an owner. `node scripts/check-live.mjs` does the same from a terminal.
 
@@ -329,9 +386,11 @@ first, and each step is safe to repeat.
   `/var/lib/lamport-sentinel`, and nothing else.
 - `/etc/lamport-sentinel.env` (root only) holds its settings. The data key in it was made on the server and
   has never left it. Lose it and the stored alert channels cannot be read.
-- It reads the public mainnet RPC once a minute and watches at most 100 wallets in all
-  (`SENTINEL_MAX_WALLETS`); past that, new sign-ups are told it is full. The public RPC is free and rationed.
-  More wallets, or faster reads, need an RPC key of its own.
+- It reads the public mainnet RPC, at the pace that RPC was measured to take, and promises 43 reads a minute
+  in all (a free wallet is one, a paid one three; see "How much it can watch"). Past that, and past 100
+  wallets whatever they cost (`SENTINEL_MAX_WALLETS`), new sign-ups are told it is full. The public RPC is
+  free and rationed. More wallets, or a paid plan sold to more than a couple of people, need an RPC key of
+  its own.
 - The paid plan is not configured there: `/v1/billing` answers `{"enabled": false}`.
 
 After deploying it was checked from outside with a throwaway wallet: sign-in, a first read of the wallet from

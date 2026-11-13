@@ -36,6 +36,10 @@ export interface WatcherOptions {
   reviewedPrograms?: ReadonlySet<string>;
   /** How much history a wallet's baseline is built from on its first pass. */
   historyLimit?: number;
+  /** How often a quiet wallet's accounts are read anyway (default 900 seconds). */
+  accountsEverySeconds?: number;
+  /** How many wallets are read at the same time (default 1). The RPC client keeps the pace; this keeps a slow answer from holding up the rest. */
+  readers?: number;
   now?: () => number;
 }
 
@@ -160,6 +164,7 @@ export class Watcher {
     const raised: StoredEvent[] = [];
     const ctxBase: Omit<WatchContext, "ownerSigned"> = { wallet, baseline, sentinelDelegate: w.sentinelDelegate, drainers: this.opts.drainers ?? new Set(), reviewedPrograms: this.opts.reviewedPrograms, window: this.windows.get(wallet) ?? this.windows.set(wallet, new BurstWindow()).get(wallet)! };
 
+    let somethingNew = false;
     if (record.cursor === null && record.baseline === null) {
       const history = await this.signaturesSince(wallet, null, this.opts.historyLimit ?? 200);
       for (const signature of history) {
@@ -167,8 +172,11 @@ export class Watcher {
         if (tx) baseline.learn(tx, wallet);
       }
       record.cursor = history.at(-1) ?? null;
+      somethingNew = true;
     } else {
-      for (const signature of await this.signaturesSince(wallet, record.cursor, 1000)) {
+      const fresh = await this.signaturesSince(wallet, record.cursor, 1000);
+      somethingNew = fresh.length > 0;
+      for (const signature of fresh) {
         const tx = await this.transaction(signature);
         // a transaction the RPC does not have yet is read on the next pass: the cursor stays before it
         if (!tx) break;
@@ -181,23 +189,34 @@ export class Watcher {
       }
     }
 
-    // the accounts themselves: what an instruction list can hide
-    const accounts = await this.tokenAccounts(wallet);
-    if (record.lastSeenAt !== null) {
-      for (const [address, before] of Object.entries(record.tokenAccounts)) {
-        const after = accounts[address] ?? (await this.accountElsewhere(address));
-        const event = await this.raise(wallet, assessTokenAccount(before, after, ctxBase), null);
+    // The accounts themselves: what an instruction list can hide. What is watched here (who may spend a token
+    // account, who owns it, which program owns the wallet) changes only by a transaction the wallet signs, and
+    // every such transaction is in the list just read. So the accounts are read when that list had something
+    // new, on the first pass, and every quarter of an hour regardless, in case that reasoning has a hole. A
+    // quiet wallet then costs one call a pass instead of four, which is what lets an RPC that rations its
+    // heavy calls keep up with the pace the plans promise.
+    const at = this.now();
+    // a record written before this was kept had its accounts read on every pass: its last pass is when
+    const accountsReadAt = record.accountsReadAt ?? record.lastSeenAt ?? undefined;
+    if (somethingNew || accountsReadAt === undefined || at - accountsReadAt >= (this.opts.accountsEverySeconds ?? 900)) {
+      const accounts = await this.tokenAccounts(wallet);
+      if (record.lastSeenAt !== null) {
+        for (const [address, before] of Object.entries(record.tokenAccounts)) {
+          const after = accounts[address] ?? (await this.accountElsewhere(address));
+          const event = await this.raise(wallet, assessTokenAccount(before, after, ctxBase), null);
+          if (event) raised.push(event);
+        }
+      }
+      record.tokenAccounts = accounts;
+      const info = await this.rpc.call("getAccountInfo", [wallet, { encoding: "base64", commitment: "confirmed" }]);
+      const ownerProgram: string | null = info?.value?.owner ?? null;
+      if (record.ownerProgram && ownerProgram) {
+        const event = await this.raise(wallet, assessWalletAccount(record.ownerProgram, ownerProgram), null);
         if (event) raised.push(event);
       }
+      record.ownerProgram = ownerProgram ?? record.ownerProgram;
+      record.accountsReadAt = at;
     }
-    record.tokenAccounts = accounts;
-    const info = await this.rpc.call("getAccountInfo", [wallet, { encoding: "base64", commitment: "confirmed" }]);
-    const ownerProgram: string | null = info?.value?.owner ?? null;
-    if (record.ownerProgram && ownerProgram) {
-      const event = await this.raise(wallet, assessWalletAccount(record.ownerProgram, ownerProgram), null);
-      if (event) raised.push(event);
-    }
-    record.ownerProgram = ownerProgram ?? record.ownerProgram;
 
     record.baseline = baseline.toJSON();
     record.lastSeenAt = this.now();
@@ -221,10 +240,13 @@ export class Watcher {
   async passAll(only?: (address: string) => boolean): Promise<{ raised: StoredEvent[]; blind: { wallet: string; why: string }[] }> {
     const raised: StoredEvent[] = [];
     const blind: { wallet: string; why: string }[] = [];
-    for (const w of this.store.wallets()) {
-      if (only && !only(w.address)) continue;
-      try { raised.push(...(await this.pass(w))); } catch (e) { blind.push({ wallet: w.address, why: String((e as Error).message ?? e) }); }
-    }
+    const queue = this.store.wallets().filter((w) => !only || only(w.address));
+    const reader = async () => {
+      for (let w = queue.shift(); w; w = queue.shift()) {
+        try { raised.push(...(await this.pass(w))); } catch (e) { blind.push({ wallet: w.address, why: String((e as Error).message ?? e) }); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(this.opts.readers ?? 1, queue.length)) }, reader));
     return { raised, blind };
   }
 

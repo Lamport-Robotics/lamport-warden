@@ -11,7 +11,7 @@ import { Keypair } from "@solana/web3.js";
 import { Accounts } from "../src/accounts.js";
 import { Billing, Stripe } from "../src/billing.js";
 import { Blindness } from "../src/blindness.js";
-import { LAMPORT_MINT, configFrom, nearlyFull, pacer, watchRound } from "../src/main.js";
+import { LAMPORT_MINT, configFrom, nearlyFull, nearlyOutOfReads, pacer, watchRound } from "../src/main.js";
 import type { Post } from "../src/notify.js";
 import { Ops } from "../src/ops.js";
 import { api } from "../src/server.js";
@@ -212,6 +212,9 @@ describe("a line to whoever runs the service", () => {
     expect(nearlyFull(90, 100)).toBe("Sentinel holds 90 of the 100 wallets it takes from anyone. New owners are turned away when it is full.");
     expect(nearlyFull(72, 80, 100)).toBe("Sentinel holds 72 of the 80 wallets it takes from anyone (20 more places are kept for the paid plan). New owners are turned away when it is full.");
     expect(nearlyFull(71, 80, 100)).toBeNull();
+    expect(nearlyOutOfReads(38, 43)).toBeNull();
+    expect(nearlyOutOfReads(39, 43)).toBe("The wallets Sentinel watches are promised 39 of the 43 reads a minute it gives to anyone. New owners are turned away when they are all promised; a faster RPC is what makes room.");
+    expect(nearlyOutOfReads(33, 35, 43)).toContain("(8 more are kept for the paid plan)");
     expect(nearlyFull(1, 1)).not.toBeNull();
     expect(nearlyFull(0, 5)).toBeNull();
   });

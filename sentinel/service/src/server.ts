@@ -45,7 +45,7 @@ export interface ApiDeps {
   limiter?: RateLimiter;
   now?: () => number;
   /** How the watching is going, for /v1/health. */
-  health?: () => { lastPassAt: number | null; blind: number };
+  health?: () => { lastPassAt: number | null; blind: number; late?: number };
   /** The paid tier. Absent: there is no paid tier, and the page is told so. */
   billing?: { api: Billing; webhookSecret: string };
   /** Sends a test to one of a profile's channels. */
@@ -143,7 +143,8 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
 
     if (route === "GET /health") {
       const h = deps.health?.() ?? { lastPassAt: null, blind: 0 };
-      return ok({ ok: true, watching: store.wallets().length, lastPassAt: h.lastPassAt, blind: h.blind });
+      // late: read, but slower than their plan promises
+      return ok({ ok: true, watching: store.wallets().length, lastPassAt: h.lastPassAt, blind: h.blind, late: h.late ?? 0 });
     }
 
     // ---- the extension: "this signature was mine"
