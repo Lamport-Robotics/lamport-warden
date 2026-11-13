@@ -78,6 +78,8 @@ ul.rows li.failing .what span { color: var(--stop); }
 /* what is charged, how it ends, what changes the price: under the button, smaller, and not dimmer than the rest */
 .plan ul.terms { margin: 14px 0 0; font-size: 13.5px; line-height: 1.5; }
 .plan ul.terms li { padding: 4px 0; }
+a.ref { border-bottom: 1px solid var(--mute); }
+a.ref:hover { border-bottom-color: var(--bone); color: var(--bone); }
 
 .foot { display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: center; padding: 28px var(--pad) 40px; border-top: 1px solid var(--line); font-size: 14px; color: var(--mute); }
 .foot nav { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-left: auto; }
