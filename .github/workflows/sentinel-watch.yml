@@ -1,0 +1,32 @@
+name: sentinel-watch
+
+# Asks the live Sentinel service, from outside its own server, whether it is still watching. The service can
+# say that it cannot read a wallet; it cannot say that it has stopped. When this fails, GitHub tells the
+# people who watch this repository's workflows, and that is the notice.
+#
+# It reads one public address that names no wallet and no owner (/v1/health). It holds no secret.
+
+on:
+  schedule:
+    # four times an hour, off the round minutes that everyone's schedules pile onto
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: sentinel-watch
+  cancel-in-progress: true
+
+jobs:
+  watching:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: scripts/check-live.mjs
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Is Sentinel watching?
+        run: node scripts/check-live.mjs

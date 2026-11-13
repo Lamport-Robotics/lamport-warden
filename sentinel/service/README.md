@@ -172,6 +172,19 @@ act on (`src/ops.ts`). Without it the same lines are only in the log.
 No line names a wallet in full, an owner or a Stripe customer. When each was last said is kept in the data
 file, so a restart does not say it all again.
 
+### Watched from outside
+
+All of the above is the service speaking for itself, and the one thing it cannot say is that it has stopped.
+So it is also asked from somewhere else. `.github/workflows/sentinel-watch.yml` runs
+`scripts/check-live.mjs` four times an hour on GitHub's machines: it reads the public `/v1/health` and fails
+when the service does not answer in three tries, when it has not finished a round of reading wallets in ten
+minutes (the API is up and the watcher is not), or when none of the watched wallets can be read. A failed run
+is the notice: GitHub tells whoever watches the repository's workflows. It holds no secret and reads nothing
+that names a wallet or an owner. `node scripts/check-live.mjs` does the same from a terminal.
+
+GitHub switches a scheduled workflow off after sixty days without a commit to the repository, and says so by
+email; it is switched back on from the Actions tab.
+
 ## The API
 
 Everything is JSON under `/v1`. The Sentinel page sends its session as a bearer header, not a cookie, so no
