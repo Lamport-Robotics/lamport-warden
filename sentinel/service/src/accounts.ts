@@ -42,6 +42,42 @@ export class Accounts {
   walletsOf(profile: string): string[] { return Object.entries(this.data.owners).filter(([, o]) => o.profile === profile).map(([address]) => address); }
   channelsOf(profile: string): Channel[] { return this.data.channels.filter((c) => c.profile === profile); }
   reporting(wallet: string): boolean { return !!this.data.owners[wallet]?.reportTokenHash; }
+  paused(wallet: string): boolean { return this.data.owners[wallet]?.paused === true; }
+  profiles(): Profile[] { return Object.values(this.data.profiles); }
+
+  /**
+   * Watches as many of the profile's wallets as its tier allows, oldest first, and pauses the rest. A paused
+   * wallet stays in the profile with what was learned about it, and is read again when there is room.
+   */
+  enforce(profile: string): void {
+    const p = this.data.profiles[profile];
+    if (!p) return;
+    const mine = Object.entries(this.data.owners).filter(([, o]) => o.profile === profile).sort((a, b) => a[1].addedAt - b[1].addedAt);
+    mine.forEach(([address, owner], i) => {
+      if (i < WALLET_LIMIT[p.tier]) { delete owner.paused; this.store.watch({ address }); }
+      else { owner.paused = true; this.store.unwatch(address); }
+    });
+    this.store.flush();
+  }
+
+  /** Changes what the profile pays for. Moving down pauses the wallets over the limit; moving up reads them again. */
+  setTier(profile: string, tier: Profile["tier"]): void {
+    const p = this.data.profiles[profile];
+    if (!p || p.tier === tier) return;
+    p.tier = tier;
+    this.enforce(profile);
+  }
+
+  setBilling(profile: string, billing: Profile["billing"] | null): void {
+    const p = this.data.profiles[profile];
+    if (!p) return;
+    if (billing === null) delete p.billing; else p.billing = billing;
+    this.store.flush();
+  }
+
+  profileBySubscription(subscription: string): Profile | undefined {
+    return Object.values(this.data.profiles).find((p) => p.billing?.subscription === subscription);
+  }
 
   /**
    * A wallet has just proved itself with a signature. Signing in: its profile, or a new one with this wallet
@@ -71,9 +107,13 @@ export class Accounts {
   /** Stops watching a wallet and forgets it. The last one takes the profile with it. */
   removeWallet(profile: string, wallet: string): { ok: true; profileRemoved: boolean } | Refusal {
     if (this.data.owners[wallet]?.profile !== profile) return refuse(404, "that wallet is not in this profile.");
+    // the last wallet takes the profile with it, and a subscription with nobody behind it would go on charging
+    const billing = this.data.profiles[profile]?.billing;
+    if (this.walletsOf(profile).length === 1 && billing && ["active", "trialing", "past_due"].includes(billing.status)) return refuse(409, "this is the profile's last wallet and the paid plan is still running. Cancel the plan first, then remove it.");
     delete this.data.owners[wallet];
     this.store.forget(wallet);
     const profileRemoved = this.walletsOf(profile).length === 0;
+    if (!profileRemoved) this.enforce(profile); // a paused wallet takes the place that came free
     if (profileRemoved) {
       delete this.data.profiles[profile];
       this.data.channels = this.data.channels.filter((c) => c.profile !== profile);
