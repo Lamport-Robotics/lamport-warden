@@ -10,6 +10,7 @@
  *   SENTINEL_POLL_SECONDS how often every wallet is read (default 30)
  *   SENTINEL_NTFY_HOSTS   ntfy hosts alerts may go to, comma-separated (default ntfy.sh)
  *   SENTINEL_TRUST_PROXY  "1" when a proxy this process trusts sets X-Forwarded-For
+ *   SENTINEL_MAX_WALLETS  how many wallets it watches in all (default 100): each costs RPC calls every round
  *
  * The paid plan is there only when all four of these are set, and nothing is sold until checkout is opened:
  *   SENTINEL_STRIPE_SECRET_KEY, SENTINEL_STRIPE_WEBHOOK_SECRET
@@ -32,7 +33,7 @@ import { NonceBook } from "./signin.js";
 import { FileStore } from "./store.js";
 import { Watcher } from "./watcher.js";
 
-export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; ntfyHosts: Set<string>; trustProxy: boolean; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; maxWallets: number; ntfyHosts: Set<string>; trustProxy: boolean; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -67,10 +68,12 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const pollSeconds = Number(env.SENTINEL_POLL_SECONDS ?? 30);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, why: "SENTINEL_PORT has to be a port number." };
   if (!Number.isFinite(pollSeconds) || pollSeconds < 5) return { ok: false, why: "SENTINEL_POLL_SECONDS has to be 5 or more." };
+  const maxWallets = Number(env.SENTINEL_MAX_WALLETS ?? 100);
+  if (!Number.isInteger(maxWallets) || maxWallets < 1) return { ok: false, why: "SENTINEL_MAX_WALLETS has to be a whole number above zero." };
   const ntfyHosts = new Set((env.SENTINEL_NTFY_HOSTS ?? "ntfy.sh").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean));
   const billing = billingFrom(env, origin, rpcUrl);
   if (!billing.ok) return billing;
-  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", billing: billing.billing } };
+  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, maxWallets, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", billing: billing.billing } };
 }
 
 /**
@@ -93,7 +96,7 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   if (!read.ok) throw new Error(read.why);
   const cfg = read.config;
   const store = new FileStore(join(cfg.dataDir, "sentinel.json"));
-  const accounts = new Accounts(store, cfg.dataKey, { ntfyHosts: cfg.ntfyHosts });
+  const accounts = new Accounts(store, cfg.dataKey, { ntfyHosts: cfg.ntfyHosts, maxWallets: cfg.maxWallets });
   const notifier = new ChannelNotifier(accounts);
   const watcher = new Watcher(new HttpRpc(cfg.rpcUrl), store, notifier);
   const state = { lastPassAt: null as number | null, blind: 0 };

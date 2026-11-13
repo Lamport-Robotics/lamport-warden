@@ -252,6 +252,23 @@ describe("a profile's wallets", () => {
   });
 });
 
+describe("a full house", () => {
+  it("takes no new wallet past what the service can read, and still signs in the ones it has", () => {
+    const store = new MemoryStore();
+    const accounts = new Accounts(store, KEY, { maxWallets: 2 });
+    const a = accounts.admit(alice.address, null, T0);
+    expect(a).toMatchObject({ ok: true });
+    expect(accounts.admit(second.address, a.ok ? a.profile : "", T0)).toMatchObject({ ok: true });
+    expect(accounts.admit(bob.address, null, T0)).toEqual({ ok: false, status: 503, why: "Sentinel is watching as many wallets as it can for now. Try again later." });
+    expect(accounts.admit(third.address, a.ok ? a.profile : "", T0)).toMatchObject({ ok: false, status: 503 });
+    expect(accounts.admit(alice.address, null, T0)).toMatchObject({ ok: true, created: false }); // an owner already here still gets in
+    expect(store.wallets()).toHaveLength(2);
+    // room comes back when a wallet is removed
+    accounts.removeWallet(a.ok ? a.profile : "", second.address);
+    expect(accounts.admit(bob.address, null, T0)).toMatchObject({ ok: true, created: true });
+  });
+});
+
 describe("where alerts go", () => {
   it("takes an ntfy topic on a host it was told about, and nothing else", () => {
     const hosts = new Set(["ntfy.sh"]);
@@ -469,7 +486,8 @@ describe("the process", () => {
   const env = { SENTINEL_RPC_URL: "https://rpc.example", SENTINEL_DATA_KEY: randomBytes(32).toString("base64") };
 
   it("starts only with an RPC and a data key, and says which is missing", () => {
-    expect(configFrom(env)).toMatchObject({ ok: true, config: { origin: ORIGIN, port: 8791, pollSeconds: 30, trustProxy: false } });
+    expect(configFrom(env)).toMatchObject({ ok: true, config: { origin: ORIGIN, port: 8791, pollSeconds: 30, maxWallets: 100, trustProxy: false } });
+    expect(configFrom({ ...env, SENTINEL_MAX_WALLETS: "0" })).toMatchObject({ ok: false });
     expect(configFrom({ ...env, SENTINEL_RPC_URL: undefined })).toEqual({ ok: false, why: "SENTINEL_RPC_URL has to be the address of a Solana RPC." });
     expect(configFrom({ ...env, SENTINEL_RPC_URL: "ftp://x" })).toMatchObject({ ok: false });
     expect(configFrom({ ...env, SENTINEL_DATA_KEY: "c2hvcnQ=" })).toMatchObject({ ok: false, why: expect.stringContaining("SENTINEL_DATA_KEY") });

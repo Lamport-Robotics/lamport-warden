@@ -25,7 +25,13 @@ await build({
     rollupOptions: {
       input: { sentinel: join(root, 'sentinel', 'service', 'src', 'cli.ts') },
       external: [...builtinModules, ...builtinModules.map((m) => `node:${m}`)],
-      output: { format: 'es', entryFileNames: '[name].mjs', inlineDynamicImports: true },
+      output: {
+        format: 'es', entryFileNames: '[name].mjs', inlineDynamicImports: true,
+        // Some bundled dependencies were written for CommonJS and read __filename. In an ES module that name
+        // does not exist, and one of them (a native-addon loader) then left Error.prepareStackTrace broken:
+        // the next error anywhere crashed the process. scripts/smoke-service.mjs fails if that comes back.
+        banner: "import { fileURLToPath as __sentinelFileURLToPath } from 'node:url';\nimport { dirname as __sentinelDirname } from 'node:path';\nconst __filename = __sentinelFileURLToPath(import.meta.url);\nconst __dirname = __sentinelDirname(__filename);",
+      },
     },
   },
   ssr: { noExternal: true },

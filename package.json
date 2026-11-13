@@ -16,6 +16,7 @@
     "build:service": "node scripts/build-service.mjs",
     "build:web": "node scripts/build-web.mjs",
     "start:service": "node sentinel/service/dist/sentinel.mjs",
+    "test:service": "node scripts/build-service.mjs && node scripts/smoke-service.mjs",
     "test": "vitest run",
     "test:browser": "node scripts/build.mjs && node scripts/build-fixtures.mjs && node scripts/build-web.mjs && vitest run --config vitest.browser.config.ts",
     "test:wallets": "node scripts/build.mjs && node scripts/build-fixtures.mjs && vitest run --config vitest.wallets.config.ts",
