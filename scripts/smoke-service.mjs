@@ -21,11 +21,15 @@ writeFileSync(probe, `setTimeout(() => { try { const e = new Error("probe"); Err
 
 // an RPC that knows nothing: every wallet is empty, which is all a first read needs
 let rpcDown = false;
+let wsRefused = 0;
 const rpc = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => { body += c; });
   req.on('end', () => {
     if (rpcDown) { res.statusCode = 503; res.end('{}'); return; }
+    // This RPC has no websocket: the service's request for one is refused, as some RPCs do. The service must
+    // go on reading wallets in turn all the same, which is what the rest of this checks.
+    if (req.method !== 'POST') { wsRefused += 1; res.statusCode = 400; res.end(); return; }
     const { method } = JSON.parse(body);
     res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: method === 'getSignaturesForAddress' ? [] : { value: method === 'getAccountInfo' ? { owner: '11111111111111111111111111111111' } : [] } }));
@@ -73,6 +77,10 @@ rpcDown = false;
 const removed = await call('DELETE', `/wallets/${address}`, undefined, session);
 if (removed.body.profileRemoved !== true) fail('the wallet could not be removed');
 alive('at the end');
+// the push line was asked for, refused by this RPC, and said to be down; and none of the above needed it
+const health = (await call('GET', '/health')).body;
+if (wsRefused < 1) fail('the service never asked the RPC for a websocket');
+if (health.push !== 'down') fail(`the push line should be reported as down against an RPC without one, and is "${health.push}"`);
 child.kill();
 rpc.close();
-console.log('smoke: the built service started, read a wallet, survived an RPC failure and removed the wallet');
+console.log('smoke: the built service started, read a wallet with no push line, survived an RPC failure and removed the wallet');

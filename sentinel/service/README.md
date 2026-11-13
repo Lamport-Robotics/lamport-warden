@@ -48,6 +48,28 @@ table's level; sixty days of a wallet's ordinary payments and swaps raise nothin
 what the wallet is taken to trust. `service.test.ts` is the server: each check that keeps one owner out of
 another's profile was also removed in turn, to see a test fail for it.
 
+## Told as it happens, and read in turn
+
+Two things cause a wallet to be read.
+
+**Its turn**, at the pace its plan promises. This is the floor: it needs nothing but an RPC that answers.
+
+**The RPC saying so** (`src/push.ts`). The service keeps one websocket to the RPC and asks to be told when a
+watched address is mentioned in a transaction. When it is, that wallet is read next, ahead of its turn.
+Nothing that is pushed is believed: it is only a reason to read sooner, and what happened is then read and
+judged exactly as on any other pass. A wallet is read on the RPC's word at most every quarter of its promised
+pace, so one that never stops transacting costs a few times its reads and no more. The line is asked twice a
+minute whether it is still there and put up again when it is not; `/v1/health` says `push: on`, `down` or
+`off`, and whoever runs the service is told when it has been down for a quarter of an hour. `SENTINEL_PUSH=off`
+turns it off; `SENTINEL_RPC_WS_URL` names the websocket when it is not the RPC's own address.
+
+Run for real against the public RPC, watching a public wallet that transacts about every thirteen seconds:
+with the line up, each new transaction had been read 4 to 8 seconds after it happened (median 6). With it
+off, the wallet was read every 61 seconds, as its plan says, so a transaction waited up to a minute.
+
+Neither plan promises this, and it is not counted in what a wallet costs: the promise is the pace, and the
+pace is kept with the line down.
+
 ## How a pass goes
 
 - The first pass builds the wallet's baseline from its history and raises nothing: what already happened is
@@ -77,8 +99,13 @@ from the server on 2026-11-13:
 |---|---|
 | `getSignaturesForAddress` (what is new for a wallet) | about 10 in ten seconds; at two a second, half were refused |
 | `getTokenAccountsByOwner` | the same |
+| `getTransaction` | the same |
 | `getAccountInfo` | four a second without a refusal |
 | several calls in one batch request | refused every time |
+| a websocket subscription to an address being mentioned | sixty-one on one connection, all taken; word of a transaction within a second or so |
+
+Each of the three rationed calls has an allowance of its own: eight of each inside ten seconds, twenty-four
+calls in all, and none was refused.
 
 Each refusal came with "retry after 10 seconds", and the signature list took over a second to answer. Read
 the old way (four calls a wallet, one wallet after another) that is about thirty wallets a minute, not the
@@ -86,8 +113,9 @@ hundred the first deployment allowed itself.
 
 What the service does about it:
 
-- **It asks at a pace the RPC takes** (`src/rpc.ts`): the two rationed calls on one lane, everything else on
-  another, each spaced evenly. A refusal is waited out for as long as the RPC says, by every call of that
+- **It asks at a pace the RPC takes** (`src/rpc.ts`): each rationed call on a lane of its own, everything
+  else on another, each spaced evenly. Reading a new wallet's history is work that can wait: it takes the
+  turns nobody else wants, so one sign-up does not hold back the transaction an alert is about. A refusal is waited out for as long as the RPC says, by every call of that
   kind. The public RPC's measured pace is the default when that is the RPC; a paid RPC is told its own
   (`SENTINEL_RPC_HEAVY_PER_10S`, `SENTINEL_RPC_LIGHT_PER_10S`).
 - **A quiet wallet costs one call**, as above, so the rationed lane is spent on reads and not on asking again
@@ -100,8 +128,13 @@ What the service does about it:
   minute, a paid one three. Unless set, four fifths of the rationed pace is promised and the rest is kept
   for what a read leads to: a new transaction to fetch, a first look at a new wallet's history. On the public
   RPC that is 43 reads a minute: forty-three free wallets, or fourteen paid ones, or a mix.
-- **A new wallet takes its turn.** Its first read costs three of the rationed calls and up to two hundred
-  light ones for its history. It is due at once and is behind by how long it has waited, so many arriving
+- **One pass reads so much and no more.** At most 25 new transactions, the rest on the next pass, and a
+  thousand of a wallet's token accounts however many it has (an exchange's wallet has thousands). A wallet
+  that transacts without pause cannot hold a reader or the RPC's allowance for as long as it likes. It is
+  read behind what it does, and never skipped ahead: with more than a thousand unread, the oldest are lost.
+- **A new wallet takes its turn.** Its first read fetches up to two hundred transactions of its history, at
+  the rationed pace and behind everyone else's news: about four minutes on the public RPC for a wallet with
+  that much history, during which the page says "Not read yet". It is due at once and is behind by how long it has waited, so many arriving
   together are read among the wallets already here and do not push them all back.
 - **Run for real**, from a laptop against the public RPC, with new empty wallets all added in the same
   second: with 24, every wallet was read within its minute from the start and nothing was refused. With 60,
@@ -221,6 +254,7 @@ act on (`src/ops.ts`). Without it the same lines are only in the log.
 | Today's snapshot could not be written | every six hours |
 | It is watching nine tenths of the wallets it has room for, or has promised nine tenths of the reads it gives | daily |
 | Wallets have been read later than their plan promises for a quarter of an hour (how many, and the worst case) | hourly |
+| The RPC has not been saying when transactions happen for a quarter of an hour (the push line is down) | every six hours |
 | A webhook Stripe signed could not be applied | hourly |
 | A subscription is being paid and belongs to no profile here | daily, per subscription |
 | Stripe could not be read for the daily check | daily |
