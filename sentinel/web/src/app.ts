@@ -7,7 +7,7 @@
  */
 import { getWallets } from "@wallet-standard/app";
 import { PAGE_ASKS, WARDEN_ANSWERS, type PageAnswer, type PageAsk } from "../../../src/sentinel-link.js";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, purchaseTerms, renewalTerms } from "../../service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, paceText, purchaseTerms, renewalTerms } from "../../service/src/plans.js";
 import { dayOf } from "../../service/src/notices.js";
 import { LINK_STATEMENT, SIGN_IN_STATEMENT, signInText } from "../../service/src/signin-text.js";
 
@@ -165,6 +165,7 @@ function render(): void {
     return li;
   }));
   $("walletLimit").textContent = `${mine.wallets.length} of ${mine.limits.wallets} wallets on this plan.`;
+  $("pace").textContent = paceText(mine.limits.pollSeconds, watching);
   const add = $("addChoices");
   if (mine.wallets.length < mine.limits.wallets) choices(add, "link"); else add.replaceChildren();
 
@@ -274,9 +275,13 @@ function plans(mine: Me): void {
   $("plans").replaceChildren(watch, pro);
 }
 
+/** How the service is reading wallets right now, as far as it says: null when it did not say. */
+let watching: { push: boolean; late: boolean } | null = null;
+
 async function refresh(): Promise<void> {
   if (!session) { me = null; render(); return; }
-  const [m, e, b] = await Promise.all([call("GET", "/me"), call("GET", "/events"), call("GET", "/billing")]);
+  const [m, e, b, h] = await Promise.all([call("GET", "/me"), call("GET", "/events"), call("GET", "/billing"), call("GET", "/health")]);
+  watching = h.status === 200 && h.body ? { push: h.body.push === "on", late: Number(h.body.late) > 0 } : null;
   if (m.status !== 200) { if (m.status !== 401) say(String(m.body?.error ?? "Sentinel could not be reached."), true); me = m.status === 401 ? null : me; render(); return; }
   me = m.body as Me;
   alerts = e.status === 200 && Array.isArray(e.body.events) ? e.body.events : alerts;

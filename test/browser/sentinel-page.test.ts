@@ -100,6 +100,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
   };
   const billing = new Billing(billingCfg, accounts, chain, new Stripe(billingCfg.secretKey, stripeFetch));
   let apiPort = 0;
+  /** What the service says of its own watching: the page tells the owner. */
+  const healthNow: { lastPassAt: number | null; blind: number; late: number; push: "on" | "down" | "off" } = { lastPassAt: 1, blind: 0, late: 0, push: "off" };
   /** Stripe telling the service something, signed as Stripe signs it. */
   const webhook = async (event: unknown) => {
     const raw = JSON.stringify(event), t = Math.floor(Date.now() / 1000);
@@ -108,7 +110,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
   };
 
   beforeAll(async () => {
-    back = await listen({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async (w, s) => { confirmed.push([w, s]); return true; } }, nonces: new NonceBook(), origin: ARMING, billing: { api: billing, webhookSecret: WHSEC }, testChannel: async (profile, id) => { testsSent.push([profile, id]); return { ok: true }; } }, { port: 0 });
+    back = await listen({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async (w, s) => { confirmed.push([w, s]); return true; } }, nonces: new NonceBook(), origin: ARMING, billing: { api: billing, webhookSecret: WHSEC }, testChannel: async (profile, id) => { testsSent.push([profile, id]); return { ok: true }; }, health: () => healthNow }, { port: 0 });
     apiPort = (back.address() as { port: number }).port;
     const dir = mkdtempSync(join(tmpdir(), "warden-cert-"));
     execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem"), "-days", "2", "-subj", "/CN=warden.lamportrobotics.com"], { stdio: "ignore" });
@@ -143,6 +145,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     expect(await page.locator("#wallets li .what b").innerText()).toBe(W1);
     expect(await page.locator("#wallets li .what span").innerText()).toContain("Not read yet");
     expect(await page.locator("#walletLimit").innerText()).toBe("1 of 3 wallets on this plan.");
+    expect(await page.locator("#pace").innerText()).toBe("Each wallet is read every minute."); // what its plan promises, and nothing the service is not doing
     expect(await page.locator("#signedOut").isHidden()).toBe(true);
     // the wallet signed a text naming this site, with the service's one-time number
     const signed: string[] = await page.evaluate(() => (window as any).__signed);
@@ -301,9 +304,12 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     // Stripe says so, signed: now it is Pro
     subscriptions.set("sub_page", { id: "sub_page", customer: "cus_page", status: "active", metadata: { profile }, items: { data: [{ id: "si_page", price: { id: "price_holder" } }] } });
     expect(await webhook({ type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_page", client_reference_id: profile } } })).toBe(200);
+    // and the service, meanwhile, is being told of transactions as they happen, and is running behind
+    Object.assign(healthNow, { push: "on", late: 2 });
     await page.reload();
     await expect.poll(() => page.locator("#plans .plan.mine h3").innerText(), { timeout: 10_000 }).toBe("Pro");
     expect(await page.locator("#walletLimit").innerText()).toBe("2 of 10 wallets on this plan.");
+    expect(await page.locator("#pace").innerText()).toBe("Each wallet is read every 20 seconds, and at once when the network reports a transaction in it. Sentinel is behind right now: some wallets are being read later than that.");
     expect(await page.locator("#plans").innerText()).toContain(renewalTerms(1000, 1500, 1000, 250_000));
     expect(renewalTerms(1000, 1500, 1000, 250_000)).toContain("It renews every month at $10 until you cancel");
     expect(await page.locator("#wallets li .what span").first().innerText()).toContain("Not read yet");

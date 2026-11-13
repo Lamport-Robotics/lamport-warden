@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../sentinel/service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, paceText } from "../sentinel/service/src/plans.js";
 import { LAMPORT_MINT, configFrom } from "../sentinel/service/src/main.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,6 +23,15 @@ describe("the plans, wherever they are described", () => {
     expect(page).toContain(`${HOLDER_MIN_LAMPORT.toLocaleString("en-US")} $LAMPORT`);
     // rescue is never listed as something Pro gives today
     expect(page).not.toMatch(/Pro (includes|gives you|comes with) rescue/i);
+  });
+
+  it("an owner is told how their wallets are being read, as it is right now", () => {
+    expect(paceText(PLANS.watch.pollSeconds, null)).toBe("Each wallet is read every minute."); // the service did not say: only the promise
+    expect(paceText(PLANS.pro.pollSeconds, { push: false, late: false })).toBe("Each wallet is read every 20 seconds.");
+    expect(paceText(PLANS.watch.pollSeconds, { push: true, late: false })).toBe("Each wallet is read every minute, and at once when the network reports a transaction in it.");
+    // behind is said, never hidden, and nothing faster is claimed than is happening
+    expect(paceText(PLANS.pro.pollSeconds, { push: true, late: true })).toBe("Each wallet is read every 20 seconds, and at once when the network reports a transaction in it. Sentinel is behind right now: some wallets are being read later than that.");
+    expect(paceText(PLANS.watch.pollSeconds, { push: false, late: true })).toBe("Each wallet is read every minute. Sentinel is behind right now: some wallets are being read later than that.");
   });
 
   it("the definition itself is the one the service runs with", () => {
