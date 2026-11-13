@@ -2,6 +2,10 @@
 
 What to paste into the developer dashboard. Keep this file in step with what is submitted.
 
+Item ID: `dmlhclkglnpkdhidfjfgjfdjnblnalea`, created on 2026-11-13 from `lamport-warden-0.5.0.zip` and
+submitted for review the same day: Unlisted, free, all regions, published automatically once it passes.
+Google flags the host permission for an in-depth review, so expect it to take longer than a few days.
+
 ## Store listing tab
 
 **Name** (from the manifest): Lamport Warden
@@ -48,9 +52,12 @@ extension never sees. It is open source: https://github.com/Lamport-Robotics/lam
 
 **Small promo tile** (440 x 280): not made yet.
 
-**Website:** https://warden.lamportrobotics.com
+**Store icon** (128 x 128): `public/icons/icon128.png`.
 
-**Support:** support@lamportrobotics.com
+**Homepage URL:** https://warden.lamportrobotics.com
+
+**Support URL:** https://github.com/Lamport-Robotics/lamport-warden/issues (the field takes a link, not an
+address). By email: support@lamportrobotics.com
 
 ## Privacy practices tab
 
@@ -80,4 +87,5 @@ lending.
 ## Distribution tab
 
 Free. All regions. Public, or Unlisted for a first round with testers: unlisted is reviewed the same way and
-anyone with the link can install it.
+anyone with the link can install it. Submitted as Unlisted; switching to Public later is a change on this
+tab that has to be submitted again.
