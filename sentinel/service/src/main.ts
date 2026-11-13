@@ -27,13 +27,14 @@ import { join } from "node:path";
 import { Accounts } from "./accounts.js";
 import { Billing, Stripe, type BillingConfig } from "./billing.js";
 import { dataKeyFrom } from "./crypto.js";
+import { Blindness, RESUMED_SENTENCE, stoppedSentence } from "./blindness.js";
 import { ChannelNotifier } from "./notify.js";
 import { PLANS } from "./plans.js";
 import { HttpRpc } from "./rpc.js";
 import { listen } from "./server.js";
 import { NonceBook } from "./signin.js";
-import { FileStore } from "./store.js";
-import { Watcher } from "./watcher.js";
+import { FileStore, type MemoryStore } from "./store.js";
+import { Watcher, type Notifier } from "./watcher.js";
 
 export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; ntfyHosts: Set<string>; trustProxy: boolean; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
@@ -117,6 +118,39 @@ export function pacer(tierOf: (wallet: string) => "watch" | "pro", seconds: { wa
   };
 }
 
+/**
+ * One round of watching: read the wallets that are due, keep count of the ones that could not be read, and
+ * tell an owner when theirs has gone unread for long enough to matter, and again when it is read.
+ */
+export function watchRound(o: {
+  watcher: Pick<Watcher, "passAll">; store: MemoryStore; notifier: Notifier; pace: ReturnType<typeof pacer>; blindness: Blindness;
+  state: { lastPassAt: number | null; blind: number }; log?: (line: string) => void;
+}): (now?: number) => Promise<void> {
+  const blindNow = new Set<string>();
+  const log = o.log ?? console.error;
+  return async (now = Math.floor(Date.now() / 1000)) => {
+    const { blind } = await o.watcher.passAll((w) => o.pace.pick(w, now));
+    const failed = new Set(blind.map((b) => b.wallet));
+    for (const w of o.pace.tried()) {
+      const read = !failed.has(w);
+      if (read) blindNow.delete(w); else blindNow.add(w);
+      const news = o.blindness.note(w, read, now);
+      if (!news) continue;
+      const sentence = news === "stopped" ? stoppedSentence(o.blindness.afterSeconds) : RESUMED_SENTENCE;
+      o.store.addEvent({ wallet: w, signature: "", slot: 0, at: now, level: "alert", signals: [news === "stopped" ? "watch_stopped" : "watch_resumed"], sentence, rescueWorthy: false });
+      await o.notifier.notify(w, "alert", sentence).catch(() => undefined);
+    }
+    const watched = new Set(o.store.wallets().map((w) => w.address));
+    for (const w of blindNow) if (!watched.has(w)) blindNow.delete(w);
+    o.pace.forget((w) => watched.has(w));
+    o.blindness.forget((w) => watched.has(w));
+    o.state.lastPassAt = now;
+    o.state.blind = blindNow.size;
+    // which wallet, and why, goes to the log and nowhere else
+    for (const b of blind) log(`sentinel: could not read ${b.wallet.slice(0, 4)}..${b.wallet.slice(-4)}: ${b.why}`);
+  };
+}
+
 export async function run(env: Record<string, string | undefined>): Promise<() => Promise<void>> {
   const read = configFrom(env);
   if (!read.ok) throw new Error(read.why);
@@ -129,20 +163,7 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
 
   // each wallet at its plan's pace: the paid plan's more often
   const pace = pacer((w) => accounts.profile(accounts.profileOf(w) ?? "")?.tier ?? "watch", { watch: cfg.pollSeconds, pro: cfg.proPollSeconds });
-  const blindNow = new Set<string>();
-  const stopRounds = startRounds(async () => {
-    const now = Math.floor(Date.now() / 1000);
-    const { blind } = await watcher.passAll((w) => pace.pick(w, now));
-    for (const w of pace.tried()) blindNow.delete(w);
-    for (const b of blind) blindNow.add(b.wallet);
-    const watched = new Set(store.wallets().map((w) => w.address));
-    for (const w of blindNow) if (!watched.has(w)) blindNow.delete(w);
-    pace.forget((w) => watched.has(w));
-    state.lastPassAt = Math.floor(Date.now() / 1000);
-    state.blind = blindNow.size;
-    // which wallet, and why, goes to the log and nowhere else
-    for (const b of blind) console.error(`sentinel: could not read ${b.wallet.slice(0, 4)}..${b.wallet.slice(-4)}: ${b.why}`);
-  }, Math.min(cfg.pollSeconds, cfg.proPollSeconds));
+  const stopRounds = startRounds(watchRound({ watcher, store, notifier, pace, blindness: new Blindness(), state }), Math.min(cfg.pollSeconds, cfg.proPollSeconds));
 
   const billing = cfg.billing ? new Billing(cfg.billing, accounts, new HttpRpc(cfg.billing.holderRpcUrl), new Stripe(cfg.billing.secretKey)) : null;
   // once a day: whoever stopped holding the token moves to the full price from their next bill, and the other way round
@@ -151,7 +172,7 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
     if (moved || failed) console.error(`sentinel: holder prices checked, ${moved} moved, ${failed} could not be checked`);
   }, 86_400) : () => undefined;
 
-  const server = await listen({ accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => state, ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}) }, { port: cfg.port, trustProxy: cfg.trustProxy });
+  const server = await listen({ accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => state, testChannel: (profile, id) => notifier.test(profile, id), ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}) }, { port: cfg.port, trustProxy: cfg.trustProxy });
   console.error(`sentinel: watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : "set up, checkout closed") : "not set up"}`);
   return async () => { stopRounds(); stopReprice(); await new Promise<void>((r) => server.close(() => r())); };
 }

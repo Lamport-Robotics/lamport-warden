@@ -47,6 +47,8 @@ export interface ApiDeps {
   health?: () => { lastPassAt: number | null; blind: number };
   /** The paid tier. Absent: there is no paid tier, and the page is told so. */
   billing?: { api: Billing; webhookSecret: string };
+  /** Sends a test to one of a profile's channels. */
+  testChannel?: (profile: string, channelId: string) => Promise<{ ok: true } | { ok: false; status: number; why: string }>;
 }
 
 /** So many per window, per key. In memory: a restart forgives everyone, which is fine for what these guard. */
@@ -193,6 +195,13 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
     }
     if (req.method === "DELETE" && parts[1] === "channels" && parts[2] && parts.length === 3) {
       return accounts.removeChannel(session, parts[2]) ? ok() : no(404, "there is no such channel.");
+    }
+    if (req.method === "POST" && parts[1] === "channels" && parts[2] && parts[3] === "test" && parts.length === 4) {
+      if (!deps.testChannel) return no(501, "test alerts are not switched on here.");
+      // a few at a time: this sends a message somewhere on the owner's say-so, and nothing should be made to send many
+      if (!limiter.allow(`test:${session}`, 5, 600, t)) return SLOW_DOWN;
+      const r = await deps.testChannel(session, parts[2]);
+      return r.ok ? ok() : no(r.status, r.why);
     }
 
     if (route === "GET /billing") return ok(deps.billing ? await deps.billing.api.quote(session) : { enabled: false });

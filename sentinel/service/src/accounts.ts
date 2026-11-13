@@ -209,6 +209,16 @@ export class Accounts {
     return this.channelsOf(profile).filter((c) => plan.kinds.includes(c.kind)).sort((a, b) => a.addedAt - b.addedAt).slice(0, plan.channels);
   }
 
+  /** One of the profile's channels, with its address, if alerts go there now. For sending it a test. */
+  channelOf(profile: string, id: string): { ok: true; kind: ChannelKind; url: string } | Refusal {
+    const c = this.channelsOf(profile).find((x) => x.id === id);
+    if (!c) return refuse(404, "there is no such channel.");
+    if (!this.active(profile).some((x) => x.id === id)) return refuse(409, "that channel is not in use on this plan, so nothing is sent to it.");
+    const url = unseal(this.dataKey, c.target);
+    const clean = url === null ? null : cleanTarget(url, this.ntfyHosts);
+    return clean && clean.kind === c.kind && clean.url === url ? { ok: true, kind: clean.kind, url: clean.url } : refuse(409, "that channel's address can no longer be read. Remove it and add it again.");
+  }
+
   /** The profile's channels as the page shows them: what kind, a hint of the address, and whether alerts go there now. */
   channelViews(profile: string): { id: string; kind: ChannelKind; hint: string; active: boolean }[] {
     const active = new Set(this.active(profile).map((c) => c.id));

@@ -77,6 +77,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
   const store = new MemoryStore();
   const accounts = new Accounts(store, Buffer.alloc(32, 5));
   const confirmed: [string, string][] = [];
+  const testsSent: [string, string][] = [];
   const pageErrors: string[] = [];
 
   // The paid plan, with Stripe and the chain stood in for: Stripe keeps a subscription the way Stripe does,
@@ -107,7 +108,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
   };
 
   beforeAll(async () => {
-    back = await listen({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async (w, s) => { confirmed.push([w, s]); return true; } }, nonces: new NonceBook(), origin: ARMING, billing: { api: billing, webhookSecret: WHSEC } }, { port: 0 });
+    back = await listen({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async (w, s) => { confirmed.push([w, s]); return true; } }, nonces: new NonceBook(), origin: ARMING, billing: { api: billing, webhookSecret: WHSEC }, testChannel: async (profile, id) => { testsSent.push([profile, id]); return { ok: true }; } }, { port: 0 });
     apiPort = (back.address() as { port: number }).port;
     const dir = mkdtempSync(join(tmpdir(), "warden-cert-"));
     execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem"), "-days", "2", "-subj", "/CN=warden.lamportrobotics.com"], { stdio: "ignore" });
@@ -175,6 +176,10 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     await expect.poll(() => page.locator("#channels li .what b").innerText()).toBe(`ntfy.sh/…${target.slice(-4)}`);
     expect(accounts.targetsFor(W1)).toEqual([target]);
     expect(await page.content()).not.toContain(target.slice(16, 36));
+    // the owner can try it before they need it
+    await page.locator("#channels li").getByRole("button", { name: "Send a test" }).click();
+    await expect.poll(() => page.locator("#notice").innerText()).toContain("Sent.");
+    expect(testsSent).toEqual([[accounts.profileOf(W1), accounts.channelViews(accounts.profileOf(W1)!)[0]!.id]]);
     // something that is not a topic is refused in the service's own words
     await page.locator("#ntfyTarget").fill("https://evil.example/aaaaaaaaaaaa");
     await page.getByRole("button", { name: "Add", exact: true }).click();

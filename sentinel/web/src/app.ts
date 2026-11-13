@@ -15,7 +15,7 @@ const SESSION = "sentinel.session";
 
 interface WalletRow { address: string; armed: boolean; reporting: boolean; paused: boolean; lastReadAt: number | null }
 interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack"; hint: string; active: boolean }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number } }
-interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; sentence: string; answer: string | null }
+interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; signals: string[]; sentence: string; answer: string | null }
 type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
 
@@ -168,7 +168,17 @@ function render(): void {
   if (mine.wallets.length < mine.limits.wallets) choices(add, "link"); else add.replaceChildren();
 
   const kindName = { ntfy: "ntfy topic", discord: "Discord channel", slack: "Slack channel" } as const;
-  $("channels").replaceChildren(...(mine.channels.length ? mine.channels.map((c) => row(c.hint, c.active ? `${kindName[c.kind]}. Alerts are sent here.` : `${kindName[c.kind]}. Not in use: this plan does not cover it.`, [sure("Remove", "Remove?", async () => { if (await done(call("DELETE", `/channels/${c.id}`), "Removed.")) await refresh(); })], "addr")) : [row("No channel yet", "Sentinel is watching, but it has nowhere to tell you. Alerts are still listed on this page.")]));
+  $("channels").replaceChildren(...(mine.channels.length ? mine.channels.map((c) => {
+    const acts: HTMLElement[] = [];
+    if (c.active) {
+      // so an owner knows an alert would reach them before they need one
+      const test = el("button", "Send a test", "small");
+      test.addEventListener("click", async () => { test.disabled = true; await done(call("POST", `/channels/${c.id}/test`), "Sent. If nothing arrives within a minute, the address is wrong or the app is not subscribed to it."); test.disabled = false; });
+      acts.push(test);
+    }
+    acts.push(sure("Remove", "Remove?", async () => { if (await done(call("DELETE", `/channels/${c.id}`), "Removed.")) await refresh(); }));
+    return row(c.hint, c.active ? `${kindName[c.kind]}. Alerts are sent here.` : `${kindName[c.kind]}. Not in use: this plan does not cover it.`, acts, "addr");
+  }) : [row("No channel yet", "Sentinel is watching, but it has nowhere to tell you. Alerts are still listed on this page.")]));
   $("channelLimit").textContent = mine.limits.kinds.length > 1 ? `Up to ${mine.limits.channels} channels on this plan: ntfy topics, Discord webhooks and Slack webhooks.` : "One ntfy channel on this plan. Pro adds Discord and Slack, and up to five channels.";
   $<HTMLInputElement>("ntfyTarget").placeholder = mine.limits.kinds.length > 1 ? "An ntfy topic, or a Discord or Slack webhook address" : "https://ntfy.sh/a-long-topic-name";
 
@@ -178,7 +188,9 @@ function render(): void {
     head.append(el("span", a.level === "urgent" ? "Urgent" : a.level === "alert" ? "Alert" : "Note", `tag ${a.level}`), document.createTextNode(a.sentence));
     what.append(head, el("span", `${short(a.wallet)}${a.at ? ` · ${ago(a.at)}` : ""}${a.answer === "this_was_me" ? " · you said this was you" : a.answer === "ignore" ? " · ignored" : ""}`));
     li.append(what);
-    if (!a.answer && a.level !== "info") {
+    // a notice about the watching itself is not something the owner did or did not do: it has no answer
+    const aboutWatching = Array.isArray(a.signals) && a.signals.some((s) => s === "watch_stopped" || s === "watch_resumed");
+    if (!a.answer && a.level !== "info" && !aboutWatching) {
       const acts = el("div", "", "acts");
       const was = el("button", "This was me", "small"), ignore = el("button", "Ignore", "small");
       was.addEventListener("click", async () => { if (await done(call("POST", `/events/${a.id}/answer`, { answer: "this_was_me" }), "Noted. Sentinel will treat who that paid as someone this wallet pays.")) await refresh(); });
