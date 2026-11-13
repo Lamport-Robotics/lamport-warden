@@ -1,7 +1,8 @@
 # Sentinel service
 
-The watcher: it reads what happened to each watched wallet, decides what it means, and tells the owner. It
-holds no key and moves nothing. There is no server around it yet (no sign-in, no rescuer, no deployment).
+The watcher, and the small server around it. The watcher reads what happened to each watched wallet, decides
+what it means, and tells the owner. The server lets an owner sign in with a wallet, choose where alerts go,
+and answer them. It holds no signing key and moves nothing. There is no rescuer yet, and it is not deployed.
 
 | File | Job |
 |---|---|
@@ -11,6 +12,12 @@ holds no key and moves nothing. There is no server around it yet (no sign-in, no
 | `src/watcher.ts` | One pass per wallet: what is new since the last pass, oldest first, through the rules; then the wallet's token accounts and the wallet account itself. Alerts go to a notifier (ntfy to start with) as a plain sentence, never with a link. |
 | `src/store.ts` | What it keeps per wallet: where it has read up to, the baseline, the token accounts as last seen, the alerts raised. One JSON file for now. |
 | `src/rpc.ts` | JSON-RPC over HTTP, waiting out "too many requests". |
+| `src/signin.ts` | Sign In With Solana, the service's side: the text a wallet signs, the one-time number in it, and the checks that make a signature count. |
+| `src/accounts.ts` | Profiles, their wallets, their alert channels, sessions, and the token an owner's browser reports with. |
+| `src/notify.ts` | Sends an alert to the owner's channels. |
+| `src/server.ts` | The HTTP API. |
+| `src/main.ts`, `src/cli.ts` | The process: the watcher on a timer and the API beside it. |
+| `src/crypto.ts` | Random tokens and their hashes, the sealed box for channel addresses, and the check of a wallet's signature. All from Node itself. |
 
 It uses Warden's decoder, explainer and `OwnerMemory` from the `pincer1/` submodule, as the extension does.
 
@@ -36,7 +43,8 @@ instructions; a drain behind a program the decoder does not read shows only in t
 
 `pnpm test` runs them with the extension's (`sentinel/service/test`). Each drain raises its signal at the
 table's level; sixty days of a wallet's ordinary payments and swaps raise nothing; what arrives never changes
-what the wallet is taken to trust.
+what the wallet is taken to trust. `service.test.ts` is the server: each check that keeps one owner out of
+another's profile was also removed in turn, to see a test fail for it.
 
 ## How a pass goes
 
@@ -53,8 +61,71 @@ what the wallet is taken to trust.
 It has been run once against the public mainnet RPC (a first pass over a real account). The tests run it
 against a simulated RPC.
 
+## Who an owner is
+
+An owner has no name here, no email and no password. A profile is a set of wallets, and the owner is whoever
+can sign with one of them.
+
+- Signing in is a wallet signature over a short text that names this site, the wallet, and a number the
+  service issued a moment ago. The number works once, for one purpose, for five minutes. A text that names
+  another site is refused (and Warden, in the browser, blocks a page that asks for one).
+- A wallet is added to a profile only on that wallet's own signature, and belongs to one profile.
+- Removing a wallet forgets its baseline, its token accounts and its alerts. Removing the last one removes the
+  profile, its channels and its sessions.
+- Watch, the free tier, watches three wallets per profile.
+
+## What the stored file gives away
+
+One JSON file, mode 0600. Someone who reads it learns which wallet addresses are watched and what alerts they
+raised, which is what the chain already says. They do not get in:
+
+- a session and a report token are stored as SHA-256 hashes;
+- where alerts go is sealed with AES-256-GCM under `SENTINEL_DATA_KEY`, which is not in the file. The page is
+  shown only the host and the last four characters of a topic.
+
+## The API
+
+Everything is JSON under `/v1`. The Sentinel page sends its session as a bearer header, not a cookie, so no
+other site can ride on it, and only that page's origin is allowed to read answers.
+
+| Call | Who | What |
+|---|---|---|
+| `GET /health` | anyone | How many wallets are watched, when the last round ended, how many could not be read. No addresses. |
+| `POST /nonce` | anyone; with `{"purpose":"link"}`, a session | A one-time number for the sign-in text. |
+| `POST /signin` | a wallet's signature | Signs in (a new profile for a new wallet), or adds the wallet to the profile whose number it is. |
+| `GET /me`, `POST /signout` | session | The profile, its wallets and channels. |
+| `DELETE /wallets/:address` | session | Stops watching and forgets. |
+| `POST` or `DELETE /wallets/:address/report-token` | session | Issues (shown once), replaces or revokes the token below. |
+| `POST /channels`, `DELETE /channels/:id` | session | An ntfy topic to send alerts to. |
+| `GET /events`, `POST /events/:id/answer` | session | The alerts, and "this was me" or "ignore". |
+| `POST /report` | a wallet's report token | The extension's "this signature was mine". |
+
+`POST /report` is the one call that does not come from the page. The extension's background worker makes it
+with a token that can do nothing else, for one wallet. A reported transaction loses its soft signals and keeps
+its hard ones, so a stolen token cannot hide a handover or a look-alike. "This was me" does not take the
+page's word for what a transaction did: the watcher reads it from the chain again.
+
+Alerts go only to `https` ntfy topics on hosts the service was told about (`ntfy.sh` unless configured), and
+a redirect is refused: the service posts to no address an owner can point somewhere else. On ntfy, whoever
+knows a topic can read it, so the topic is the owner's secret and has to be long.
+
+## Running it
+
+```
+pnpm build:service
+SENTINEL_RPC_URL=https://… SENTINEL_DATA_KEY=$(openssl rand -base64 32) pnpm start:service
+```
+
+`src/main.ts` lists the settings. It listens on 127.0.0.1 and expects a web server in front for TLS. It
+refuses to start without an RPC and a data key. Keep the data key: without it the stored channels cannot be
+read and owners have to add them again.
+
+It has been run against the public devnet RPC with a throwaway wallet: sign-in, a replayed sign-in refused, a
+report, a first read of the wallet, and removal leaving nothing in the file.
+
 ## Not here yet
 
-A process that runs it on a schedule, profiles and sign-in, more alert channels, the rescuer, the Pincer1
-webhook. Replaying real wallets' public history to count false alerts needs an RPC that allows it (the public
-one refuses most `getTransaction` calls); a free Helius key is enough.
+The Sentinel page that uses this API, the rescuer, the Pincer1 webhook, a subscription in place of the poll,
+more channels than ntfy, and anything to do with payment. Replaying real wallets' public history to count
+false alerts needs an RPC that allows it (the public one refuses most `getTransaction` calls); a free Helius
+key is enough.

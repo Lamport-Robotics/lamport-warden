@@ -203,6 +203,87 @@ describe("the watcher", () => {
     expect(store.record(W).cursor).toBe(chain.txs.at(-1)!.signature);
   });
 
+  it("counts a report that arrives while the wallet is being read, and keeps it", async () => {
+    const { chain, store, sent, watcher } = setup();
+    await watcher.pass(me);
+    const big = chain.pay(wallet.publicKey, key(41), 6, NOON + 600);
+    // the pass has started; the owner's browser reports before the watcher gets to that transaction
+    const pass = watcher.pass(me);
+    const reported = watcher.ownerSigned(W, big);
+    expect(await pass).toEqual([]);
+    await reported;
+    expect(sent.list).toEqual([]);
+    expect(store.record(W).ownerSignatures).toEqual({ [big]: NOON });
+    // and one that arrives with no pass running is written all the same
+    await watcher.ownerSigned(W, "sigLATER");
+    expect(Object.keys(store.record(W).ownerSignatures)).toEqual([big, "sigLATER"]);
+  });
+
+  it("forgets what the owner's browser reported after thirty days", async () => {
+    const { store, watcher, tick } = setup();
+    await watcher.pass(me);
+    await watcher.ownerSigned(W, "sigOLD");
+    tick(31 * 86_400);
+    await watcher.ownerSigned(W, "sigNEW");
+    expect(Object.keys(store.record(W).ownerSignatures)).toEqual(["sigNEW"]);
+  });
+
+  it("\"this was me\": who the payment went to becomes someone the wallet pays", async () => {
+    const { chain, store, sent, watcher } = setup();
+    await watcher.pass(me);
+    const stranger = key(41);
+    const first = chain.pay(wallet.publicKey, stranger, 6, NOON + 600);
+    expect((await watcher.pass(me)).map((e) => [e.signature, e.level, e.signals])).toEqual([[first, "alert", ["new_large_payment"]]]);
+    // unanswered, the next one to the same address is as new as the first (an hour apart: not a burst)
+    chain.pay(wallet.publicKey, stranger, 6, NOON + 3600 + 600);
+    expect((await watcher.pass(me)).map((e) => e.signals)).toEqual([["new_large_payment"]]);
+
+    expect(await watcher.confirmOwn(W, first)).toBe(true);
+    chain.pay(wallet.publicKey, stranger, 6, NOON + 7200 + 600);
+    expect(await watcher.pass(me)).toEqual([]);
+    expect(sent.list).toHaveLength(2);
+    // a signature the RPC cannot show teaches nothing
+    const before = JSON.stringify(store.record(W).baseline);
+    expect(await watcher.confirmOwn(W, "sigUNKNOWN")).toBe(false);
+    expect(JSON.stringify(store.record(W).baseline)).toBe(before);
+  });
+
+  it("reads a wallet once at a time: two passes started together raise an alert once", async () => {
+    const { chain, store, sent, watcher } = setup();
+    await watcher.pass(me);
+    chain.pay(wallet.publicKey, thief, 3, NOON + 600);
+    const [a, b] = await Promise.all([watcher.pass(me), watcher.pass(me)]);
+    expect(a.length + b.length).toBe(1);
+    expect(store.events(W)).toHaveLength(1);
+    expect(sent.list).toHaveLength(1);
+    // one that fails does not block the next
+    chain.down = true;
+    await expect(watcher.pass(me)).rejects.toThrow();
+    chain.down = false;
+    expect(await watcher.pass(me)).toEqual([]);
+  });
+
+  it("a wallet removed while it is being read stays forgotten, and gets no alert", async () => {
+    const { chain, store, sent, watcher } = setup();
+    await watcher.pass(me);
+    chain.pay(wallet.publicKey, thief, 3, NOON + 600);
+    // the owner removes the wallet while the watcher is fetching that transaction
+    const call = chain.call.bind(chain);
+    chain.call = async (method: string, params: any[]) => { if (method === "getTransaction") store.forget(W); return call(method, params); };
+    const pass = watcher.pass(me);
+    const reported = watcher.ownerSigned(W, "sigLATE");
+    expect(await pass).toEqual([]);
+    await reported;
+    expect(store.wallets()).toEqual([]);
+    expect(store.events(W)).toEqual([]);
+    expect(store.record(W)).toMatchObject({ cursor: null, baseline: null, ownerSignatures: {} });
+    expect(sent.list).toEqual([]);
+    // and a pass asked for after that reads nothing at all
+    chain.calls = [];
+    expect(await watcher.pass(me)).toEqual([]);
+    expect(chain.calls).toEqual([]);
+  });
+
   it("keeps watching when the push service fails, and the alert is still on record", async () => {
     const { chain, store, sent, watcher } = setup();
     await watcher.pass(me);

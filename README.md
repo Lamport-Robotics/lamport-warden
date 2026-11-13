@@ -120,6 +120,10 @@ Sentinel program is blocked: the real program pointed at someone else's vault is
 Setting it up, or changing the vault, asks you to retype the end of the vault's address, because whoever holds
 that vault's 24 words receives a rescue.
 
+`sentinel/service` is the watcher and the server around it: it reads each watched wallet, raises alerts in
+plain sentences, and lets an owner sign in with a wallet to choose where alerts go and to answer them. It
+holds no key and moves nothing. Not deployed; its README has the API and what the stored file gives away.
+
 `sentinel/vectors/instructions.json` holds the program's instructions as bytes. The program's test suite
 writes that file and runs each instruction through the compiled program; Warden's tests read the same file.
 
