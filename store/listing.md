@@ -2,9 +2,13 @@
 
 What to paste into the developer dashboard. Keep this file in step with what is submitted.
 
-Item ID: `dmlhclkglnpkdhidfjfgjfdjnblnalea`, created on 2026-11-13 from `lamport-warden-0.5.0.zip` and
-submitted for review the same day: Unlisted, free, all regions, published automatically once it passes.
-Google flags the host permission for an in-depth review, so expect it to take longer than a few days.
+Item ID: `dmlhclkglnpkdhidfjfgjfdjnblnalea`, created on 2026-11-13 from `lamport-warden-0.5.0.zip`. It is a
+**draft**: every field below is filled in and saved, and it is not submitted. It was submitted once that day
+and the review was cancelled, to wait for the version that has the paid tier (Sentinel) built in.
+
+When that version is ready: upload its zip on the Package tab, set Payments on the Distribution tab to
+"Contains in-app purchases" if the extension then offers the subscription, and submit. Google flags the host
+permission for an in-depth review, so expect it to take longer than a few days.
 
 ## Store listing tab
 
@@ -87,5 +91,10 @@ lending.
 ## Distribution tab
 
 Free. All regions. Public, or Unlisted for a first round with testers: unlisted is reviewed the same way and
-anyone with the link can install it. Submitted as Unlisted; switching to Public later is a change on this
-tab that has to be submitted again.
+anyone with the link can install it. The draft is set to Unlisted and "Free of charge"; switching either is a
+change on this tab that has to be submitted.
+
+"Free of charge" means the package has nothing in it to buy. Google's developer agreement does not let a
+publisher later charge for what users first got free (section 3.3), and lets an extension be the way in to a
+paid service (section 4.4.3). So the pre-sign check stays free for good, and Sentinel is sold as a service
+beside it. Google does not process the payment.
