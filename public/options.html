@@ -59,6 +59,12 @@
   <div class="row"><input type="text" id="site" placeholder="app.example.com" spellcheck="false" autocomplete="off" aria-label="Site to allow"><button id="addSite">Allow</button></div>
   <p class="note" id="siteNote" role="status"></p>
 
+  <div id="doors" hidden>
+    <h2>Wallet doors Warden cannot guard</h2>
+    <p>A wallet put these objects on a page in a way nothing can be placed in front of. A page that calls one of them directly reaches the wallet without Warden. The same wallet's Wallet Standard connection, which most dapps use, is guarded.</p>
+    <ul class="plain" id="doorList"></ul>
+  </div>
+
   <h2>What Warden remembers</h2>
   <p>For each wallet address, the addresses it has paid and how often. It learns one only when a request you let through comes back signed. It is kept in this browser and sent nowhere.</p>
   <div id="memory"></div>

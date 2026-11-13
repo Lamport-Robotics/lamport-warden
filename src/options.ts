@@ -35,6 +35,11 @@ async function load() {
     sites.append(li);
   }
 
+  // doors that could not be guarded
+  const doors = all.unguarded && typeof all.unguarded === "object" ? Object.entries(all.unguarded as Record<string, unknown>).filter(([, d]) => typeof d === "string").sort() : [];
+  $("doors").hidden = doors.length === 0;
+  $("doorList").replaceChildren(...doors.map(([name, seen]) => { const li = el("li"); li.append(el("span", `window.${name}`), el("span", `last seen ${String(seen)}`, "soft")); return li; }));
+
   // history
   const memory = $("memory");
   memory.replaceChildren();

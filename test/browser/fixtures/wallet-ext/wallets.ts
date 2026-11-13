@@ -22,6 +22,7 @@ const methods = (door: string) => ({
   signAllTransactions: async (txs: any[]) => { called(door, "signAllTransactions"); return txs; },
   signAndSendTransaction: async (_tx: any) => { called(door, "signAndSendTransaction"); return { signature: "sig" }; },
   signMessage: async (m: Uint8Array) => { called(door, "signMessage"); return { signature: m }; },
+  signIn: async (_input: any) => { called(door, "signIn"); return { address: ADDRESS }; },
   request: async (a: any) => { called(door, `request:${a?.method}`); return "ok"; },
   connect: async () => ({ publicKey }),
 });
@@ -32,6 +33,7 @@ const features = (door: string) => ({
   "solana:signTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signTransaction: async (...inputs: any[]) => { called(door, "signTransaction"); return inputs.map((i) => ({ signedTransaction: i.transaction })); } },
   "solana:signAndSendTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signAndSendTransaction: async (...inputs: any[]) => { called(door, "signAndSendTransaction"); return inputs.map(() => ({ signature: new Uint8Array(64) })); } },
   "solana:signMessage": { version: "1.0.0", signMessage: async (...inputs: any[]) => { called(door, "signMessage"); return inputs.map((i) => ({ signedMessage: i.message, signature: new Uint8Array(64) })); } },
+  "solana:signIn": { version: "1.0.0", signIn: async (...inputs: any[]) => { called(door, "signIn"); return inputs.map(() => ({ account, signedMessage: new Uint8Array(1), signature: new Uint8Array(64) })); } },
 });
 
 const base = { version: "1.0.0", icon: "data:image/svg+xml;base64,PHN2Zy8+", chains: ["solana:mainnet"] } as const;

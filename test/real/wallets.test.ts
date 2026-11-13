@@ -75,6 +75,18 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
       expect(await settled(page, door)).toBe("WardenRejected");
     });
 
+    it("blocks a sign-in for another site before it reaches the wallet", async () => {
+      const door = wallet.guarded[0]!; // the Wallet Standard door
+      const has = await page.evaluate((n) => (window as any).__app.names().includes(n), door.slice(9));
+      expect(has).toBe(true);
+      await page.evaluate((d) => (window as any).__app.start("signin", d, "signin", { domain: "app.realbank.example", statement: "Sign in" }), door);
+      const shown = await prompt.text(6000);
+      expect(shown?.tag).toBe("Lamport Warden · Blocked");
+      expect(shown?.sentence).toMatch(/would sign you in to app\.realbank\.example, a different site\.$/);
+      await prompt.click("Close");
+      expect(await settled(page, "signin")).toBe("WardenRejected");
+    });
+
     it.each(wallet.gap)("known gap: %s goes to the wallet without Warden", async (door) => {
       await page.evaluate(([d, t]) => (window as any).__app.start(d, d, "msg", t), [door, text] as const);
       expect(await prompt.text(2000)).toBeNull(); // when this fails the gap has closed: move the door to `guarded`

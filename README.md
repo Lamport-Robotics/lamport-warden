@@ -1,6 +1,6 @@
 # Lamport Warden
 
-Browser extension, v0.3. Not released: it is not in the Chrome Web Store, and nobody outside Lamport has
+Browser extension, v0.4. Not released: it is not in the Chrome Web Store, and nobody outside Lamport has
 reviewed it. Load it unpacked to try it.
 
 Warden sits in front of whatever Solana wallet you already use. Before a signing request reaches the wallet,
@@ -35,7 +35,12 @@ Store ships them (`pnpm test:wallets`; last run against Phantom 26.38.1, Solflar
 | Solflare | guarded | **not guarded**: `window.solflare` |
 
 Solflare freezes `window.solflare` and its place on the window, so nothing can be put in front of it. A page
-that calls that object directly reaches Solflare without Warden.
+that calls that object directly reaches Solflare without Warden. When Warden meets a door like that on a page,
+the settings page lists it.
+
+Sign-in requests (Sign In With Solana) are read too. A sign-in to the site that asks goes through without a
+prompt. One that would sign you in to a different site is blocked: that is a page collecting a sign-in to use
+somewhere else as you.
 
 It does not matter which extension you installed first. Wallets are guarded by changing the wallet's own
 object in place, so the page gets the object it would have got, and Warden puts no name on the window that a
@@ -107,8 +112,7 @@ Warden is advice in front of your wallet, not a lock on it. A page can still rea
 never sees, and turning the extension off removes it. On Pincer1 the same rules are enforced by the robot's
 controller, where a compromised computer cannot talk them away.
 
-Not built yet: sign-in requests (`solana:signIn`) are passed to the wallet unread, token names beyond a
-handful of well-known ones (others show as a shortened mint address), Firefox, mobile,
-agent policy, and telling you on the page when a wallet's door is not guarded. The icons are the Pincer1 ones
-for now. It has been run against the real wallets only as far as the prompt: no test has a funded wallet sign
-a real transaction through it.
+Not built yet: token names beyond a handful of well-known ones (others show as a shortened mint address),
+Firefox, mobile and agent policy. The icons are the Lamport mark on a light tile until there is a drawn one.
+It has been run against the real wallets only as far as the prompt: no test has a funded wallet sign a real
+transaction through it.

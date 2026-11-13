@@ -36,13 +36,24 @@ const sources: Sources = {
 /** For recording a signed send: the same reading of the request, without asking the RPC to run it again. */
 const withoutSimulation: Sources = { tables: sources.tables };
 
-const valid = (r: any): r is WireRequest => !!r && (r.kind === "tx" || r.kind === "msg" || r.kind === "opaque") && typeof r.bytes === "string" && r.bytes.length < 200_000 && typeof r.owner === "string" && r.owner.length <= 64;
+const valid = (r: any): r is WireRequest => !!r && ["tx", "msg", "signin", "opaque"].includes(r.kind) && typeof r.bytes === "string" && r.bytes.length < 200_000 && typeof r.owner === "string" && r.owner.length <= 64;
+
+/** Doors that could not be guarded, with the day each was last seen: shown on the settings page, written at most once a day each. */
+async function noteDoors(names: string[]): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  const stored = (await chrome.storage.local.get("unguarded")).unguarded;
+  const seen: Record<string, string> = stored && typeof stored === "object" ? { ...(stored as Record<string, string>) } : {};
+  let changed = false;
+  for (const n of names) if (/^[A-Za-z0-9_.]{1,40}$/.test(n) && seen[n] !== today) { seen[n] = today; changed = true; }
+  if (changed) await chrome.storage.local.set({ unguarded: seen });
+}
 const decode = (r: WireRequest) => ({ kind: r.kind, bytes: fromBase64(r.bytes), owner: r.owner });
 
 chrome.runtime.onMessage.addListener((message: ToBackground, sender, sendResponse: (r: JudgeReply) => void) => {
   // only this extension's own content scripts, and the site is the one the browser says the tab is on
   if (sender.id !== chrome.runtime.id || !sender.tab) return false;
   const origin = sender.origin ?? (sender.url ? new URL(sender.url).origin : "");
+  if (message?.type === "doors") { if (Array.isArray(message.unguarded)) void noteDoors(message.unguarded.filter((x) => typeof x === "string").slice(0, 8)).catch(() => undefined); return false; }
   if (!message || !valid(message.req)) return false;
   if (message.type === "judge") {
     judge(decode(message.req), origin, store, sources)

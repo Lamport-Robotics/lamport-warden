@@ -2,7 +2,7 @@
  * Isolated world, on every page. Carries a signing request from the page-world script to the background
  * worker and draws the prompt. No engine and no history here; the page cannot run code here.
  */
-import { HANDSHAKE, HELLO, channelFor, newSecret, type DoneMessage, type ReplyMessage, type RequestMessage } from "./channel.js";
+import { HANDSHAKE, HELLO, channelFor, newSecret, type DoneMessage, type DoorsMessage, type ReplyMessage, type RequestMessage } from "./channel.js";
 import { prompt } from "./overlay.js";
 import type { JudgeReply, ToBackground, WireRequest, WireVerdict } from "./messages.js";
 
@@ -35,7 +35,7 @@ const reply = (m: ReplyMessage) => window.dispatchEvent(new CustomEvent(channel.
 window.addEventListener(channel.request, (e) => {
   let m: RequestMessage;
   try { m = JSON.parse(String((e as CustomEvent).detail)); } catch { return; }
-  if (!m || typeof m.id !== "string" || (m.kind !== "tx" && m.kind !== "msg" && m.kind !== "opaque") || typeof m.bytes !== "string") return;
+  if (!m || typeof m.id !== "string" || !["tx", "msg", "signin", "opaque"].includes(m.kind) || typeof m.bytes !== "string") return;
   const req: WireRequest = { kind: m.kind, bytes: m.bytes, owner: String(m.owner ?? "") };
   // one prompt at a time, in the order the wallet was asked
   queue = queue.then(async () => {
@@ -58,4 +58,12 @@ window.addEventListener(channel.done, (e) => {
   if (!req) return;
   approved.delete(m.id);
   if (m.signed) void chrome.runtime.sendMessage({ type: "signed", req } satisfies ToBackground).catch(() => undefined);
+});
+
+window.addEventListener(channel.doors, (e) => {
+  let m: DoorsMessage;
+  try { m = JSON.parse(String((e as CustomEvent).detail)); } catch { return; }
+  if (!m || !Array.isArray(m.unguarded)) return;
+  const unguarded = m.unguarded.filter((x) => typeof x === "string").slice(0, 8);
+  if (unguarded.length) void chrome.runtime.sendMessage({ type: "doors", unguarded } satisfies ToBackground).catch(() => undefined);
 });

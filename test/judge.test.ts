@@ -89,3 +89,31 @@ describe("judging a request in the extension", () => {
     expect(plain.saved.size).toBe(0);
   });
 });
+
+describe("a sign-in request", () => {
+  const fields = (o: Record<string, unknown>) => new TextEncoder().encode(JSON.stringify(o));
+  const ask = async (o: Record<string, unknown>, origin = "https://app.example.com") => (await judge({ kind: "signin", bytes: fields(o), owner: OWNER }, origin, memoryStore().store)).verdict;
+
+  it("is let through when it signs the owner in to the site that asks", async () => {
+    expect(await ask({ domain: "app.example.com", statement: "Welcome back" })).toMatchObject({ level: "allow" });
+    expect(await ask({ domain: "APP.example.com" })).toMatchObject({ level: "allow" });
+    expect(await ask({})).toMatchObject({ level: "allow" }); // no domain: the wallet uses the site it is on
+    expect(await ask({ domain: "localhost:5173" }, "http://localhost:5173")).toMatchObject({ level: "allow" });
+  });
+
+  it("is blocked when the signature would sign the owner in to another site", async () => {
+    const v = await ask({ domain: "bank.example", statement: "Sign in" }, "https://free-airdrop.example");
+    expect(v.level).toBe("block");
+    expect(v.sentence).toBe("free-airdrop.example asks you to sign in, but the signature would sign you in to bank.example, a different site.");
+    // a parent domain, another port, a look-alike: all a different site
+    expect((await ask({ domain: "example.com" })).level).toBe("block");
+    expect((await ask({ domain: "app.example.com:8443" })).level).toBe("block");
+    expect((await ask({ domain: "app.examp1e.com" })).level).toBe("block");
+  });
+
+  it("must be acknowledged when the site it names cannot be read, and never throws on junk", async () => {
+    expect(await ask({ domain: "not a host/\\ at all" })).toMatchObject({ level: "confirm" });
+    const junk = (await judge({ kind: "signin", bytes: Uint8Array.of(0xff, 0x00, 0x7b), owner: OWNER }, "https://app.example.com", memoryStore().store)).verdict;
+    expect(junk.level).toBe("allow"); // no readable fields is a request with no domain: the wallet signs in to this site
+  });
+});

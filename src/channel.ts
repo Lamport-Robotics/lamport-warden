@@ -28,10 +28,12 @@ export interface Channel {
   reply: string;
   /** inpage -> content: {id, signed} */
   done: string;
+  /** inpage -> content: {unguarded}: the wallet doors on this page Warden could not get in front of */
+  doors: string;
 }
 
 export function channelFor(secret: string): Channel {
-  return { ack: `lw:${secret}:a`, request: `lw:${secret}:q`, reply: `lw:${secret}:r`, done: `lw:${secret}:d` };
+  return { ack: `lw:${secret}:a`, request: `lw:${secret}:q`, reply: `lw:${secret}:r`, done: `lw:${secret}:d`, doors: `lw:${secret}:o` };
 }
 
 export function newSecret(): string {
@@ -43,6 +45,7 @@ export function newSecret(): string {
 export const toBase64 = (b: Uint8Array): string => { let s = ""; for (const x of b) s += String.fromCharCode(x); return btoa(s); };
 export const fromBase64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
-export interface RequestMessage { id: string; kind: "tx" | "msg" | "opaque"; bytes: string; owner: string }
+export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string }
+export interface DoorsMessage { unguarded: string[] }
 export interface ReplyMessage { id: string; ok: boolean }
 export interface DoneMessage { id: string; signed: boolean }

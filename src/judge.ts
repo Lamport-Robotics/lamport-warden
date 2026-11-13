@@ -18,7 +18,7 @@ export interface Store {
   ringSites(): Promise<string[]>;
 }
 
-export interface JudgeRequest { kind: "tx" | "msg" | "opaque"; bytes: Uint8Array; owner: string }
+export interface JudgeRequest { kind: "tx" | "msg" | "signin" | "opaque"; bytes: Uint8Array; owner: string }
 export interface Judged { verdict: WardenVerdict; owner: string; kind: JudgeRequest["kind"] }
 /** Reads the lookup tables a message needs. Absent: every request is judged without them. */
 export type TableSource = (messageBytes: Uint8Array) => Promise<Tables>;
@@ -36,6 +36,7 @@ export async function judge(req: JudgeRequest, origin: string, store: Store, sou
   if (req.kind === "opaque") {
     return { verdict: { level: "confirm", sentence: "This site asked your wallet to sign something in a form I can't read, so I can't tell you what it does.", reasons: ["the signing request is not in a form I know."], confirm: ACK }, owner: req.owner, kind: "opaque" };
   }
+  if (req.kind === "signin") return { verdict: checkSignIn(req.bytes, origin), owner: req.owner, kind: "signin" };
   if (req.kind === "msg") {
     let ownKey: Uint8Array | null = null;
     try { ownKey = req.owner ? new PublicKey(req.owner).toBytes() : null; } catch { ownKey = null; }
@@ -75,6 +76,32 @@ export async function judge(req: JudgeRequest, origin: string, store: Store, sou
     return { verdict: { ...verdict, level: verdict.level === "allow" ? "explain" : verdict.level, sentence: `${verdict.sentence} I could not read all of the accounts it uses.`, reasons: [...verdict.reasons.filter((r) => r !== "nothing unusual."), why] }, owner: req.owner, kind: "tx" };
   }
   return { verdict, owner: req.owner, kind: "tx" };
+}
+
+const hostOf = (s: string): string | null => { try { return new URL(s.includes("://") ? s : `https://${s}`).host.toLowerCase(); } catch { return null; } };
+
+/**
+ * Sign In With Solana. The wallet writes the message from the request's fields and it begins with a domain:
+ * "<domain> wants you to sign in with your Solana account". A signature over that message signs the owner in
+ * to that domain, wherever the request came from. So the one thing that matters is whether the domain is the
+ * site that is asking. When it is, there is nothing to stop for. When it is another site, it is a relay: the
+ * page is collecting a sign-in for somewhere else.
+ */
+export function checkSignIn(bytes: Uint8Array, origin: string): WardenVerdict {
+  const here = hostOf(origin);
+  const who = here ?? "This site";
+  let fields: Record<string, unknown>;
+  try { fields = JSON.parse(new TextDecoder().decode(bytes)); } catch { fields = {}; }
+  const domain = typeof fields.domain === "string" && fields.domain.trim() !== "" ? fields.domain.trim() : null;
+  if (domain === null) return { level: "allow", sentence: `${who} asks you to sign in to it.`, reasons: [] };
+  const named = hostOf(domain);
+  if (named === null) return { level: "confirm", sentence: `${who} asks you to sign in, but the request names a site I can't read: "${domain.slice(0, 80)}".`, reasons: ["the sign-in request does not name a readable site."], confirm: ACK };
+  if (here !== null && named === here) return { level: "allow", sentence: `${who} asks you to sign in to it.`, reasons: [] };
+  return {
+    level: "block",
+    sentence: `${who} asks you to sign in, but the signature would sign you in to ${named}, a different site.`,
+    reasons: [`the request is for ${named} and it comes from ${here ?? "an unknown page"}. A site that collects sign-ins for another site can use them there as you.`],
+  };
 }
 
 /**

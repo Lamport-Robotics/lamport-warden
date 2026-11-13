@@ -264,6 +264,40 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     await options.close();
   });
 
+  it("lets a sign-in to the site itself through, and blocks one that would sign the owner in somewhere else", async () => {
+    const { page, prompt } = await open();
+    const here = new URL(site.origin).host;
+    // to this site, by name and with no name at all: nothing to stop for
+    await start(page, "named", "standard:FixturePhantom", "signin", { domain: here, statement: "Sign in to the test shop" });
+    expect(await settled(page, "named")).toBe("signed");
+    await start(page, "bare", "standard:FixtureSolflare", "signin", null);
+    expect(await settled(page, "bare")).toBe("signed");
+    expect(await prompt.shown()).toBe(false);
+    // a relay: this page collects a sign-in for another site, through each kind of door
+    for (const door of ["standard:FixtureBackpack", "solana"]) {
+      await start(page, door, door, "signin", { domain: "app.realbank.example", statement: "Sign in" });
+      const shown = await prompt.text();
+      expect(shown?.tag).toBe("Lamport Warden · Blocked");
+      expect(shown?.sentence).toBe(`${here} asks you to sign in, but the signature would sign you in to app.realbank.example, a different site.`);
+      expect(shown?.buttons).toEqual(["Close"]);
+      await prompt.click("Close");
+      expect(await settled(page, door)).toBe("WardenRejected");
+    }
+    expect(await calls(page)).toEqual(["standard:FixturePhantom.signIn", "standard:FixtureSolflare.signIn"]);
+    await page.close();
+  });
+
+  it("lists on the settings page a wallet door it could not guard", async () => {
+    const { page } = await open(); // the stand-in for Solflare's frozen window.solflare is on this page
+    await page.waitForTimeout(500);
+    const options = await browser.ctx.newPage();
+    await options.goto(`chrome-extension://${browser.extensionId}/options.html`);
+    await expect.poll(() => options.isVisible("#doors")).toBe(true);
+    expect(await options.textContent("#doorList")).toMatch(/^window\.solflarelast seen \d{4}-\d{2}-\d{2}$/);
+    await options.close();
+    await page.close();
+  });
+
   it("shows on the settings page what it has learned, and forgets it when asked", async () => {
     const options = await browser.ctx.newPage();
     await options.goto(`chrome-extension://${browser.extensionId}/options.html`);

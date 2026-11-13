@@ -54,7 +54,16 @@ installStandardHook(window, guard);
 // callback runs before the next parser-inserted script does), on the load events, on every pointer and key
 // press before the page's own handlers, and on a slow timer.
 const legacy = installLegacyHook(window as unknown as Record<string, any>, guard);
-const sweep = () => { try { legacy.sweep(); } catch { /* a page that booby-traps its globals only loses the guard on them */ } };
+let told = "";
+const sweep = () => {
+  try { legacy.sweep(); } catch { /* a page that booby-traps its globals only loses the guard on them */ }
+  // a door that could not be guarded is not kept quiet: the settings page lists it
+  try {
+    const unguarded = legacy.unguarded();
+    const now = unguarded.join(",");
+    if (channel && now !== told) { told = now; if (unguarded.length) dispatch(new CE(channel.doors, { detail: JSON.stringify({ unguarded }) })); }
+  } catch { /* nothing to tell */ }
+};
 try {
   const parsing = new MutationObserver(sweep);
   parsing.observe(document, { childList: true, subtree: true });

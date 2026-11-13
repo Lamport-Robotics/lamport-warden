@@ -359,8 +359,26 @@ describe("older injected providers", () => {
     expect(r.asked[0]!.bytes).toEqual(messageToTransaction(message));
     expect(r.asked[0]!.bytes.length).toBe(1 + 64 + message.length);
     expect(r.asked[0]!.owner).toBe(account.address);
-    expect(requestsOf({ method: "signIn", params: {} }, "")).toBeNull();
+    expect(requestsOf({ method: "signIn", params: {} }, "")?.[0]?.kind).toBe("signin");
     expect(requestsOf({ method: "disconnect" }, "")).toBeNull();
+  });
+
+  it("reads a sign-in request through every door: the feature, the provider's method and its request call", async () => {
+    const r = recorder();
+    const seen: string[] = [];
+    const wallet = { name: "W", features: { "solana:signIn": { version: "1.0.0", signIn: async (...i: any[]) => { seen.push("feature"); return i; } } } };
+    expect(patchStandardWalletInPlace(wallet, r.guard)).toBe(true);
+    await wallet.features["solana:signIn"].signIn({ domain: "a.example", address: account.address, statement: "hi", nonce: "n1", ignored: 5 });
+    await wallet.features["solana:signIn"].signIn();
+    const p = { publicKey: { toBase58: () => account.address }, signIn: async (_i: any) => { seen.push("method"); return {}; }, request: async (_a: any) => { seen.push("request"); return {}; } };
+    patchProviderInPlace(p, r.guard);
+    await p.signIn({ domain: "b.example" });
+    await p.request({ method: "signIn", params: { domain: "c.example", statement: "s" } });
+    const read = (b: Uint8Array) => JSON.parse(new TextDecoder().decode(b));
+    expect(r.asked.map((a) => a.kind)).toEqual(["signin", "signin", "signin", "signin"]);
+    expect(r.asked.map((a) => read(a.bytes))).toEqual([{ domain: "a.example", address: account.address, statement: "hi" }, {}, { domain: "b.example" }, { domain: "c.example", statement: "s" }]);
+    expect(r.asked.map((a) => a.owner)).toEqual([account.address, "", account.address, account.address]);
+    expect(seen).toEqual(["feature", "feature", "method", "request"]);
   });
 
   it("decodes base58 and builds the empty-signature form of each message version", () => {

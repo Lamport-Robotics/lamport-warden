@@ -18,10 +18,11 @@
 
 export interface GuardRequest {
   /**
-   * tx: a serialized transaction. msg: the bytes of a message. opaque: a signing request in a form Warden
+   * tx: a serialized transaction. msg: the bytes of a message. signin: a Sign In With Solana request, its
+   * fields as UTF-8 JSON (the wallet writes the message itself). opaque: a signing request in a form Warden
    * does not read (bytes are empty).
    */
-  kind: "tx" | "msg" | "opaque";
+  kind: "tx" | "msg" | "signin" | "opaque";
   bytes: Uint8Array;
   /** The account asked to sign, base58. Empty when the page did not say. */
   owner: string;
@@ -40,6 +41,16 @@ const SIGN_TX = "solana:signTransaction";
 const SIGN_SEND = "solana:signAndSendTransaction";
 const SIGN_MSG = "solana:signMessage";
 const SIGN_OFFCHAIN = "solana:signOffchainMessage";
+const SIGN_IN = "solana:signIn";
+
+/** The fields of a sign-in request that decide what is signed, as bytes. Anything else the wallet adds itself. */
+export function signInBytes(input: any): Uint8Array {
+  const pick: Record<string, string> = {};
+  if (input && typeof input === "object") {
+    for (const k of ["domain", "address", "statement", "uri", "chainId"]) if (typeof input[k] === "string") pick[k] = input[k].slice(0, 2000);
+  }
+  return new TextEncoder().encode(JSON.stringify(pick));
+}
 
 async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Promise<T>): Promise<T> {
   const tickets: Ticket[] = [];
@@ -177,6 +188,8 @@ function guardFeature(name: string, feature: any, guard: Guard): any {
   let fn: AnyFn;
   if (name === SIGN_TX || name === SIGN_SEND) fn = (...inputs: any[]) => guarded(guard, inputs.map((i) => ({ kind: "tx" as const, bytes: toBytes(i?.transaction), owner: account(i) })), () => original.apply(feature, inputs));
   else if (name === SIGN_MSG || name === SIGN_OFFCHAIN) fn = (...inputs: any[]) => guarded(guard, inputs.map((i) => ({ kind: "msg" as const, bytes: toBytes(i?.message), owner: account(i) })), () => original.apply(feature, inputs));
+  // sign-in may be called with no input at all: the wallet then signs in to the site it is on
+  else if (name === SIGN_IN) fn = (...inputs: any[]) => guarded(guard, (inputs.length ? inputs : [undefined]).map((i) => ({ kind: "signin" as const, bytes: signInBytes(i), owner: typeof i?.address === "string" ? i.address : "" })), () => original.apply(feature, inputs));
   else return feature;
   ours.add(fn);
   const out = { ...feature, [method]: fn };
@@ -244,7 +257,7 @@ export function patchStandardWalletInPlace(wallet: any, guard: Guard): boolean {
       // a frozen wallet with frozen features: the methods inside may still be open
       const features = desc.value;
       if (!features || typeof features !== "object") return false;
-      for (const name of [SIGN_TX, SIGN_SEND, SIGN_MSG, SIGN_OFFCHAIN]) {
+      for (const name of [SIGN_TX, SIGN_SEND, SIGN_MSG, SIGN_OFFCHAIN, SIGN_IN]) {
         const feature = features[name];
         const method = name.slice(7);
         if (!feature || typeof feature[method] !== "function" || ours.has(feature[method])) continue;
@@ -337,8 +350,9 @@ const ownerOf = (p: any): string => { try { return String(p?.publicKey?.toBase58
 /** What `provider.request({ method, params })` asks to have signed, or null when it is not a signing call. */
 export function requestsOf(arg: any, owner: string): GuardRequest[] | null {
   const method = arg && typeof arg === "object" ? arg.method : undefined;
-  if (typeof method !== "string" || !/^sign/i.test(method) || /^signIn$/i.test(method)) return null;
+  if (typeof method !== "string" || !/^sign/i.test(method)) return null;
   const params = arg.params ?? {};
+  if (/^signIn$/i.test(method)) return [{ kind: "signin", bytes: signInBytes(params), owner }];
   const opaque: GuardRequest[] = [{ kind: "opaque", bytes: new Uint8Array(0), owner }];
   const asMessageBytes = (m: unknown): Uint8Array | null => {
     const raw = typeof m === "string" ? fromBase58(m) : toBytes(m);
@@ -373,6 +387,8 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
     case "signMessage":
     case "signOffchainMessage":
       return function (this: any, message: any, ...rest: any[]) { return guarded(guard, [{ kind: "msg", bytes: typeof message === "string" ? new TextEncoder().encode(message) : toBytes(message), owner: ownerOf(self() ?? this) }], () => run(this, [message, ...rest])); };
+    case "signIn":
+      return function (this: any, input: any, ...rest: any[]) { return guarded(guard, [{ kind: "signin", bytes: signInBytes(input), owner: ownerOf(self() ?? this) }], () => run(this, [input, ...rest])); };
     case "request":
       return function (this: any, arg: any, ...rest: any[]) {
         const reqs = requestsOf(arg, ownerOf(self() ?? this));
@@ -383,7 +399,7 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
   }
 }
 
-export const PROVIDER_METHODS = ["signTransaction", "signAndSendTransaction", "signAllTransactions", "signAndSendAllTransactions", "signMessage", "signOffchainMessage", "request"] as const;
+export const PROVIDER_METHODS = ["signTransaction", "signAndSendTransaction", "signAllTransactions", "signAndSendAllTransactions", "signMessage", "signOffchainMessage", "signIn", "request"] as const;
 
 /** A stand-in for an injected provider: for a wallet that assigns its provider, or one whose object cannot be changed. */
 export function wrapLegacyProvider<P extends object>(provider: P, guard: Guard): P {
