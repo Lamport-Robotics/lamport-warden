@@ -1,14 +1,16 @@
 # Sentinel service
 
-The watcher's rules, so far. No server, no network and no keys yet: this folder holds the part that decides
-what a confirmed transaction means for a wallet, which is the part that has to be right before anything is
-built around it.
+The watcher: it reads what happened to each watched wallet, decides what it means, and tells the owner. It
+holds no key and moves nothing. There is no server around it yet (no sign-in, no rescuer, no deployment).
 
 | File | Job |
 |---|---|
 | `src/observed.ts` | A confirmed transaction as an RPC returns it: the signed message, and the balances before and after. Reads version 0 messages through the addresses the cluster says their tables resolved to. |
 | `src/baseline.ts` | What is normal for one wallet, built from its public history: who it paid, which programs it used, usual amounts, usual hours. Only what the wallet itself sent builds trust. |
 | `src/signals.ts` | The spec's signal table as rules: a transaction or a changed account in, signals with a level and a sentence out. |
+| `src/watcher.ts` | One pass per wallet: what is new since the last pass, oldest first, through the rules; then the wallet's token accounts and the wallet account itself. Alerts go to a notifier (ntfy to start with) as a plain sentence, never with a link. |
+| `src/store.ts` | What it keeps per wallet: where it has read up to, the baseline, the token accounts as last seen, the alerts raised. One JSON file for now. |
+| `src/rpc.ts` | JSON-RPC over HTTP, waiting out "too many requests". |
 
 It uses Warden's decoder, explainer and `OwnerMemory` from the `pincer1/` submodule, as the extension does.
 
@@ -36,8 +38,23 @@ instructions; a drain behind a program the decoder does not read shows only in t
 table's level; sixty days of a wallet's ordinary payments and swaps raise nothing; what arrives never changes
 what the wallet is taken to trust.
 
+## How a pass goes
+
+- The first pass builds the wallet's baseline from its history and raises nothing: what already happened is
+  not news.
+- After that it reads what is new, oldest first. A transaction that raised an Alert or more is not taken into
+  the baseline, so a thief's first transfer does not make the second one familiar.
+- It polls. A subscription is faster and is where this should go; a poll is what every RPC offers and says
+  exactly what was not yet read after an outage.
+- When the RPC fails the wallet is reported as not being watched, the cursor stays where it was, and the next
+  pass reads on from there. A transaction the RPC lists but cannot show yet is waited for, not skipped.
+- A notifier that fails does not stop the watching, and the alert is on record either way.
+
+It has been run once against the public mainnet RPC (a first pass over a real account). The tests run it
+against a simulated RPC.
+
 ## Not here yet
 
-Subscribing to a chain, storing anything, sending alerts, the rescuer, sign-in, the Pincer1 webhook. Replaying
-real wallets' public history to count false alerts needs an RPC that allows it (the public one refuses most
-`getTransaction` calls); a free Helius key is enough.
+A process that runs it on a schedule, profiles and sign-in, more alert channels, the rescuer, the Pincer1
+webhook. Replaying real wallets' public history to count false alerts needs an RPC that allows it (the public
+one refuses most `getTransaction` calls); a free Helius key is enough.
