@@ -58,6 +58,18 @@ export const purchaseTerms = (cents: number, centsFull: number = PRICE_CENTS, ce
 export const renewalTerms = (cents: number, centsFull: number = PRICE_CENTS, centsHolder: number = HOLDER_PRICE_CENTS, holderMin: number = HOLDER_MIN_LAMPORT): string =>
   `It renews every month at ${dollars(cents)} until you cancel, which you can do any time with the button above; it then runs to the end of the month you paid for. The price is ${dollars(centsHolder)} a month while this profile's wallets hold ${tokens(holderMin)} $LAMPORT between them and ${dollars(centsFull)} otherwise, checked every day; your alert channels are told before a bill at a different price.`;
 
+/**
+ * How a profile's wallets are being read, said to its owner in full: the pace its plan promises, whether the
+ * network is also reporting transactions as they happen, and, when the service is behind, that it is.
+ */
+export function paceText(pollSeconds: number, now: { push: boolean; late: boolean } | null): string {
+  const every = pollSeconds === 60 ? "every minute" : `every ${pollSeconds} seconds`;
+  const base = `Each wallet is read ${every}`;
+  if (!now) return `${base}.`;
+  const pushed = now.push ? `${base}, and at once when the network reports a transaction in it.` : `${base}.`;
+  return now.late ? `${pushed} Sentinel is behind right now: some wallets are being read later than that.` : pushed;
+}
+
 /** What Pro will add, and why it does not yet. Shown wherever Pro is described, and never as a feature. */
 export const PRO_NOT_YET =
   "Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs the vault and the rescue program on mainnet, and both are waiting on their audits. It joins Pro when they are, at the same price.";
