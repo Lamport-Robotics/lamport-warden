@@ -37,6 +37,8 @@ describe("the terms", () => {
     for (const page of [read("site", "index.html"), read("sentinel", "web", "index.html"), read("site", "try", "index.html"), read("site", "privacy", "index.html")]) expect(page).toContain('href="/terms/"');
     expect(terms).toContain('href="/privacy/"');
     expect(read("site", "deploy.sh")).toContain("terms/index.html");
+    // and say since when they hold
+    expect(text).toMatch(/In force from \d{1,2} [A-Z][a-z]+ 20\d\d\./);
     // no script, no tracker: the page is text
     expect(terms).not.toMatch(/<script/i);
   });
