@@ -10,12 +10,10 @@
  */
 import { randomBytes } from "node:crypto";
 import { hashToken, randomToken, sameHash, seal, unseal } from "./crypto.js";
+import { PLANS, type ChannelKind } from "./plans.js";
 import type { Channel, MemoryStore, Profile, StoredEvent } from "./store.js";
 
 export const SESSION_SECONDS = 7 * 86_400;
-/** How many wallets a profile may have watched, by tier. */
-export const WALLET_LIMIT: Record<Profile["tier"], number> = { watch: 3, rescue: 10 };
-export const CHANNEL_LIMIT = 3;
 
 export type Refusal = { ok: false; status: number; why: string };
 const refuse = (status: number, why: string): Refusal => ({ ok: false, status, why });
@@ -30,6 +28,23 @@ export function cleanNtfyTarget(input: unknown, hosts: ReadonlySet<string>): str
   if (!/^\/[A-Za-z0-9_-]{8,64}$/.test(u.pathname)) return null;
   return `https://${u.host.toLowerCase()}${u.pathname}`;
 }
+
+// A Discord or Slack webhook: the exact shape each service hands out, on its own host, and nothing looser.
+// These two hosts are fixed here, not configured: an alert is never posted to an address of someone's choosing.
+const DISCORD = /^https:\/\/(?:discord\.com|discordapp\.com)\/api\/webhooks\/\d{5,25}\/[A-Za-z0-9_-]{20,100}$/;
+const SLACK = /^https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]{4,20}\/B[A-Z0-9]{4,20}\/[A-Za-z0-9]{10,60}$/;
+
+/** Reads an address as one of the kinds of channel, or as none. */
+export function cleanTarget(input: unknown, ntfyHosts: ReadonlySet<string>): { kind: ChannelKind; url: string } | null {
+  if (typeof input !== "string" || input.length > 300) return null;
+  const s = input.trim();
+  if (DISCORD.test(s)) return { kind: "discord", url: s.replace("discordapp.com", "discord.com") };
+  if (SLACK.test(s)) return { kind: "slack", url: s };
+  const ntfy = cleanNtfyTarget(s, ntfyHosts);
+  return ntfy ? { kind: "ntfy", url: ntfy } : null;
+}
+
+const hintOf = (kind: ChannelKind, url: string): string => (kind === "ntfy" ? `${new URL(url).host}/…${url.slice(-4)}` : `${kind === "discord" ? "Discord" : "Slack"} webhook …${url.slice(-4)}`);
 
 export class Accounts {
   constructor(private store: MemoryStore, private dataKey: Buffer, private opts: { ntfyHosts?: ReadonlySet<string>; maxWallets?: number } = {}) {}
@@ -57,7 +72,7 @@ export class Accounts {
     if (!p) return;
     const mine = Object.entries(this.data.owners).filter(([, o]) => o.profile === profile).sort((a, b) => a[1].addedAt - b[1].addedAt);
     mine.forEach(([address, owner], i) => {
-      if (i < WALLET_LIMIT[p.tier]) { delete owner.paused; this.store.watch({ address }); }
+      if (i < PLANS[p.tier].wallets) { delete owner.paused; this.store.watch({ address }); }
       else { owner.paused = true; this.store.unwatch(address); }
     });
     this.store.flush();
@@ -102,7 +117,7 @@ export class Accounts {
     if (!profile) return refuse(401, "sign in again.");
     if (owner) return owner.profile === into ? { ok: true, profile: into, created: false } : refuse(409, "that wallet is already watched under another profile.");
     if (this.full()) return refuse(503, "Sentinel is watching as many wallets as it can for now. Try again later.");
-    if (this.walletsOf(into).length >= WALLET_LIMIT[profile.tier]) return refuse(403, `this profile watches ${WALLET_LIMIT[profile.tier]} wallets, which is its limit.`);
+    if (this.walletsOf(into).length >= PLANS[profile.tier].wallets) return refuse(403, `this profile watches ${PLANS[profile.tier].wallets} wallets, which is its plan's limit.`);
     this.data.owners[wallet] = { profile: into, addedAt: now };
     this.store.watch({ address: wallet });
     this.store.flush();
@@ -183,17 +198,36 @@ export class Accounts {
 
   // ---- channels
 
-  addNtfy(profile: string, target: unknown, now: number): { ok: true; channel: { id: string; kind: "ntfy"; hint: string } } | Refusal {
-    if (!this.data.profiles[profile]) return refuse(401, "sign in again.");
-    const clean = cleanNtfyTarget(target, this.ntfyHosts);
-    if (!clean) return refuse(400, `that is not a topic address I can send to. It looks like https://${[...this.ntfyHosts][0] ?? "ntfy.sh"}/a-long-topic-name`);
-    if (this.channelsOf(profile).length >= CHANNEL_LIMIT) return refuse(403, `a profile has ${CHANNEL_LIMIT} channels at most.`);
-    if (this.targetsOf(profile).includes(clean)) return refuse(409, "that channel is already added.");
-    const u = new URL(clean);
-    const channel: Channel = { id: randomBytes(6).toString("base64url"), profile, kind: "ntfy", target: seal(this.dataKey, clean), hint: `${u.host}/…${u.pathname.slice(-4)}`, addedAt: now };
+  /**
+   * The channels this profile's plan uses: the kinds it includes, oldest first, up to its number. A channel
+   * past that stays stored and unused, so that a plan that lapses and comes back loses nothing.
+   */
+  private active(profile: string): Channel[] {
+    const p = this.data.profiles[profile];
+    if (!p) return [];
+    const plan = PLANS[p.tier];
+    return this.channelsOf(profile).filter((c) => plan.kinds.includes(c.kind)).sort((a, b) => a.addedAt - b.addedAt).slice(0, plan.channels);
+  }
+
+  /** The profile's channels as the page shows them: what kind, a hint of the address, and whether alerts go there now. */
+  channelViews(profile: string): { id: string; kind: ChannelKind; hint: string; active: boolean }[] {
+    const active = new Set(this.active(profile).map((c) => c.id));
+    return this.channelsOf(profile).map((c) => ({ id: c.id, kind: c.kind, hint: c.hint, active: active.has(c.id) }));
+  }
+
+  addChannel(profile: string, target: unknown, now: number): { ok: true; channel: { id: string; kind: ChannelKind; hint: string } } | Refusal {
+    const p = this.data.profiles[profile];
+    if (!p) return refuse(401, "sign in again.");
+    const plan = PLANS[p.tier];
+    const clean = cleanTarget(target, this.ntfyHosts);
+    if (!clean) return refuse(400, `that is not an address I can send alerts to. An ntfy topic looks like https://${[...this.ntfyHosts][0] ?? "ntfy.sh"}/a-long-topic-name; a Discord or Slack webhook is the address that service gave you.`);
+    if (!plan.kinds.includes(clean.kind)) return refuse(403, "Discord and Slack channels come with Pro. On Watch, alerts go to ntfy.");
+    if (this.channelsOf(profile).length >= plan.channels) return refuse(403, plan.channels === 1 ? "this plan has one alert channel. Remove it to use another, or move to Pro for five." : `this plan has ${plan.channels} alert channels at most.`);
+    if (this.channelsOf(profile).some((c) => unseal(this.dataKey, c.target) === clean.url)) return refuse(409, "that channel is already added.");
+    const channel: Channel = { id: randomBytes(6).toString("base64url"), profile, kind: clean.kind, target: seal(this.dataKey, clean.url), hint: hintOf(clean.kind, clean.url), addedAt: now };
     this.data.channels.push(channel);
     this.store.flush();
-    return { ok: true, channel: { id: channel.id, kind: "ntfy", hint: channel.hint } };
+    return { ok: true, channel: { id: channel.id, kind: channel.kind, hint: channel.hint } };
   }
 
   removeChannel(profile: string, id: string): boolean {
@@ -204,16 +238,20 @@ export class Accounts {
     return true;
   }
 
-  private targetsOf(profile: string): string[] {
-    return this.channelsOf(profile).map((c) => unseal(this.dataKey, c.target)).filter((t): t is string => t !== null);
-  }
-
-  /** Where alerts about this wallet go, checked again as they are used: a stored target is not trusted more than a typed one. */
-  targetsFor(wallet: string): string[] {
+  /**
+   * Where alerts about this wallet go, checked again as they are used: a stored address is not trusted more
+   * than a typed one, and one that no longer reads as its kind is not used.
+   */
+  channelsFor(wallet: string): { kind: ChannelKind; url: string }[] {
     const profile = this.profileOf(wallet);
     if (!profile) return [];
-    return this.targetsOf(profile).filter((t) => cleanNtfyTarget(t, this.ntfyHosts) === t);
+    return this.active(profile).flatMap((c) => {
+      const url = unseal(this.dataKey, c.target);
+      const clean = url === null ? null : cleanTarget(url, this.ntfyHosts);
+      return clean && clean.kind === c.kind && clean.url === url ? [clean] : [];
+    });
   }
+  targetsFor(wallet: string): string[] { return this.channelsFor(wallet).map((c) => c.url); }
 
   // ---- alerts
 

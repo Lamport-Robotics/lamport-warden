@@ -121,8 +121,8 @@ describe("what Stripe says moves the tier", () => {
     expect(accounts.admit(addr(20), profile, T0 + 9)).toMatchObject({ ok: false, status: 403 }); // three on the free tier
 
     await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
-    expect(accounts.profile(profile)).toMatchObject({ tier: "rescue", billing: { customer: "cus_1", subscription: "sub_1", price: "full", status: "active" } });
-    expect(await billing.quote(profile)).toMatchObject({ tier: "rescue", subscribed: true, status: "active", price: "full" });
+    expect(accounts.profile(profile)).toMatchObject({ tier: "pro", billing: { customer: "cus_1", subscription: "sub_1", price: "full", status: "active" } });
+    expect(await billing.quote(profile)).toMatchObject({ tier: "pro", subscribed: true, status: "active", price: "full" });
     expect(accounts.admit(addr(20), profile, T0 + 10)).toMatchObject({ ok: true });
     expect(store.wallets()).toHaveLength(4);
     // already paying: no second checkout
@@ -139,7 +139,7 @@ describe("what Stripe says moves the tier", () => {
     store.save(extra[2]!, { ...store.record(extra[2]!), cursor: "sigX", lastSeenAt: T0 });
 
     await billing.onEvent(stripe.changed("sub_1", "past_due"));
-    expect(accounts.profile(profile)!.tier).toBe("rescue");
+    expect(accounts.profile(profile)!.tier).toBe("pro");
     expect(store.wallets()).toHaveLength(4);
 
     await billing.onEvent(stripe.changed("sub_1", "canceled"));
@@ -168,7 +168,7 @@ describe("what Stripe says moves the tier", () => {
     // a new subscription, then late news about the old one
     await billing.onEvent(stripe.start("sub_2", profile, "price_full"));
     await billing.onEvent(cancelled);
-    expect(accounts.profile(profile)).toMatchObject({ tier: "rescue", billing: { subscription: "sub_2", status: "active" } });
+    expect(accounts.profile(profile)).toMatchObject({ tier: "pro", billing: { subscription: "sub_2", status: "active" } });
 
     // events that are not about a subscription, or about one nobody here has, change nothing
     const before = JSON.stringify(accounts.profile(profile));
@@ -204,7 +204,7 @@ describe("the daily look at who holds the token", () => {
     expect(await billing.reprice()).toEqual({ moved: 1, failed: 0 });
     expect(stripe.calls.at(-1)).toEqual({ method: "POST", path: "/subscriptions/sub_1", params: { "items[0][id]": "si_sub_1", "items[0][price]": "price_full", proration_behavior: "none" } });
     expect(accounts.profile(profile)!.billing).toMatchObject({ price: "full", status: "active" });
-    expect(accounts.profile(profile)!.tier).toBe("rescue");
+    expect(accounts.profile(profile)!.tier).toBe("pro");
 
     chain.balances[A] = [250_000];
     expect(await billing.reprice()).toEqual({ moved: 1, failed: 0 });
@@ -253,14 +253,14 @@ describe("a webhook", () => {
     expect(accounts.profile(profile)!.tier).toBe("watch");
 
     expect(await hook(event, sign(event, T0))).toEqual({ status: 200, body: { received: true } });
-    expect(accounts.profile(profile)!.tier).toBe("rescue");
+    expect(accounts.profile(profile)!.tier).toBe("pro");
 
     const session = accounts.startSession(profile, T0);
     const get = (path: string, method = "GET") => handle({ method, path, bearer: session, body: undefined, ip: "1.1.1.1" });
-    expect((await get("/v1/billing")).body).toMatchObject({ enabled: true, tier: "rescue", subscribed: true, cents: 1500 });
+    expect((await get("/v1/billing")).body).toMatchObject({ enabled: true, tier: "pro", subscribed: true, cents: 1500 });
     expect((await get("/v1/billing/portal", "POST")).body).toEqual({ url: "https://billing.stripe.com/p/session/x" });
     expect(await get("/v1/billing/checkout", "POST")).toMatchObject({ status: 409 });
-    expect((await get("/v1/me")).body).toMatchObject({ profile: { tier: "rescue" }, limits: { wallets: 10 } });
+    expect((await get("/v1/me")).body).toMatchObject({ profile: { tier: "pro" }, limits: { wallets: 10 } });
     expect((await handle({ method: "GET", path: "/v1/billing", bearer: null, body: undefined, ip: "1.1.1.1" })).status).toBe(401);
 
     // no paid plan configured: the page is told so, and there is no webhook to post to

@@ -7,13 +7,14 @@
  */
 import { getWallets } from "@wallet-standard/app";
 import { PAGE_ASKS, WARDEN_ANSWERS, type PageAnswer, type PageAsk } from "../../../src/sentinel-link.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../../service/src/plans.js";
 import { LINK_STATEMENT, SIGN_IN_STATEMENT, signInText } from "../../service/src/signin-text.js";
 
 const API = "/sentinel/api/v1";
 const SESSION = "sentinel.session";
 
 interface WalletRow { address: string; armed: boolean; reporting: boolean; paused: boolean; lastReadAt: number | null }
-interface Me { profile: { id: string; tier: "watch" | "rescue" }; wallets: WalletRow[]; channels: { id: string; kind: string; hint: string }[]; limits: { wallets: number; channels: number } }
+interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack"; hint: string; active: boolean }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number } }
 interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; sentence: string; answer: string | null }
 type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
@@ -158,7 +159,7 @@ function render(): void {
   const mine = me;
 
   $("wallets").replaceChildren(...mine.wallets.map((w) => {
-    const state = w.paused ? "Paused: this plan watches fewer wallets than you have here." : w.lastReadAt ? `Watched. Last read ${ago(w.lastReadAt)}.` : "Not read yet. The first read learns the wallet's history and can take a minute.";
+    const state = w.paused ? "Paused: this plan watches fewer wallets than you have here." : w.lastReadAt ? `Watched, read every ${mine.limits.pollSeconds} seconds. Last read ${ago(w.lastReadAt)}.` : "Not read yet. The first read learns the wallet's history and can take a minute.";
     const li = row(w.address, state, [sure("Remove", "Remove and forget?", async () => { if (await done(call("DELETE", `/wallets/${w.address}`), "Removed.")) { if (warden?.linked.includes(w.address)) await askWarden({ type: "unlink", wallet: w.address }); await refresh(); } })], "addr");
     return li;
   }));
@@ -166,7 +167,10 @@ function render(): void {
   const add = $("addChoices");
   if (mine.wallets.length < mine.limits.wallets) choices(add, "link"); else add.replaceChildren();
 
-  $("channels").replaceChildren(...(mine.channels.length ? mine.channels.map((c) => row(c.hint, "ntfy topic. Urgent alerts and alerts are pushed here.", [sure("Remove", "Remove?", async () => { if (await done(call("DELETE", `/channels/${c.id}`), "Removed.")) await refresh(); })], "addr")) : [row("No channel yet", "Sentinel is watching, but it has nowhere to tell you. Alerts are still listed on this page.")]));
+  const kindName = { ntfy: "ntfy topic", discord: "Discord channel", slack: "Slack channel" } as const;
+  $("channels").replaceChildren(...(mine.channels.length ? mine.channels.map((c) => row(c.hint, c.active ? `${kindName[c.kind]}. Alerts are sent here.` : `${kindName[c.kind]}. Not in use: this plan does not cover it.`, [sure("Remove", "Remove?", async () => { if (await done(call("DELETE", `/channels/${c.id}`), "Removed.")) await refresh(); })], "addr")) : [row("No channel yet", "Sentinel is watching, but it has nowhere to tell you. Alerts are still listed on this page.")]));
+  $("channelLimit").textContent = mine.limits.kinds.length > 1 ? `Up to ${mine.limits.channels} channels on this plan: ntfy topics, Discord webhooks and Slack webhooks.` : "One ntfy channel on this plan. Pro adds Discord and Slack, and up to five channels.";
+  $<HTMLInputElement>("ntfyTarget").placeholder = mine.limits.kinds.length > 1 ? "An ntfy topic, or a Discord or Slack webhook address" : "https://ntfy.sh/a-long-topic-name";
 
   const shown = alerts.slice(0, 50);
   $("events").replaceChildren(...(shown.length ? shown.map((a) => {
@@ -209,38 +213,39 @@ function render(): void {
 }
 
 function plans(mine: Me): void {
-  const paid = mine.profile.tier === "rescue";
+  const paid = mine.profile.tier === "pro";
+  const list = (items: readonly string[]) => { const ul = el("ul"); ul.append(...items.map((t) => el("li", t))); return ul; };
   const watch = el("div", "", paid ? "plan" : "plan mine");
-  watch.append(el("h3", "Watch"), el("div", "Free", "price"));
-  const wl = el("ul");
-  wl.append(el("li", "Three wallets watched around the clock"), el("li", "Alerts in plain sentences, by push"), el("li", "\"This was me\", so it learns who you pay"));
-  watch.append(wl);
+  watch.append(el("h3", PLANS.watch.name), el("div", "Free", "price"), list(WATCH_FEATURES));
   if (!paid) watch.append(el("p", "This is your plan.", "soft"));
 
-  const rescue = el("div", "", paid ? "plan mine" : "plan");
+  const pro = el("div", "", paid ? "plan mine" : "plan");
   const p = plan.enabled ? plan : null;
+  const centsFull = p?.centsFull ?? PRICE_CENTS, centsHolder = p?.centsHolder ?? HOLDER_PRICE_CENTS, holderMin = (p?.holderMin ?? HOLDER_MIN_LAMPORT).toLocaleString("en-US");
   const price = el("div", "", "price");
-  price.append(document.createTextNode(p ? money(p.cents) : "$15"), el("small", " a month"));
-  rescue.append(el("h3", "Rescue"), price);
-  const rl = el("ul");
-  rl.append(
-    el("li", "Ten wallets watched instead of three"),
-    el("li", p?.price === "holder" ? `You have the holder price: a wallet here holds ${p.holderMin.toLocaleString("en-US")} $LAMPORT. It is checked again each day.` : `${p ? money(p.centsHolder) : "$10"} a month while a wallet in this profile holds ${(p?.holderMin ?? 250_000).toLocaleString("en-US")} $LAMPORT`),
-    el("li", "Rescue itself is not available yet. Moving your tokens into your own Lamport Vault needs the vault and the rescue program on mainnet, and both are waiting on their audits. It joins this plan when they are, at the same price.", "not"),
+  price.append(document.createTextNode(money(p ? p.cents : centsFull)), el("small", " a month"));
+  pro.append(el("h3", PLANS.pro.name), price);
+  const features = list(["Everything in Watch", ...PRO_FEATURES]);
+  features.append(
+    el("li", p?.price === "holder" ? `You have the holder price: a wallet here holds ${holderMin} $LAMPORT. It is checked again each day.` : `${money(centsHolder)} a month, not ${money(centsFull)}, while a wallet in this profile holds ${holderMin} $LAMPORT`),
+    el("li", PRO_NOT_YET, "not"),
   );
-  rescue.append(rl);
+  pro.append(features);
   if (p?.subscribed) {
     const b = el("button", "Change card or cancel");
     b.addEventListener("click", async () => { b.disabled = true; const r = await call("POST", "/billing/portal"); if (r.status === 200 && typeof r.body.url === "string" && r.body.url.startsWith("https://billing.stripe.com/")) location.assign(r.body.url); else { say(String(r.body?.error ?? "That did not work."), true); b.disabled = false; } });
-    rescue.append(b, el("p", p.status === "past_due" ? "Your last payment did not go through. Stripe is trying the card again; change it before the plan lapses." : "This is your plan.", "soft"));
+    pro.append(b, el("p", p.status === "past_due" ? "Your last payment did not go through. Stripe is trying the card again; change it before the plan lapses." : "This is your plan.", "soft"));
+  } else if (paid) {
+    // on Pro without a subscription of its own: a plan that was given, not bought
+    pro.append(el("p", "This is your plan.", "soft"));
   } else if (p?.checkoutOpen) {
-    const b = el("button", `Start for ${money(p.cents)} a month`, "solid");
+    const b = el("button", `Start Pro for ${money(p.cents)} a month`, "solid");
     b.addEventListener("click", async () => { b.disabled = true; const r = await call("POST", "/billing/checkout"); if (r.status === 200 && typeof r.body.url === "string" && r.body.url.startsWith("https://checkout.stripe.com/")) location.assign(r.body.url); else { say(String(r.body?.error ?? "That did not work."), true); b.disabled = false; } });
-    rescue.append(b, el("p", "Paid by card through Stripe. Cancel any time; the plan runs to the end of the month you paid for.", "soft"));
+    pro.append(b, el("p", "Paid by card through Stripe. Cancel any time; the plan runs to the end of the month you paid for, then your profile goes back to Watch and nothing is deleted.", "soft"));
   } else {
-    rescue.append(el("p", "Not on sale yet.", "soft"));
+    pro.append(el("p", "Not on sale yet.", "soft"));
   }
-  $("plans").replaceChildren(watch, rescue);
+  $("plans").replaceChildren(watch, pro);
 }
 
 async function refresh(): Promise<void> {
@@ -262,7 +267,7 @@ $("makeTopic").addEventListener("click", () => {
   say(`In the ntfy app, subscribe to the topic "${topic}", then press Add.`);
 });
 $("addChannel").addEventListener("click", async () => {
-  if (await done(call("POST", "/channels", { kind: "ntfy", target: $<HTMLInputElement>("ntfyTarget").value }), "Added. Alerts will be pushed there.")) { $<HTMLInputElement>("ntfyTarget").value = ""; await refresh(); }
+  if (await done(call("POST", "/channels", { target: $<HTMLInputElement>("ntfyTarget").value }), "Added. Alerts will be sent there.")) { $<HTMLInputElement>("ntfyTarget").value = ""; await refresh(); }
 });
 
 registry.on("register", () => { if (!me || me.wallets.length < me.limits.wallets) render(); });

@@ -1,6 +1,7 @@
 /** The settings page. Everything is built with textContent: stored addresses and labels are never parsed as HTML. */
 import { DEFAULT_RPC, SENTINEL_PAGE } from "./defaults.js";
 import { LINK_PREFIX, linkFrom } from "./sentinel-link.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../sentinel/service/src/plans.js";
 import { KEYS, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
 import type { MemoryState } from "../pincer1/daemon/src/warden/index.js";
 
@@ -47,6 +48,17 @@ async function load() {
   page.href = SENTINEL_PAGE;
   page.textContent = SENTINEL_PAGE.replace(/^https:\/\//, "");
   $<HTMLInputElement>("reportSigned").checked = s.reportSigned;
+  // what Sentinel costs and gives, from the same definition the service enforces
+  const dollars = (cents: number) => `$${cents / 100}`;
+  const listOf = (items: readonly string[]) => { const ul = el("ul", "", "plain"); ul.append(...items.map((t) => el("li", t))); return ul; };
+  $("sentinelPlans").replaceChildren(
+    el("p", `Warden is free and stays free. Sentinel has two plans. ${PLANS.watch.name} is free:`),
+    listOf(WATCH_FEATURES),
+    el("p", `${PLANS.pro.name} is ${dollars(PRICE_CENTS)} a month, or ${dollars(HOLDER_PRICE_CENTS)} while a wallet in your Sentinel profile holds ${HOLDER_MIN_LAMPORT.toLocaleString("en-US")} $LAMPORT. It adds:`),
+    listOf(PRO_FEATURES),
+    el("p", PRO_NOT_YET),
+    el("p", "A plan is started and cancelled on the Sentinel page, which also says whether Pro is on sale. It is paid by card through Stripe; nothing is bought inside this extension."),
+  );
   const armed = new Map<string, { vault: string; pending: boolean }>();
   for (const [k, v] of Object.entries(all)) {
     const state = v as { vault?: unknown; pendingVault?: unknown } | null;

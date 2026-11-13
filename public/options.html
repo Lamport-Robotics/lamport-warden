@@ -67,6 +67,7 @@
 
   <h2>Sentinel</h2>
   <p>Sentinel is Warden's watching service. It runs on a Lamport server, watches the wallets you give it after you sign, and tells you in one sentence when something looks wrong. You set it up on the Sentinel page, not here: <a id="sentinelPage" target="_blank" rel="noopener noreferrer"></a></p>
+  <div id="sentinelPlans"></div>
   <ul class="plain" id="sentinelWallets"></ul>
   <label class="choice"><input type="checkbox" id="reportSigned"> <span>Tell Sentinel which signatures were mine</span></label>
   <p>Sentinel sees only the chain, so it cannot tell a payment you made from one a thief made with your key. With this on, when a wallet you linked on the Sentinel page signs a transaction you let through, Warden sends Sentinel that wallet's address and the transaction's signature. Both are public on the chain once the transaction lands. Nothing else is sent: not the site, not the transaction, not your history. With this off, Warden sends Lamport nothing at all.</p>

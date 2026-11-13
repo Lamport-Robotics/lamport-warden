@@ -9,10 +9,10 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Keypair } from "@solana/web3.js";
-import { Accounts, SESSION_SECONDS, cleanNtfyTarget } from "../src/accounts.js";
+import { Accounts, SESSION_SECONDS, cleanNtfyTarget, cleanTarget } from "../src/accounts.js";
 import { dataKeyFrom, hashToken, seal, unseal, verifyWalletSignature } from "../src/crypto.js";
-import { configFrom, startRounds } from "../src/main.js";
-import { ChannelNotifier, type Post } from "../src/notify.js";
+import { configFrom, pacer, startRounds } from "../src/main.js";
+import { ChannelNotifier, messageFor, type Post } from "../src/notify.js";
 import { RateLimiter, api, corsHeaders, listen, type ApiRequest } from "../src/server.js";
 import { LINK_STATEMENT, NonceBook, parseSignInText, signInText, verifySignIn } from "../src/signin.js";
 import { FileStore, MemoryStore } from "../src/store.js";
@@ -222,7 +222,7 @@ describe("a profile's wallets", () => {
     expect(await s.signIn(bob, { session: a.session })).toEqual({ status: 409, body: { error: "that wallet is already watched under another profile." } });
     expect((await s.signIn(second, { session: a.session })).status).toBe(200);
     expect((await s.signIn(third, { session: a.session })).status).toBe(200);
-    expect(await s.signIn(fourth, { session: a.session })).toEqual({ status: 403, body: { error: "this profile watches 3 wallets, which is its limit." } });
+    expect(await s.signIn(fourth, { session: a.session })).toEqual({ status: 403, body: { error: "this profile watches 3 wallets, which is its plan's limit." } });
     expect(s.store.wallets().map((w) => w.address)).not.toContain(fourth.address);
   });
 
@@ -230,7 +230,7 @@ describe("a profile's wallets", () => {
     const s = service();
     const a = (await s.signIn(alice)).body as any;
     await s.signIn(second, { session: a.session });
-    await s.call("POST", "/v1/channels", { kind: "ntfy", target: "https://ntfy.sh/alice-topic-123" }, a.session);
+    await s.call("POST", "/v1/channels", { target: "https://ntfy.sh/alice-topic-123" }, a.session);
     s.store.save(second.address, { ...s.store.record(second.address), cursor: "sig1", lastSeenAt: T0 });
     s.store.addEvent({ wallet: second.address, signature: "sig1", slot: 1, at: T0, level: "alert", signals: ["new_large_payment"], sentence: "x", rescueWorthy: false });
 
@@ -270,8 +270,13 @@ describe("a full house", () => {
 });
 
 describe("where alerts go", () => {
+  const DISCORD = ["https://discord.com/api", "webhooks", "123456789012345678", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-abcd"].join("/");
+  // made-up addresses in the shape each service hands out, put together here so that no line of this file
+  // reads as a real webhook to a secret scanner
+  const SLACK = ["https://hooks.slack.com", "services", "T01ABCDEF", "B01ABCDEFGH", "abcdefghijklmnopqrstuvwx"].join("/");
+  const hosts = new Set(["ntfy.sh"]);
+
   it("takes an ntfy topic on a host it was told about, and nothing else", () => {
-    const hosts = new Set(["ntfy.sh"]);
     expect(cleanNtfyTarget("https://ntfy.sh/alice-topic-123", hosts)).toBe("https://ntfy.sh/alice-topic-123");
     expect(cleanNtfyTarget(" https://NTFY.sh/alice-topic-123 ", hosts)).toBe("https://ntfy.sh/alice-topic-123");
     for (const bad of [
@@ -283,48 +288,90 @@ describe("where alerts go", () => {
     ]) expect(cleanNtfyTarget(bad, hosts), String(bad)).toBeNull();
   });
 
-  it("keeps the topic sealed in the file and shows only its last characters", async () => {
+  it("reads a Discord or Slack webhook only in the exact shape that service hands out", () => {
+    expect(cleanTarget(DISCORD, hosts)).toEqual({ kind: "discord", url: DISCORD });
+    expect(cleanTarget(DISCORD.replace("discord.com", "discordapp.com"), hosts)).toEqual({ kind: "discord", url: DISCORD });
+    expect(cleanTarget(` ${SLACK} `, hosts)).toEqual({ kind: "slack", url: SLACK });
+    expect(cleanTarget("https://ntfy.sh/alice-topic-123", hosts)).toEqual({ kind: "ntfy", url: "https://ntfy.sh/alice-topic-123" });
+    for (const bad of [
+      DISCORD.replace("https://", "http://"), DISCORD.replace("discord.com", "discord.com.evil.example"), DISCORD.replace("discord.com", "evil.example"),
+      `${DISCORD}?wait=true`, `${DISCORD}/slack`, `${DISCORD}#x`, DISCORD.replace("/api/webhooks/", "/api/v10/channels/"), DISCORD.replace("123456789012345678", "../../users/@me"),
+      "https://discord.com/api/webhooks/123456789012345678/short", `https://user@${DISCORD.slice(8)}`,
+      SLACK.replace("hooks.slack.com", "hooks.slack.com.evil.example"), SLACK.replace("/services/", "/workflows/"), `${SLACK}/x`, SLACK.replace("T01ABCDEF", "t01abcdef"),
+      "https://slack.com/api/chat.postMessage", "https://hooks.slack.com/services/", "x".repeat(400), 5, null, undefined,
+    ]) expect(cleanTarget(bad, hosts), String(bad)).toBeNull();
+  });
+
+  it("the free plan has one ntfy channel; Pro has five, with Discord and Slack; a lapsed plan keeps them and stops using them", async () => {
     const file = join(mkdtempSync(join(tmpdir(), "sentinel-")), "s.json");
     const s = service({ store: new FileStore(file) });
     const a = (await s.signIn(alice)).body as any;
-    const added = await s.call("POST", "/v1/channels", { kind: "ntfy", target: "https://ntfy.sh/alice-private-topic-77" }, a.session);
-    expect(added).toMatchObject({ status: 201, body: { kind: "ntfy", hint: "ntfy.sh/…c-77" } });
+    expect(a.limits).toEqual({ wallets: 3, channels: 1, kinds: ["ntfy"], pollSeconds: 60 });
+    const add = (target: unknown, session = a.session) => s.call("POST", "/v1/channels", { target }, session);
+
+    const first = await add("https://ntfy.sh/alice-private-topic-77");
+    expect(first).toMatchObject({ status: 201, body: { kind: "ntfy", hint: "ntfy.sh/…c-77" } });
+    // the topic is sealed in the file, and the page is shown only its last characters
     expect(readFileSync(file, "utf8")).not.toContain("alice-private-topic");
-    expect(((await s.call("GET", "/v1/me", undefined, a.session)).body as any).channels).toEqual([{ id: (added.body as any).id, kind: "ntfy", hint: "ntfy.sh/…c-77" }]);
+    expect(((await s.call("GET", "/v1/me", undefined, a.session)).body as any).channels).toEqual([{ id: (first.body as any).id, kind: "ntfy", hint: "ntfy.sh/…c-77", active: true }]);
     expect(s.accounts.targetsFor(alice.address)).toEqual(["https://ntfy.sh/alice-private-topic-77"]);
     // a store opened with another key cannot read where alerts go, and sends nowhere
     expect(new Accounts(new FileStore(file), Buffer.alloc(32, 1)).targetsFor(alice.address)).toEqual([]);
 
-    expect((await s.call("POST", "/v1/channels", { kind: "ntfy", target: "https://ntfy.sh/alice-private-topic-77" }, a.session)).status).toBe(409);
-    expect((await s.call("POST", "/v1/channels", { kind: "ntfy", target: "https://evil.example/alice-private-topic" }, a.session)).status).toBe(400);
-    expect((await s.call("POST", "/v1/channels", { kind: "email", target: "a@b.c" }, a.session)).status).toBe(400);
-    await s.call("POST", "/v1/channels", { kind: "ntfy", target: "https://ntfy.sh/alice-second-topic" }, a.session);
-    await s.call("POST", "/v1/channels", { kind: "ntfy", target: "https://ntfy.sh/alice-third-topic" }, a.session);
-    expect((await s.call("POST", "/v1/channels", { kind: "ntfy", target: "https://ntfy.sh/alice-fourth-topic" }, a.session)).status).toBe(403);
+    // on the free plan: no second channel, no Discord or Slack, nothing that is not a channel
+    expect(await add("https://ntfy.sh/alice-second-topic")).toEqual({ status: 403, body: { error: "this plan has one alert channel. Remove it to use another, or move to Pro for five." } });
+    expect(await s.call("DELETE", `/v1/channels/${(first.body as any).id}`, undefined, a.session)).toMatchObject({ status: 200 });
+    expect(await add(DISCORD)).toEqual({ status: 403, body: { error: "Discord and Slack channels come with Pro. On Watch, alerts go to ntfy." } });
+    expect((await add("https://evil.example/alice-private-topic")).status).toBe(400);
+    expect((await add("a@b.c")).status).toBe(400);
+    expect((await add("https://ntfy.sh/alice-private-topic-77")).status).toBe(201);
+    expect((await add("https://ntfy.sh/alice-private-topic-77")).status).toBe(403); // the plan's one channel is taken
 
-    // only its owner removes it
+    // Pro: five channels of any kind
+    s.accounts.setTier(a.profile.id, "pro");
+    expect(((await s.call("GET", "/v1/me", undefined, a.session)).body as any).limits).toEqual({ wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack"], pollSeconds: 20 });
+    expect((await add("https://ntfy.sh/alice-private-topic-77")).status).toBe(409);
+    const discord = await add(DISCORD);
+    expect(discord).toMatchObject({ status: 201, body: { kind: "discord", hint: "Discord webhook …abcd" } });
+    expect(await add(SLACK)).toMatchObject({ status: 201, body: { kind: "slack", hint: "Slack webhook …uvwx" } });
+    expect(readFileSync(file, "utf8")).not.toContain("abcdefghijklmnopqrstuvwxyzABCDEF");
+    expect(JSON.stringify((await s.call("GET", "/v1/me", undefined, a.session)).body)).not.toContain("abcdefghijklmnopqrstuvwxyzABCDEF");
+    await add("https://ntfy.sh/alice-phone-4567");
+    await add("https://ntfy.sh/alice-tablet-890");
+    expect((await add("https://ntfy.sh/alice-sixth-topic")).body).toEqual({ error: "this plan has 5 alert channels at most." });
+    expect(s.accounts.channelsFor(alice.address).map((c) => c.kind)).toEqual(["ntfy", "discord", "slack", "ntfy", "ntfy"]);
+
+    // the plan lapses: everything stays listed, and only what the free plan covers is used
+    s.accounts.setTier(a.profile.id, "watch");
+    expect(s.accounts.targetsFor(alice.address)).toEqual(["https://ntfy.sh/alice-private-topic-77"]);
+    expect(((await s.call("GET", "/v1/me", undefined, a.session)).body as any).channels.map((c: any) => [c.kind, c.active])).toEqual([["ntfy", true], ["discord", false], ["slack", false], ["ntfy", false], ["ntfy", false]]);
+    s.accounts.setTier(a.profile.id, "pro");
+    expect(s.accounts.channelsFor(alice.address)).toHaveLength(5);
+
+    // only its owner removes one
     const b = (await s.signIn(bob)).body as any;
-    expect((await s.call("DELETE", `/v1/channels/${(added.body as any).id}`, undefined, b.session)).status).toBe(404);
-    expect((await s.call("DELETE", `/v1/channels/${(added.body as any).id}`, undefined, a.session)).status).toBe(200);
-    expect(s.accounts.targetsFor(alice.address)).toEqual(["https://ntfy.sh/alice-second-topic", "https://ntfy.sh/alice-third-topic"]);
+    expect((await s.call("DELETE", `/v1/channels/${(discord.body as any).id}`, undefined, b.session)).status).toBe(404);
+    expect((await s.call("DELETE", `/v1/channels/${(discord.body as any).id}`, undefined, a.session)).status).toBe(200);
+    expect(s.accounts.channelsFor(alice.address).map((c) => c.kind)).toEqual(["ntfy", "slack", "ntfy", "ntfy"]);
   });
 
-  it("sends the sentence to each of the owner's channels, follows no redirect, and says what it could not deliver", async () => {
+  it("sends the sentence to each channel in that service's plain form, follows no redirect, and says what it could not deliver", async () => {
     const s = service();
     const a = (await s.signIn(alice)).body as any;
-    await s.call("POST", "/v1/channels", { kind: "ntfy", target: "https://ntfy.sh/alice-topic-123" }, a.session);
-    await s.call("POST", "/v1/channels", { kind: "ntfy", target: "https://ntfy.sh/alice-phone-4567" }, a.session);
+    s.accounts.setTier(a.profile.id, "pro");
+    for (const target of ["https://ntfy.sh/alice-topic-123", DISCORD, SLACK]) await s.call("POST", "/v1/channels", { target }, a.session);
     const posts: { url: string; init: Parameters<Post>[1] }[] = [];
     let answer: () => Promise<{ ok: boolean; status: number }> = async () => ({ ok: true, status: 200 });
     const notifier = new ChannelNotifier(s.accounts, async (url, init) => { posts.push({ url, init }); return answer(); }, { now: () => T0 });
 
     await notifier.notify(alice.address, "urgent", "Your USDC account was handed to another wallet.");
-    expect(posts.map((p) => p.url)).toEqual(["https://ntfy.sh/alice-topic-123", "https://ntfy.sh/alice-phone-4567"]);
-    expect(posts[0]!.init).toMatchObject({ method: "POST", redirect: "error", body: "Your USDC account was handed to another wallet.", headers: { Priority: "5" } });
-    // the title names the wallet in plain ASCII (it is a header), and nothing in the message is a link
-    expect(posts[0]!.init.headers.Title).toBe(`Warden Sentinel: urgent (${alice.address.slice(0, 4)}..${alice.address.slice(-4)})`);
-    expect(/^[\x20-\x7e]+$/.test(posts[0]!.init.headers.Title!)).toBe(true);
-    expect(JSON.stringify(posts[0]!.init)).not.toMatch(/https?:\/\//);
+    expect(posts.map((p) => p.url)).toEqual(["https://ntfy.sh/alice-topic-123", DISCORD, SLACK]);
+    const title = `Warden Sentinel: urgent (${alice.address.slice(0, 4)}..${alice.address.slice(-4)})`;
+    expect(posts[0]!.init).toMatchObject({ method: "POST", redirect: "error", body: "Your USDC account was handed to another wallet.", headers: { Title: title, Priority: "5" } });
+    expect(/^[\x20-\x7e]+$/.test(posts[0]!.init.headers.Title!)).toBe(true); // a header: plain ASCII
+    expect(JSON.parse(posts[1]!.init.body)).toEqual({ content: `${title.replace(/[()-]/g, (c) => c)}\nYour USDC account was handed to another wallet.`, allowed_mentions: { parse: [] }, flags: 4 });
+    expect(JSON.parse(posts[2]!.init.body)).toEqual({ text: `${title}\nYour USDC account was handed to another wallet.`, mrkdwn: false, unfurl_links: false, unfurl_media: false });
+    expect(posts.every((p) => p.init.redirect === "error")).toBe(true);
     expect(notifier.undelivered).toEqual([]);
 
     // a channel that refuses, one that throws, and an owner with none: recorded, never thrown
@@ -333,7 +380,28 @@ describe("where alerts go", () => {
     answer = async () => { throw new Error("redirect mode is set to error"); };
     await notifier.notify(alice.address, "alert", "x");
     await notifier.notify(bob.address, "alert", "x");
-    expect(notifier.undelivered.map((u) => u.why)).toEqual(["the channel answered 507", "the channel answered 507", "redirect mode is set to error", "redirect mode is set to error", "the owner has no channel"]);
+    expect(notifier.undelivered.map((u) => u.why)).toEqual([...Array(3).fill("the channel answered 507"), ...Array(3).fill("redirect mode is set to error"), "the owner has no channel"]);
+  });
+
+  it("text quoted from the chain cannot become a link, a mention or formatting in any channel", () => {
+    const hostile = "Sent 5 USDC to a token named @everyone **FREE** [claim](https://evil.example) at www.evil.example <!channel> <https://evil.example|safe> `x` & more";
+    const discord = JSON.parse(messageFor("discord", "T", "alert", hostile).body);
+    expect(discord.allowed_mentions).toEqual({ parse: [] });
+    expect(discord.flags).toBe(4);
+    expect(discord.content).not.toContain("https://");
+    expect(discord.content).not.toMatch(/(^|[^\\])[*_`\[\]@|>~#]/); // every formatting character is escaped
+    expect(discord.content).toContain("\\@everyone \\*\\*FREE\\*\\*");
+    const slack = JSON.parse(messageFor("slack", "T", "alert", hostile).body);
+    expect(slack.mrkdwn).toBe(false);
+    expect(slack.text).not.toContain("<");
+    expect(slack.text).not.toContain("https://");
+    expect(slack.text).toContain("&lt;!channel&gt;");
+    expect(slack.text).toContain("&amp; more");
+    // read aloud it is the same sentence: only invisible characters and escapes were added
+    expect(slack.text.replace(/​/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")).toBe(`T\n${hostile}`);
+    expect(discord.content.replace(/​/g, "").replace(/\\(.)/g, "$1")).toBe(`T\n${hostile}`);
+    // ntfy shows text as text; the sentence goes as it is
+    expect(messageFor("ntfy", "T", "urgent", hostile)).toEqual({ headers: { Title: "T", Priority: "5" }, body: hostile });
   });
 });
 
@@ -486,7 +554,10 @@ describe("the process", () => {
   const env = { SENTINEL_RPC_URL: "https://rpc.example", SENTINEL_DATA_KEY: randomBytes(32).toString("base64") };
 
   it("starts only with an RPC and a data key, and says which is missing", () => {
-    expect(configFrom(env)).toMatchObject({ ok: true, config: { origin: ORIGIN, port: 8791, pollSeconds: 30, maxWallets: 100, trustProxy: false } });
+    expect(configFrom(env)).toMatchObject({ ok: true, config: { origin: ORIGIN, port: 8791, pollSeconds: 60, proPollSeconds: 20, maxWallets: 100, trustProxy: false } });
+    // the paid plan is the faster one, whatever the settings say
+    expect(configFrom({ ...env, SENTINEL_PRO_POLL_SECONDS: "120" })).toMatchObject({ ok: false, why: expect.stringContaining("SENTINEL_PRO_POLL_SECONDS") });
+    expect(configFrom({ ...env, SENTINEL_POLL_SECONDS: "30", SENTINEL_PRO_POLL_SECONDS: "10" })).toMatchObject({ ok: true, config: { pollSeconds: 30, proPollSeconds: 10 } });
     expect(configFrom({ ...env, SENTINEL_MAX_WALLETS: "0" })).toMatchObject({ ok: false });
     expect(configFrom({ ...env, SENTINEL_RPC_URL: undefined })).toEqual({ ok: false, why: "SENTINEL_RPC_URL has to be the address of a Solana RPC." });
     expect(configFrom({ ...env, SENTINEL_RPC_URL: "ftp://x" })).toMatchObject({ ok: false });
@@ -515,6 +586,27 @@ describe("the process", () => {
     expect(at).toBeGreaterThanOrEqual(3);
     expect(rounds).toBeLessThanOrEqual(at + 1); // nothing new after stop, but for one already under way
     expect(log).toEqual(["sentinel: a round failed: the RPC answered 503"]);
+  });
+
+  it("reads each wallet at its plan's pace", () => {
+    const tiers: Record<string, "watch" | "pro"> = { free: "watch", paid: "pro" };
+    const pace = pacer((w) => tiers[w] ?? "watch", { watch: 60, pro: 20 });
+    const read = (now: number) => ["free", "paid"].filter((w) => pace.pick(w, now));
+    expect(read(T0)).toEqual(["free", "paid"]);       // both at once, the first time
+    expect(read(T0 + 20)).toEqual(["paid"]);
+    expect(read(T0 + 40)).toEqual(["paid"]);
+    expect(read(T0 + 60)).toEqual(["free", "paid"]);
+    expect(pace.tried()).toEqual(["free", "paid", "paid", "paid", "free", "paid"]);
+    expect(pace.tried()).toEqual([]);
+    // over three minutes: the paid wallet is read three times as often
+    let free = 0, paid = 0;
+    for (let t = T0 + 80; t < T0 + 80 + 180; t += 20) for (const w of read(t)) { if (w === "free") free += 1; else paid += 1; }
+    expect([free, paid]).toEqual([3, 9]);
+    // a plan that starts is felt at the next round, and one that ends too
+    tiers.free = "pro";
+    expect(read(T0 + 280)).toEqual(["free", "paid"]);
+    pace.forget((w) => w === "paid");
+    expect(read(T0 + 281)).toEqual(["free"]); // forgotten, so due again
   });
 
   it("a limiter counts per key and forgets after its window", () => {

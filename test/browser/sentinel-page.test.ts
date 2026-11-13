@@ -9,6 +9,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
+import { createHmac } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { request as httpRequest, type Server as HttpServer } from "node:http";
 import { createServer as createHttps, type Server } from "node:https";
@@ -19,6 +20,10 @@ import { Keypair } from "@solana/web3.js";
 import type { Page } from "playwright";
 import { WARDEN, launch, type Browser } from "./harness.js";
 import { Accounts } from "../../sentinel/service/src/accounts.js";
+import { Billing, Stripe, type BillingConfig, type StripeFetch } from "../../sentinel/service/src/billing.js";
+import { LAMPORT_MINT } from "../../sentinel/service/src/main.js";
+import { PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../../sentinel/service/src/plans.js";
+import type { Rpc } from "../../sentinel/service/src/rpc.js";
 import { listen } from "../../sentinel/service/src/server.js";
 import { NonceBook } from "../../sentinel/service/src/signin.js";
 import { MemoryStore } from "../../sentinel/service/src/store.js";
@@ -74,9 +79,36 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
   const confirmed: [string, string][] = [];
   const pageErrors: string[] = [];
 
+  // The paid plan, with Stripe and the chain stood in for: Stripe keeps a subscription the way Stripe does,
+  // and the chain says how much $LAMPORT a wallet holds. Checkout starts closed, as it is in production.
+  const WHSEC = "whsec_page_test";
+  const billingCfg: BillingConfig = { secretKey: "sk_test_page", webhookSecret: WHSEC, priceFull: "price_full", priceHolder: "price_holder", centsFull: 1500, centsHolder: 1000, holderMint: LAMPORT_MINT, holderMin: 250_000, pageUrl: `${ARMING}/sentinel/`, checkoutOpen: false };
+  const lamport: Record<string, number> = {};
+  const chain: Rpc = { call: async (_m, params: any[]) => ({ value: lamport[params[0]] ? [{ account: { data: { parsed: { info: { tokenAmount: { amount: String(BigInt(lamport[params[0]]!) * 1_000_000n) } } } } } }] : [] }) };
+  const stripeCalls: { path: string; params: Record<string, string> }[] = [];
+  const subscriptions = new Map<string, any>();
+  const stripeFetch: StripeFetch = async (url, init) => {
+    const u = new URL(url), path = u.pathname.replace("/v1", "");
+    const params = Object.fromEntries(new URLSearchParams(init.method === "POST" ? init.body ?? "" : u.search));
+    stripeCalls.push({ path, params });
+    const reply = (status: number, body: unknown) => ({ ok: status < 300, status, json: async () => body });
+    if (path === "/checkout/sessions") return reply(200, { url: "https://checkout.stripe.com/c/pay/cs_test_page" });
+    if (path === "/billing_portal/sessions") return reply(200, { url: "https://billing.stripe.com/p/session/test_page" });
+    const sub = /^\/subscriptions\/(sub_\w+)$/.exec(path);
+    return sub && subscriptions.has(sub[1]!) ? reply(200, subscriptions.get(sub[1]!)) : reply(404, { error: { code: "resource_missing" } });
+  };
+  const billing = new Billing(billingCfg, accounts, chain, new Stripe(billingCfg.secretKey, stripeFetch));
+  let apiPort = 0;
+  /** Stripe telling the service something, signed as Stripe signs it. */
+  const webhook = async (event: unknown) => {
+    const raw = JSON.stringify(event), t = Math.floor(Date.now() / 1000);
+    const res = await fetch(`http://127.0.0.1:${apiPort}/v1/stripe/webhook`, { method: "POST", headers: { "content-type": "application/json", "stripe-signature": `t=${t},v1=${createHmac("sha256", WHSEC).update(`${t}.${raw}`).digest("hex")}` }, body: raw });
+    return res.status;
+  };
+
   beforeAll(async () => {
-    back = await listen({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async (w, s) => { confirmed.push([w, s]); return true; } }, nonces: new NonceBook(), origin: ARMING }, { port: 0 });
-    const apiPort = (back.address() as { port: number }).port;
+    back = await listen({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async (w, s) => { confirmed.push([w, s]); return true; } }, nonces: new NonceBook(), origin: ARMING, billing: { api: billing, webhookSecret: WHSEC } }, { port: 0 });
+    apiPort = (back.address() as { port: number }).port;
     const dir = mkdtempSync(join(tmpdir(), "warden-cert-"));
     execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", join(dir, "key.pem"), "-out", join(dir, "cert.pem"), "-days", "2", "-subj", "/CN=warden.lamportrobotics.com"], { stdio: "ignore" });
     const types: Record<string, string> = { html: "text/html; charset=utf-8", js: "text/javascript; charset=utf-8", css: "text/css; charset=utf-8" };
@@ -146,7 +178,13 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     // something that is not a topic is refused in the service's own words
     await page.locator("#ntfyTarget").fill("https://evil.example/aaaaaaaaaaaa");
     await page.getByRole("button", { name: "Add", exact: true }).click();
-    await expect.poll(() => page.locator("#notice").innerText()).toContain("not a topic address");
+    await expect.poll(() => page.locator("#notice").innerText()).toContain("not an address I can send alerts to");
+    // the free plan's one channel is taken, and the page says what the plan covers
+    expect(await page.locator("#channelLimit").innerText()).toBe("One ntfy channel on this plan. Pro adds Discord and Slack, and up to five channels.");
+    await page.locator("#ntfyTarget").fill("https://ntfy.sh/a-second-topic-name");
+    await page.getByRole("button", { name: "Add", exact: true }).click();
+    await expect.poll(() => page.locator("#notice").innerText()).toContain("this plan has one alert channel");
+    await page.locator("#ntfyTarget").fill("");
   });
 
   it("finds Warden, links a wallet to it, and unlinks", async () => {
@@ -193,13 +231,75 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     // SENTINEL_SHOT=/some/file.png keeps a picture of the page as it stands here, to look at
     if (process.env.SENTINEL_SHOT) await page.screenshot({ path: process.env.SENTINEL_SHOT, fullPage: true });
     const text = await page.locator("#plans").innerText();
-    expect(text).toContain("Watch");
-    expect(text).toContain("This is your plan.");
+    // both plans in the definition's own words, and rescue as something Pro does not give yet
+    for (const line of [...WATCH_FEATURES, ...PRO_FEATURES, PRO_NOT_YET]) expect(text, line).toContain(line);
     expect(text).toContain("$15 a month");
-    expect(text).toContain("$10 a month while a wallet in this profile holds 250,000 $LAMPORT");
-    expect(text).toContain("Rescue itself is not available yet.");
+    expect(text).toContain("$10 a month, not $15, while a wallet in this profile holds 250,000 $LAMPORT");
+    expect(await page.locator("#plans .plan.mine h3").innerText()).toBe("Watch");
     expect(text).toContain("Not on sale yet.");
     expect(await page.locator("#plans button").count()).toBe(0);
+    // and the service refuses a checkout nobody was offered
+    const session = await page.evaluate(() => sessionStorage.getItem("sentinel.session"));
+    const direct = await fetch(`http://127.0.0.1:${apiPort}/v1/billing/checkout`, { method: "POST", headers: { authorization: `Bearer ${session}` } });
+    expect(direct.status).toBe(403);
+    expect(stripeCalls).toEqual([]);
+  });
+
+  it("sells Pro at the price the wallet earns, and starts the plan on Stripe's word, not on the way back from checkout", async () => {
+    billingCfg.checkoutOpen = true;
+    lamport[W2] = 300_000; // the second wallet of this profile holds the token
+    await page.route("https://checkout.stripe.com/**", (r) => r.fulfill({ contentType: "text/html", body: "<title>Stripe Checkout (stand-in)</title><h1>checkout</h1>" }));
+    await page.route("https://billing.stripe.com/**", (r) => r.fulfill({ contentType: "text/html", body: "<title>Stripe portal (stand-in)</title><h1>portal</h1>" }));
+    await page.reload();
+    const start = page.getByRole("button", { name: "Start Pro for $10 a month" });
+    await expect.poll(() => start.isVisible(), { timeout: 10_000 }).toBe(true);
+    expect(await page.locator("#plans").innerText()).toContain("You have the holder price: a wallet here holds 250,000 $LAMPORT.");
+    await start.click();
+    await page.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 10_000 });
+    const profile = accounts.profileOf(W1)!;
+    expect(stripeCalls.at(-1)).toMatchObject({ path: "/checkout/sessions", params: { mode: "subscription", "line_items[0][price]": "price_holder", client_reference_id: profile } });
+
+    // back from the checkout page, before Stripe has said anything: still Watch
+    await page.goto(`${ARMING}/sentinel/?plan=started`);
+    await expect.poll(() => page.locator("#notice").innerText(), { timeout: 10_000 }).toContain("Stripe is confirming the payment");
+    expect(page.url()).toBe(`${ARMING}/sentinel/`); // the marker is taken out of the address
+    await expect.poll(() => page.locator("#plans .plan.mine h3").innerText(), { timeout: 10_000 }).toBe("Watch");
+    expect(accounts.profile(profile)!.tier).toBe("watch");
+
+    // Stripe says so, signed: now it is Pro
+    subscriptions.set("sub_page", { id: "sub_page", customer: "cus_page", status: "active", metadata: { profile }, items: { data: [{ id: "si_page", price: { id: "price_holder" } }] } });
+    expect(await webhook({ type: "checkout.session.completed", data: { object: { mode: "subscription", subscription: "sub_page", client_reference_id: profile } } })).toBe(200);
+    await page.reload();
+    await expect.poll(() => page.locator("#plans .plan.mine h3").innerText(), { timeout: 10_000 }).toBe("Pro");
+    expect(await page.locator("#walletLimit").innerText()).toBe("2 of 10 wallets on this plan.");
+    expect(await page.locator("#wallets li .what span").first().innerText()).toContain("Not read yet");
+    expect(await page.locator("#channelLimit").innerText()).toBe("Up to 5 channels on this plan: ntfy topics, Discord webhooks and Slack webhooks.");
+
+    // what Pro adds is usable at once: a Discord channel
+    // a made-up address in Discord's shape, put together here so it does not read as a real webhook to a secret scanner
+    const discord = ["https://discord.com/api", "webhooks", "123456789012345678", "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-abcd"].join("/");
+    await page.locator("#ntfyTarget").fill(discord);
+    await page.getByRole("button", { name: "Add", exact: true }).click();
+    const row = page.locator("#channels li").filter({ hasText: "Discord webhook" });
+    await expect.poll(() => row.locator(".what span").innerText(), { timeout: 8000 }).toBe("Discord channel. Alerts are sent here.");
+    expect(await page.content()).not.toContain("abcdefghijklmnopqrstuvwxyzABCDEF");
+    expect(accounts.channelsFor(W1).map((c) => c.kind)).toEqual(["ntfy", "discord"]);
+
+    // the card and cancelling are on Stripe's own page
+    await page.getByRole("button", { name: "Change card or cancel" }).click();
+    await page.waitForURL(/^https:\/\/billing\.stripe\.com\//, { timeout: 10_000 });
+    expect(stripeCalls.at(-1)).toMatchObject({ path: "/billing_portal/sessions", params: { customer: "cus_page" } });
+
+    // cancelled: back to Watch, with the Discord channel kept and out of use
+    subscriptions.get("sub_page").status = "canceled";
+    expect(await webhook({ type: "customer.subscription.deleted", data: { object: { id: "sub_page" } } })).toBe(200);
+    await page.goto(`${ARMING}/sentinel/`);
+    await expect.poll(() => page.locator("#plans .plan.mine h3").innerText(), { timeout: 10_000 }).toBe("Watch");
+    expect(await page.locator("#channels li").filter({ hasText: "Discord webhook" }).locator(".what span").innerText()).toBe("Discord channel. Not in use: this plan does not cover it.");
+    expect(accounts.channelsFor(W1).map((c) => c.kind)).toEqual(["ntfy"]);
+    // a webhook nobody signed changes nothing
+    const forged = await fetch(`http://127.0.0.1:${apiPort}/v1/stripe/webhook`, { method: "POST", headers: { "stripe-signature": "t=1,v1=00" }, body: "{}" });
+    expect(forged.status).toBe(400);
   });
 
   it("removes a wallet only when asked twice, signs out, and ran without an error or a blocked request", async () => {

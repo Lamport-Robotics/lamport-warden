@@ -164,6 +164,13 @@ describe("telling Sentinel which signatures were the owner's, in Chromium", () =
     const opts = await options();
     expect(await opts.locator("#sentinelWallets li").allInnerTexts()).toEqual([expect.stringContaining("linked, but reporting is off")]);
     expect(await opts.locator("#sentinelPage").getAttribute("href")).toBe(`${ARMING}/sentinel/`);
+    // the plans are spelled out in the extension itself: what is free, what Pro costs and adds, and what it does not give yet
+    const plans = await opts.locator("#sentinelPlans").innerText();
+    expect(plans).toContain("Warden is free and stays free.");
+    expect(plans).toContain("Pro is $15 a month, or $10 while a wallet in your Sentinel profile holds 250,000 $LAMPORT.");
+    expect(plans).toContain("10 wallets watched instead of 3");
+    expect(plans).toContain("Rescue is not available yet.");
+    expect(plans).toContain("nothing is bought inside this extension");
     expect(await opts.locator("#reportSigned").isChecked()).toBe(false);
     await opts.locator("#reportSigned").check();
     await expect.poll(() => opts.locator("#reportNote").innerText()).toContain("On.");

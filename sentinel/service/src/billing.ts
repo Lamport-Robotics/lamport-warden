@@ -160,7 +160,7 @@ export class Billing {
     // a profile has one subscription: news about an old one must not undo the current one
     if (p.billing && p.billing.subscription !== subscription.id && PAID.has(p.billing.status)) return;
     this.accounts.setBilling(profile, { customer: subscription.customer, subscription: subscription.id, price: this.priceOf(subscription), status });
-    this.accounts.setTier(profile, PAID.has(status) ? "rescue" : "watch");
+    this.accounts.setTier(profile, PAID.has(status) ? "pro" : "watch");
   }
 
   /**

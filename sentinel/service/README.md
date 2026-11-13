@@ -139,9 +139,30 @@ of the customer and the subscription.
 a Stripe account, and can be run again safely. `test/stripe.real.test.ts` runs the whole path against Stripe
 in test mode when `SENTINEL_STRIPE_TEST_KEY` is set (it refuses a live key).
 
-What the paid tier gives today is ten watched wallets instead of three. Rescue, the reason for the tier, is
-not built into this service yet and cannot move real funds until Lamport Vault and the rescue program are
-audited and on mainnet. Whatever sells this plan has to say so.
+### What each plan gives
+
+`src/plans.ts` is the one definition. The service enforces it, the Sentinel page and the extension's settings
+page print it, and `test/plans.test.ts` fails if the Warden site or the store listing says anything else.
+
+| | Watch (free) | Pro ($15 a month, $10 for holders) |
+|---|---|---|
+| Wallets watched | 3 | 10 |
+| Each wallet read | every minute | every 20 seconds |
+| Alert channels | 1, ntfy | up to 5: ntfy, Discord, Slack |
+| Rescue into the owner's Lamport Vault | no | not yet |
+
+Every Pro line above is something the service does today. Rescue is the reason the tier exists and is not
+one of them: it cannot move real funds until Lamport Vault and the rescue program are audited and on
+mainnet. Every place that describes Pro says so in the same sentence (`PRO_NOT_YET`), and never lists rescue
+as a feature.
+
+When a plan ends, what it added is kept and stops being used: wallets over three are paused, and channels
+past the first ntfy one stay listed and silent. Nothing is deleted, so a plan that comes back loses nothing.
+
+Discord and Slack alerts go only to the exact webhook shapes those services hand out, on their own hosts. A
+sentence can quote text from the chain (a token's name, a memo), so for those two it is sent with every
+formatting character escaped, mentions switched off, links unfurled never, and addresses broken with an
+invisible character so that nothing in an alert can be clicked.
 
 ## Running it
 
