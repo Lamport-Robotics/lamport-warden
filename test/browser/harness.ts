@@ -82,6 +82,14 @@ export async function launch(extensions: string[], extraArgs: string[] = []): Pr
   });
   let worker = ctx.serviceWorkers().find((w) => w.url().endsWith("/background.js"));
   if (!worker) worker = await ctx.waitForEvent("serviceworker", { predicate: (w) => w.url().endsWith("/background.js"), timeout: 15_000 });
+  // A new install opens Warden's welcome in a tab of its own, a moment after the browser starts. It is waited
+  // for here, so that it never opens on top of a page a test is in the middle of: a tab that is not in front
+  // cannot press "Continue", which is Warden doing its job and a test failing for no reason. It is left open,
+  // behind whatever a test opens next.
+  if (extensions.includes(WARDEN)) {
+    const until = Date.now() + 15_000;
+    while (!ctx.pages().some((p) => p.url().includes("options.html?welcome=1")) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+  }
   return { ctx, extensionId: new URL(worker.url()).host, close: () => ctx.close() };
 }
 
