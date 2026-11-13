@@ -269,7 +269,12 @@ function plans(mine: Me): void {
     // everything that bears on the money, said before the button is pressed
     const terms = el("ul", "", "terms");
     terms.append(...purchaseTerms(p.cents, centsFull, centsHolder, p.holderMin).map((t) => el("li", t)));
-    pro.append(b, terms);
+    const agree = el("p", "Starting the plan means you agree to the ", "soft");
+    const link = el("a", "terms");
+    link.href = "/terms/";
+    link.className = "ref";
+    agree.append(link, ", which say the same and add how refunds work.");
+    pro.append(b, terms, agree);
   } else {
     pro.append(el("p", "Not on sale yet.", "soft"));
   }
