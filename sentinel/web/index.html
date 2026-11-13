@@ -26,7 +26,7 @@
   <section class="intro">
     <p class="eyebrow">Sentinel</p>
     <h1>It keeps watching after you sign.</h1>
-    <p class="lede">Warden reads a request before your wallet signs it. Sentinel watches the wallet afterwards, around the clock, and tells you in one sentence when something looks wrong: a token account handed to someone else, a payment to a look-alike address, a spending permission you did not give.</p>
+    <p class="lede">Warden reads a request before your wallet signs it. Sentinel watches the wallet afterwards, around the clock, and tells you in one sentence when something looks wrong: a token account handed to someone else, a payment to a look-alike address, a spending permission you did not give, tokens taken through one you gave long ago.</p>
     <p class="plain">It watches and it tells you. It cannot stop a thief who empties a wallet in a single transaction, and nobody watching can. It helps when there is a gap: a drain in steps, or a permission taken before the money moves.</p>
   </section>
 
@@ -88,7 +88,7 @@
   <section id="real">
     <h2>When an alert is real</h2>
     <p class="plain">If Sentinel tells you about something you did not do, work out which of two things happened. If you are not sure, treat it as the first.</p>
-    <p class="plain"><b>A transaction you never signed</b> (a payment you did not make, an account handed to someone else, a sign-in to this page that was not you). Someone else has that wallet's key. A key that has leaked cannot be made safe again, but what is still in the wallet can be moved:</p>
+    <p class="plain"><b>Your wallet signed something you did not</b> (a payment you did not make, an account handed to someone else, a sign-in to this page that was not you). Someone else has that wallet's key. A key that has leaked cannot be made safe again, but what is still in the wallet can be moved:</p>
     <ol class="steps">
       <li><b>Sign nothing you are sent.</b> After a theft, messages arrive offering to recover the money or "revoke access" through a link. They are the second theft. Sentinel never sends a link and never asks you to sign.</li>
       <li><b>Make a new wallet with a new recovery phrase,</b> on a device you trust. Not another account under the old phrase: the phrase is what leaked.</li>
@@ -96,7 +96,7 @@
       <li><b>Then what is locked:</b> a stake or a position in a protocol has to be withdrawn by its own steps before it can be moved.</li>
       <li><b>Tell Sentinel.</b> Add the new wallet here and remove the old one.</li>
     </ol>
-    <p class="plain"><b>A permission you gave without meaning to</b> (a site got an approval to spend one of your tokens). The key may be fine, and the permission is the danger: whoever holds it can take those tokens whenever they like. Revoke it in your wallet, or move those tokens to another of your accounts, and do it before anything else.</p>
+    <p class="plain"><b>A permission to spend, given or used</b> (a site got an approval to spend one of your tokens; or tokens left in a transaction your wallet did not sign, which is such a permission being used). The key may be fine, and the permission is the danger: whoever holds it can take what it covers whenever they like. Revoke it in your wallet, or move what is left of those tokens to another of your accounts, and do it before anything else.</p>
     <p class="soft">If the alert was about something you did, sign in and press "This was me". Sentinel then treats whoever that paid as someone this wallet pays.</p>
   </section>
 </main>

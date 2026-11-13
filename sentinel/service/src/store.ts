@@ -54,6 +54,8 @@ export interface WalletRecord {
   passedAt?: number;
   /** True when the last pass left transactions unread (too many for one pass, or one the RPC could not show yet): the next turn is a pass, whatever a look says. */
   more?: boolean;
+  /** True while one of its token accounts holds less than the transactions found so far account for: the next turn is a pass, which looks again. */
+  unsettled?: boolean;
   /**
    * What its accounts looked like at the last look (watcher.ts, `glance`): the wallet's balance and owner, and
    * each token account's amount and who may spend or close it, as one line of text. A look that finds the

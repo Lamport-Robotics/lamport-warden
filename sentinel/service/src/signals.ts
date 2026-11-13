@@ -15,12 +15,13 @@ import { looksAlike } from "../../../pincer1/daemon/src/warden/index.js";
 import { fmtSol, fmtToken } from "../../../pincer1/daemon/src/tx/explain.js";
 import { KNOWN_MINTS, U64_MAX } from "../../../pincer1/daemon/src/tx/known.js";
 import type { Baseline } from "./baseline.js";
-import { accountKeys, decode, movementOf, type ObservedTx } from "./observed.js";
+import { accountKeys, decode, movementOf, signersOf, tokenLossesOf, type ObservedTx } from "./observed.js";
 
 export type Level = "info" | "alert" | "urgent";
 export type SignalKind =
   | "delegate_replaced" | "authority_changed" | "wallet_reassigned" | "known_drainer" | "lookalike"
   | "unlimited_approval" | "foreign_nonce" | "new_large_payment" | "burst" | "new_program" | "odd_hour"
+  | "taken_by_permission" | "unexplained_loss"
   | "inbound_from_drainer" | "inbound_from_lookalike"
   // not about the wallet but about the watching of it (blindness.ts)
   | "watch_stopped" | "watch_resumed";
@@ -50,6 +51,13 @@ export interface TokenAccountState {
   owner: string;
   delegate: string | null;
   closeAuthority: string | null;
+  /** What it held when last read, in the token's smallest units, and how many decimals the token has. Absent on a record from before these were kept. */
+  amount?: string;
+  decimals?: number;
+  /** The slot that amount was read at: what happened to the account after it is what a later amount is explained by. */
+  slot?: number;
+  /** Set while it holds less than the transactions found so far account for: when that was first seen, unix seconds. */
+  fellAt?: number;
 }
 
 /** Outbound transfers of the recent past, for the burst rule. The watcher keeps one per wallet. */
@@ -78,6 +86,8 @@ export interface WatchContext {
   ownerSigned?: boolean;
   /** The wallet's recent sends. Updated by `assessTransaction`. */
   window?: BurstWindow;
+  /** The wallet's token accounts as on record, by address: who holds a permission to spend from each. */
+  tokenAccounts?: Readonly<Record<string, TokenAccountState>>;
 
 }
 
@@ -130,6 +140,9 @@ export function assessTransaction(tx: ObservedTx, ctx: WatchContext): Assessment
     }
     // a token account or the wallet itself can still be taken over by a transaction someone else signed
     for (const h of moved.handedOver) out.push(signal("authority_changed", "urgent", false, `Your ${tokenName(h.mint)} account now belongs to ${short(h.to)}, not to you.`));
+    // and its tokens can be taken by one: a transaction that could not be read is not said to be unsigned
+    const taken = parsed ? takenSignal(tx, parsed.signers, ctx) : null;
+    if (taken) out.push(taken);
     return finish(out, false, false);
   }
 
@@ -224,6 +237,54 @@ export function assessTokenAccount(before: TokenAccountState | null, after: Toke
     }
   }
   return finish(out, false, false);
+}
+
+/** "A", "A and B", "A, B and C", and past three: "A, B, C and 2 other tokens". */
+function listed(parts: string[], more: number): string {
+  if (more > 0) return `${parts.join(", ")} and ${more} other token${more === 1 ? "" : "s"}`;
+  return parts.length <= 1 ? parts.join("") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+}
+
+/**
+ * Tokens left the wallet's accounts in a transaction the wallet did not sign.
+ *
+ * A transfer the owner makes is a transaction of the wallet's own, and is judged as one. A transfer the wallet
+ * did not sign is somebody using a permission: a delegate the wallet approved at some time, perhaps months
+ * ago, which is how these thefts work (the approval looks harmless, and the taking comes later, in a
+ * transaction that need not even name the wallet); or a power the token gives its issuer. Either way the
+ * owner did not do it, and whatever the permission still covers can go the same way.
+ */
+function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts">): Signal | null {
+  const permitted = (account: string) => ctx.tokenAccounts?.[account]?.delegate ?? null;
+  // what Sentinel's own delegate moves is a rescue, into the owner's vault, and is reported as one
+  const losses = tokenLossesOf(tx, ctx.wallet).filter((l) => !(ctx.sentinelDelegate && permitted(l.account) === ctx.sentinelDelegate));
+  if (losses.length === 0) return null;
+  const what = listed(losses.slice(0, 3).map((l) => fmtToken(l.lost, l.mint, { decimals: l.decimals })), Math.max(0, losses.length - 3));
+  const start = `${what} left your wallet in a transaction your wallet did not sign.`;
+  const delegates = [...new Set(losses.map((l) => permitted(l.account)).filter((d): d is string => !!d))];
+  const signer = signers[0] ?? null;
+  let rest: string;
+  if (delegates.length === 1 && signers.includes(delegates[0]!)) rest = ` ${short(delegates[0]!)} did it, using a permission to spend that your wallet gave it at some earlier time. Whatever that permission still covers can go the same way until your wallet revokes it.`;
+  else if (delegates.length === 1) rest = ` It went under a permission to spend that your wallet gave ${short(delegates[0]!)} at some earlier time${signer ? `; ${short(signer)} signed the transaction` : ""}. Whatever that permission still covers can go the same way until your wallet revokes it.`;
+  else if (delegates.length > 1) rest = ` It went under permissions to spend that your wallet gave at some earlier time. Whatever those still cover can go the same way until your wallet revokes them.`;
+  else rest = signer ? ` ${short(signer)} signed it.` : "";
+  return signal("taken_by_permission", "urgent", false, start + rest);
+}
+
+/**
+ * A transaction that does not name the wallet at all, found on one of its token accounts: what it took, if it
+ * took anything. (One that names the wallet is read with the wallet's own, by `assessTransaction`.)
+ */
+export function assessTaken(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts">): Assessment {
+  if (tx.failed || accountKeys(tx).includes(ctx.wallet)) return finish([], false, false);
+  const taken = takenSignal(tx, signersOf(tx), ctx);
+  return finish(taken ? [taken] : [], false, false);
+}
+
+/** A token account holds less than the transactions Sentinel could find account for, and it has stopped looking. */
+export function assessUnexplainedLoss(before: TokenAccountState, missing: bigint): Assessment {
+  const what = fmtToken(missing, before.mint, before.decimals !== undefined ? { decimals: before.decimals } : undefined);
+  return finish([signal("unexplained_loss", "alert", false, `${what} left your wallet and Sentinel could not find the transaction that moved it. Your wallet's own transactions do not account for it. Look at the account's recent activity.`)], false, false);
 }
 
 /** The wallet's own account changed hands: the program that owns it is no longer the System Program. */
