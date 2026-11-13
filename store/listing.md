@@ -3,15 +3,19 @@
 What to paste into the developer dashboard. Keep this file in step with what is submitted.
 
 Item ID: `dmlhclkglnpkdhidfjfgjfdjnblnalea`, created on 2026-11-13 from `lamport-warden-0.5.0.zip`. It is a
-**draft**: every field below is filled in and saved, and it is not submitted. It was submitted once that day
-and the review was cancelled, to wait for the version that has the paid tier (Sentinel) built in.
+**draft** and is not submitted. It was submitted once that day and the review was cancelled, to wait for the
+version that has Sentinel built in. That version is 0.6.0.
 
-The draft in the dashboard still has the 0.5.0 texts. The description, the storage justification and the
-data-usage note below have changed since (Sentinel reporting), so paste them again before submitting.
+To submit 0.6.0:
 
-When that version is ready: upload its zip on the Package tab, set Payments on the Distribution tab to
-"Contains in-app purchases" if the extension then offers the subscription, and submit. Google flags the host
-permission for an in-depth review, so expect it to take longer than a few days.
+1. Package tab: upload `lamport-warden-0.6.0.zip` (`pnpm package`).
+2. Store listing tab: paste the description below again (it now mentions Sentinel) and replace the three
+   screenshots with the ones in `store/screenshots/` (retaken from 0.6.0).
+3. Privacy tab: paste the storage justification and the data-usage note below again.
+4. Distribution tab: Payments. The extension itself sells nothing; it links to the Sentinel page, where the
+   paid plan is sold once checkout is open. Choose "Contains in-app purchases" if checkout is open when you
+   submit, "Free of charge" if it is not.
+5. Submit. Google flags the host permission for an in-depth review, so expect longer than a few days.
 
 ## Store listing tab
 

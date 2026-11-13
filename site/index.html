@@ -100,6 +100,7 @@
   </a>
   <nav class="nav" aria-label="Site">
     <a href="#doors">Wallets</a>
+    <a href="/sentinel/">Sentinel</a>
     <a href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">Source</a>
   </nav>
 </header>
@@ -115,7 +116,7 @@
           <a class="btn solid" href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">Get the developer preview</a>
           <a class="btn" href="#doors">Which wallets it covers</a>
         </div>
-        <p class="status">Version 0.5. Open source. Not in the Chrome Web Store yet.</p>
+        <p class="status">Version 0.6. Open source. Not in the Chrome Web Store yet.</p>
       </div>
       <div class="stage" aria-label="What Warden shows when it blocks a request">
         <div class="card">
@@ -173,13 +174,30 @@
     </div>
   </section>
 
+  <section class="sec" id="sentinel">
+    <div class="inner two">
+      <div>
+        <h2>Sentinel keeps watching <span>after you sign.</span></h2>
+        <p>Warden reads a request before your wallet signs it. Sentinel is the other half: a service that watches the wallet afterwards, around the clock, and tells you in one sentence when something looks wrong.</p>
+        <p>You sign in with a wallet, not an email. Watching three wallets is free.</p>
+        <div class="cta"><a class="btn solid" href="/sentinel/">Open Sentinel</a></div>
+      </div>
+      <div>
+        <h2>What it can and cannot do.</h2>
+        <p>It tells you when a token account is handed to someone else, a payment goes to a look-alike address, or a spending permission appears that you did not give. An alert is a plain sentence with no link in it.</p>
+        <p>It cannot stop a thief who empties a wallet in a single transaction, and nobody watching can. Moving your tokens to safety for you is planned, and is not available yet.</p>
+      </div>
+    </div>
+  </section>
+
   <section class="sec">
     <div class="inner two">
       <div>
         <h2>What leaves your browser.</h2>
-        <p>There is no account, no Lamport server and no model. Your history stays in the extension's storage on your machine.</p>
+        <p>There is no account and no model, and by default nothing goes to Lamport. Your history stays in the extension's storage on your machine.</p>
         <p>By default Warden makes one kind of network call. Most swaps name their accounts by position in a table stored on chain, and to say where the money goes Warden reads that table from a Solana RPC. The RPC learns which table was asked for and your IP address, not your wallet, the transaction or the site. You can point it at your own RPC, or turn it off.</p>
         <p>You can also turn on simulation. Warden then sends a swap, unsigned, to your RPC and tells you what would leave your wallet and what would arrive. The RPC sees that transaction, so it stays off until you choose it.</p>
+        <p>If you use Sentinel, you can let Warden tell it which signatures were yours, so it stays quiet about your own payments. That sends a wallet's address and a transaction's signature, and nothing else. It is off until you turn it on.</p>
       </div>
       <div>
         <h2>Advice, not a lock.</h2>

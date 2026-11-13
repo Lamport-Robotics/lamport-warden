@@ -1,6 +1,6 @@
 # Lamport Warden
 
-Browser extension, v0.5. Not released: it is not in the Chrome Web Store (a draft listing is filled in and
+Browser extension, v0.6. Not released: it is not in the Chrome Web Store (a draft listing is filled in and
 waits for the version that carries Sentinel), and nobody outside Lamport has reviewed it. Load it unpacked to
 try it.
 
