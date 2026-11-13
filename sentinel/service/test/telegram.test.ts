@@ -3,7 +3,7 @@
  * bot answers. Telegram itself is stood in for by a function that takes the calls and writes them down.
  */
 import { describe, it, expect } from "vitest";
-import { LINK_SECONDS, LinkCodes, SAID, TOKEN_SHAPE, TelegramBot, answer, chatOf, chatTarget, listen, type Incoming, type TelegramFetch } from "../src/telegram.js";
+import { LINK_SECONDS, LinkCodes, SAID, TOKEN_SHAPE, TelegramBot, answer, chatOf, chatTarget, linkedTo, listen, type Incoming, type TelegramFetch } from "../src/telegram.js";
 
 const TOKEN = ["7123456789", "AAH" + "x".repeat(32)].join(":");
 const T0 = 1_794_312_000;
@@ -102,6 +102,34 @@ describe("after a restart", () => {
   });
 });
 
+describe("where it has got to", () => {
+  it("follows Telegram's numbering down as well as up, and asks without a number after a long quiet", async () => {
+    const asked: any[] = [];
+    const batches = [[{ update_id: 900, message: { text: "a", chat: { id: 1 } } }], [{ update_id: 17, message: { text: "b", chat: { id: 1 } } }], []];
+    const t = telegram({ getUpdates: (body) => { asked.push(body); return { json: { ok: true, result: batches.shift() ?? [] } }; } });
+    await t.bot.incoming(1);
+    // after a week with nothing, Telegram may start again from any number: a lower one is still the newest
+    expect(await t.bot.incoming(1)).toEqual([{ chat: "1", text: "b" }]);
+    await t.bot.incoming(1);
+    expect(asked.map((a) => a.offset)).toEqual([0, 901, 18]);
+    // three days without a message: the next asking names no number, so whatever Telegram has is handed over
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 4 * 86_400_000;
+      await t.bot.incoming(1);
+      expect("offset" in asked.at(-1)).toBe(false);
+    } finally { Date.now = realNow; }
+  });
+
+  it("says when a chat has a new number, as Telegram does for a group it made into a supergroup", async () => {
+    const t = telegram({ sendMessage: () => ({ status: 400, json: { ok: false, error_code: 400, description: "Bad Request: group chat was upgraded to a supergroup chat", parameters: { migrate_to_chat_id: -1001234567890 } } }) });
+    expect(await t.bot.send("-4242", "x")).toEqual({ ok: false, status: 400, movedTo: "-1001234567890" });
+    // and takes nothing that is not a number for one
+    const odd = telegram({ sendMessage: () => ({ status: 400, json: { ok: false, parameters: { migrate_to_chat_id: "somewhere/else" } } }) });
+    expect(await odd.bot.send("-4242", "x")).toEqual({ ok: false, status: 400 });
+  });
+});
+
 describe("the one-time codes", () => {
   it("tie one chat to one profile, once, for a quarter of an hour", () => {
     const codes = new LinkCodes();
@@ -130,7 +158,8 @@ describe("the one-time codes", () => {
 });
 
 describe("what the bot answers", () => {
-  function setup(linking: { ok: true } | { ok: false; why: string } = { ok: true }) {
+  const WALLETS = ["7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", "H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS"];
+  function setup(linking: { ok: true; wallets: string[] } | { ok: false; why: string } = { ok: true, wallets: WALLETS.slice(0, 1) }) {
     const codes = new LinkCodes();
     const linked: [string, string][] = [], unlinked: string[] = [];
     const channels = new Set<string>();
@@ -145,13 +174,17 @@ describe("what the bot answers", () => {
   it("links the chat a good code came from, and says so", async () => {
     const s = setup();
     const code = s.codes.issue("alice", T0);
-    expect(await s.say(`/start ${code}`)).toBe(SAID.linked);
+    // the chat is told which wallets it will hear about: someone sent a link by a stranger sees they are not theirs
+    expect(await s.say(`/start ${code}`)).toBe("This chat now gets Warden Sentinel's alerts for the Sentinel profile that watches 7xKX..gAsU: one plain sentence each, never with a link, and never asking you to sign anything. If you did not ask for this on the Sentinel page yourself, or to end it, send /stop here.");
     expect(s.linked).toEqual([["alice", "111"]]);
     // the same link pressed again, by anyone: nothing
     expect(await s.say(`/start ${code}`, "666")).toBe(SAID.stale);
     expect(s.linked).toHaveLength(1);
     // in a group the command carries the bot's name
-    expect(await s.say(`/start@WardenSentinelBot ${s.codes.issue("bob", T0)}`, "-100200")).toBe(SAID.linked);
+    expect(await s.say(`/start@WardenSentinelBot ${s.codes.issue("bob", T0)}`, "-100200")).toBe(linkedTo(WALLETS.slice(0, 1), true));
+    expect(linkedTo(WALLETS, true)).toBe("This chat now gets Warden Sentinel's alerts for the Sentinel profile that watches 7xKX..gAsU and 9WzD..AWWM and 1 more: one plain sentence each, never with a link, and never asking you to sign anything. Whoever connected it can take it out again on the Sentinel page. If this group should not be getting them, remove this bot from the group.");
+    expect(linkedTo([], false)).toContain("alerts for a Sentinel profile:");
+    expect(linkedTo(WALLETS, false)).not.toMatch(/https?:|www\.|t\.me/);
     expect(s.linked[1]).toEqual(["bob", "-100200"]);
   });
 
@@ -180,7 +213,7 @@ describe("the listening", () => {
   it("answers each message, gives a chat five answers a minute, and keeps going when Telegram is away", async () => {
     const sent: [string, string][] = [];
     const waits: number[] = [];
-    const logged: string[] = [];
+    const logged: string[] = [], heard: string[] = [];
     const codes = new LinkCodes();
     const code = codes.issue("alice", T0);
     const batches: (Incoming[] | "down")[] = ["down", "down", [{ chat: "1", text: `/start ${code}` }, ...Array.from({ length: 8 }, () => ({ chat: "2", text: "hi" }))], [{ chat: "2", text: "hi" }]];
@@ -189,16 +222,18 @@ describe("the listening", () => {
       incoming: async () => { const b = batches.shift(); if (b === undefined) { running.stop(); return []; } if (b === "down") throw new Error("Telegram could not be reached"); return b; },
       send: async (chat: string, text: string) => { sent.push([chat, text]); return { ok: true, status: 200 }; },
     };
-    running = listen({ bot, codes, link: async () => ({ ok: true }), unlink: async () => false, now: () => now, wait: async (ms) => { waits.push(ms); }, log: (l) => logged.push(l) });
+    running = listen({ bot, codes, link: async () => ({ ok: true as const, wallets: [] }), unlink: async () => false, now: () => now, wait: async (ms) => { waits.push(ms); }, log: (l) => logged.push(l), heard: (ok, why) => { heard.push(ok ? "yes" : `no: ${why}`); } });
     await running.done;
     expect(waits).toEqual([2000, 4000]); // slower each time, and back to quick once it answers
     expect(logged).toEqual(["sentinel: telegram: Telegram could not be reached; trying again in 2 s", "sentinel: telegram: Telegram could not be reached; trying again in 4 s"]);
-    expect(sent.filter(([chat]) => chat === "1")).toEqual([["1", SAID.linked]]);
+    expect(sent.filter(([chat]) => chat === "1")).toEqual([["1", linkedTo([], false)]]);
+    // and whoever started it was told, each time, whether Telegram answered
+    expect(heard.slice(0, 3)).toEqual(["no: Telegram could not be reached", "no: Telegram could not be reached", "yes"]);
     expect(sent.filter(([chat]) => chat === "2")).toHaveLength(5); // nine messages, five answers
     // a minute later it is answered again
     now += 61;
     batches.push([{ chat: "2", text: "hi" }]);
-    running = listen({ bot, codes, link: async () => ({ ok: true }), unlink: async () => false, now: () => now, wait: async () => undefined, log: () => undefined });
+    running = listen({ bot, codes, link: async () => ({ ok: true as const, wallets: [] }), unlink: async () => false, now: () => now, wait: async () => undefined, log: () => undefined });
     await running.done;
     expect(sent.filter(([chat]) => chat === "2")).toHaveLength(6);
   });

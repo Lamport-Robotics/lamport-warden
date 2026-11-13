@@ -341,6 +341,17 @@ export class Accounts {
     return { ok: true, channel: { id: channel.id, kind: channel.kind, hint: channel.hint }, already: false };
   }
 
+  /** A Telegram chat that has a new number (Telegram renumbers a group it makes into a supergroup): the channel follows it. */
+  retargetTelegram(id: string, chat: string): boolean {
+    const c = this.data.channels.find((x) => x.id === id && x.kind === "telegram");
+    const target = chatTarget(chat);
+    if (!c || chatOf(target) === null) return false;
+    c.target = seal(this.dataKey, target);
+    c.hint = hintOf("telegram", target);
+    this.store.flush();
+    return true;
+  }
+
   /** The channels, of any profile, that are this Telegram chat: what "/stop" in the chat ends. */
   telegramChannels(chat: string): { profile: string; id: string; hint: string; active: boolean }[] {
     const target = chatTarget(chat);

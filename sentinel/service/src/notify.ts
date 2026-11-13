@@ -56,7 +56,7 @@ export class ChannelNotifier implements Notifier {
   constructor(private accounts: Accounts, private post: Post = (u, i) => fetch(u, i), private opts: {
     timeoutMs?: number; now?: () => number;
     /** The bot that Telegram chats are written to. Without one, a Telegram channel takes nothing and is shown as failing. */
-    telegram?: { send(chat: string, text: string, quiet?: boolean): Promise<{ ok: boolean; status: number | null }> };
+    telegram?: { send(chat: string, text: string, quiet?: boolean): Promise<{ ok: boolean; status: number | null; movedTo?: string }> };
   } = {}) {}
 
   private now(): number { return this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000); }
@@ -73,7 +73,10 @@ export class ChannelNotifier implements Notifier {
       if (channel.kind === "telegram") {
         // a chat is written to through the bot, which shows the sentence as plain characters (telegram.ts)
         const chat = chatOf(channel.url);
-        const res = chat && this.opts.telegram ? await this.opts.telegram.send(chat, `${title}\n${sentence}`, quiet) : { ok: false, status: null };
+        let res: { ok: boolean; status: number | null; movedTo?: string } = chat && this.opts.telegram ? await this.opts.telegram.send(chat, `${title}\n${sentence}`, quiet) : { ok: false, status: null };
+        // A group that Telegram has made into a supergroup has a new number, and says so when the old one is
+        // written to. The channel follows it, and the message is sent again, once.
+        if (!res.ok && res.movedTo && this.opts.telegram && this.accounts.retargetTelegram(channel.id, res.movedTo)) res = await this.opts.telegram.send(res.movedTo, `${title}\n${sentence}`, quiet);
         status = res.status; ok = res.ok;
         detail = this.opts.telegram ? (res.status === null ? "Telegram could not be reached" : `Telegram answered ${res.status}`) : "there is no Telegram bot to send through";
       } else {

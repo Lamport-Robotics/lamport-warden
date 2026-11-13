@@ -25,7 +25,7 @@ import { LAMPORT_MINT, telegramLinking } from "../../sentinel/service/src/main.j
 import { PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, purchaseTerms, renewalTerms } from "../../sentinel/service/src/plans.js";
 import type { Rpc } from "../../sentinel/service/src/rpc.js";
 import { listen, type ApiDeps } from "../../sentinel/service/src/server.js";
-import { LinkCodes, SAID, answer } from "../../sentinel/service/src/telegram.js";
+import { LinkCodes, answer, linkedTo } from "../../sentinel/service/src/telegram.js";
 import { NonceBook } from "../../sentinel/service/src/signin.js";
 import { MemoryStore } from "../../sentinel/service/src/store.js";
 
@@ -348,7 +348,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     // nothing is a channel yet. Then the chat presses Start, which sends the bot the code from the link
     expect(accounts.channelsFor(W1).map((c) => c.kind)).toEqual(["ntfy", "discord"]);
     const code = new URL((await link.getAttribute("href"))!).searchParams.get("start")!;
-    expect(await answer({ chat: "5550001234", text: `/start ${code}` }, { codes, ...telegramLinking(accounts, async () => undefined) }, Math.floor(Date.now() / 1000))).toBe(SAID.linked);
+    expect(await answer({ chat: "5550001234", text: `/start ${code}` }, { codes, ...telegramLinking(accounts, async () => undefined) }, Math.floor(Date.now() / 1000))).toBe(linkedTo(accounts.walletsOf(accounts.profileOf(W1)!), false));
     // the page finds it by asking, and says so
     const chat = page.locator("#channels li").filter({ hasText: "Telegram chat …1234" });
     await expect.poll(() => chat.locator(".what span").innerText().catch(() => ""), { timeout: 12_000 }).toBe("Telegram chat. Alerts are sent here.");

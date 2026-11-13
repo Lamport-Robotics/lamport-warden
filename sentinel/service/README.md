@@ -300,7 +300,8 @@ to a chat that wrote to it first. So it goes the other way round.
   `https://t.me/<the bot>?start=<code>`.
 - The owner opens it and presses Start. Telegram sends the bot `/start <code>` from their chat. The chat
   that sent it becomes a channel of that profile, the profile's channels are told as for any channel added,
-  and the bot says so in the chat.
+  and the bot says so in the chat, naming the wallets that profile watches: someone who was sent a link by a
+  stranger and pressed Start sees that the wallets are not theirs, and is told that `/stop` ends it.
 - There is no other way in. A chat typed into the address field is refused, so nobody can point the bot at
   a chat that is not theirs.
 - `/stop` in the chat ends it, after the profile's channels are told. The page removes it like any channel.
@@ -310,7 +311,13 @@ to a chat that wrote to it first. So it goes the other way round.
   sender's name with each message; the service reads the chat's number and the text and keeps nothing else.
 
 The bot reads its messages by asking for them (a long poll), so nothing has to be opened to the internet
-for Telegram to reach. It answers a code, `/stop`, and anything else with one line saying what it is for; a
+for Telegram to reach. When Telegram stops answering that asking (the token was taken back, something else
+is reading the bot's messages), the bot is deaf and a chat that pressed Start would wait for ever: after
+five minutes the page stops offering Telegram and whoever runs the service is told, and both are as they
+were when it answers again. Telegram numbers messages in order except after a week with none, so the bot
+follows the numbering down as well as up, and after three quiet days asks without a number. A group that
+Telegram makes into a supergroup gets a new number; the channel follows it the first time the old one is
+written to, and the alert is sent again there. It answers a code, `/stop`, and anything else with one line saying what it is for; a
 chat gets five answers a minute. Like every message Sentinel sends, what it sends has no link in it, and is
 written so that Telegram makes nothing in it tappable (an address, a mention, a command, a cashtag quoted
 from the chain).

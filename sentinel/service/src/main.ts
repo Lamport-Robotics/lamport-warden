@@ -347,7 +347,7 @@ export function telegramLinking(accounts: Accounts, notice: (profile: string, se
       if (!r.ok) return { ok: false, why: sentence(r.why) };
       // every channel of the profile hears it, the new one among them
       if (!r.already) await notice(profile, channelAddedNotice(r.channel.hint, null));
-      return { ok: true };
+      return { ok: true, wallets: accounts.walletsOf(profile) };
     },
     async unlink(chat) {
       const channels = accounts.telegramChannels(chat);
@@ -472,9 +472,23 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
       return;
     }
     const codes = new LinkCodes();
-    const hearing = hearTelegram({ bot, codes, ...telegramLinking(accounts, (profile, sentence) => notifier.notice(profile, sentence)) });
+    const on = { username, codes };
+    // A bot that is asked for its messages and not answered (the token was taken back, something else is
+    // reading them) is deaf: a chat that pressed Start would wait for ever. After five minutes of that the
+    // page stops handing out links and whoever runs the service is told; when Telegram answers again, both
+    // are as they were. Alerts to chats already connected do not depend on it.
+    let deafSince: number | null = null;
+    const heard = (ok: boolean, why?: string) => {
+      const t = Math.floor(Date.now() / 1000);
+      if (ok) { deafSince = null; offered.telegram = on; return; }
+      deafSince ??= t;
+      if (t - deafSince < 300) return;
+      delete offered.telegram;
+      void ops.say(`Telegram is not answering the bot's asking for its messages (${(why ?? "no reason given").slice(0, 80)}). Chats cannot be connected until it does, and the page has stopped offering it; alerts to chats already connected are still sent.`, "telegram-deaf", 6 * 3600);
+    };
+    const hearing = hearTelegram({ bot, codes, heard, ...telegramLinking(accounts, (profile, sentence) => notifier.notice(profile, sentence)) });
     stopTelegram = () => { telegramStopped = true; hearing.stop(); };
-    offered.telegram = { username, codes };
+    offered.telegram = on;
   };
   await startTelegram();
 

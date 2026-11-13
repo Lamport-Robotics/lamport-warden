@@ -15,7 +15,7 @@ import { channelAddedNotice, channelRemovedNotice } from "../src/notices.js";
 import { api, type ApiRequest } from "../src/server.js";
 import { NonceBook, signInText } from "../src/signin.js";
 import { MemoryStore } from "../src/store.js";
-import { LINK_SECONDS, LinkCodes, SAID, answer } from "../src/telegram.js";
+import { LINK_SECONDS, LinkCodes, SAID, answer, linkedTo } from "../src/telegram.js";
 
 const ORIGIN = "https://warden.lamportrobotics.com", HOST = "warden.lamportrobotics.com";
 const T0 = 1_794_312_000;
@@ -78,7 +78,9 @@ describe("connecting a Telegram chat", () => {
     // nothing is a channel until the chat has spoken
     expect(((await s.call("GET", "/v1/me", undefined, session)).body as any).channels).toEqual([]);
 
-    expect(await s.says("5550001234", `/start ${s.codeOf(url)}`)).toBe(SAID.linked);
+    // the chat is told which wallet's alerts it now gets, and how to end it
+    expect(await s.says("5550001234", `/start ${s.codeOf(url)}`)).toBe(linkedTo([alice.address], false));
+    expect(linkedTo([alice.address], false)).toContain(`the Sentinel profile that watches ${alice.address.slice(0, 4)}..${alice.address.slice(-4)}`);
     const me = (await s.call("GET", "/v1/me", undefined, session)).body as any;
     expect(me.channels).toMatchObject([{ kind: "telegram", hint: "Telegram chat …1234", active: true }]);
     // the chat's number is sealed in the data, like any channel's address
@@ -117,8 +119,8 @@ describe("connecting a Telegram chat", () => {
     const s = service();
     await s.signIn(alice);
     const profile = s.accounts.profileOf(alice.address)!;
-    expect(await s.says("5550001234", `/start ${s.codes.issue(profile, T0)}`)).toBe(SAID.linked);
-    expect(await s.says("5550001234", `/start ${s.codes.issue(profile, T0)}`)).toBe(SAID.linked);
+    expect(await s.says("5550001234", `/start ${s.codes.issue(profile, T0)}`)).toBe(linkedTo([alice.address], false));
+    expect(await s.says("5550001234", `/start ${s.codes.issue(profile, T0)}`)).toBe(linkedTo([alice.address], false));
     expect(s.accounts.telegramChannels("5550001234")).toHaveLength(1);
     expect(s.chats.filter((c) => c.text.includes("was added"))).toHaveLength(1);
   });
@@ -155,6 +157,23 @@ describe("alerts to a Telegram chat", () => {
     expect(await s.notifier.notify(alice.address, "alert", "Something happened.")).toEqual({ delivered: 1, failed: 1 });
     expect(s.accounts.channelViews(s.profile).find((c) => c.kind === "telegram")!.failing).toEqual({ since: T0, why: "it answered 403" });
     expect(s.posted.map((p) => p.body).join("\n")).toContain("An alert could not be delivered to another of this profile's channels (Telegram chat …1234): it answered 403.");
+  });
+
+  it("follow a group to its new number when Telegram has made it a supergroup, and deliver there", async () => {
+    const s = service();
+    await s.signIn(alice);
+    const profile = s.accounts.profileOf(alice.address)!;
+    s.accounts.addTelegram(profile, "-4242", T0);
+    const sent: string[] = [];
+    const bot = { send: async (chat: string) => { sent.push(chat); return chat === "-4242" ? { ok: false, status: 400, movedTo: "-1001234567890" } : { ok: true, status: 200 }; } };
+    const notifier = new ChannelNotifier(s.accounts, async () => ({ ok: true, status: 200 }), { now: () => T0, telegram: bot });
+    expect(await notifier.notify(alice.address, "urgent", "Something happened.")).toEqual({ delivered: 1, failed: 0 });
+    expect(sent).toEqual(["-4242", "-1001234567890"]);
+    expect(s.accounts.telegramChannels("-1001234567890")).toMatchObject([{ profile, hint: "Telegram chat …7890", active: true }]);
+    expect(s.accounts.telegramChannels("-4242")).toEqual([]);
+    // the next goes straight to the new number
+    await notifier.notify(alice.address, "alert", "Again.");
+    expect(sent).toEqual(["-4242", "-1001234567890", "-1001234567890"]);
   });
 
   it("are not sent anywhere by a service that has lost its bot, and the channel says so", async () => {
