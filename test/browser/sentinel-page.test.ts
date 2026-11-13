@@ -250,6 +250,10 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
   it("says plainly what the paid plan is and that it is not on sale", async () => {
     // SENTINEL_SHOT=/some/file.png keeps a picture of the page as it stands here, to look at
     if (process.env.SENTINEL_SHOT) await page.screenshot({ path: process.env.SENTINEL_SHOT, fullPage: true });
+    // the standing advice is on the page for an owner too; SENTINEL_SHOT_REAL=/some/file.png keeps a picture of it
+    expect(await page.locator("#real h2").innerText()).toBe("When an alert is real");
+    expect(await page.locator("#real ol.steps li").count()).toBe(5);
+    if (process.env.SENTINEL_SHOT_REAL) await page.locator("#real").screenshot({ path: process.env.SENTINEL_SHOT_REAL });
     const text = await page.locator("#plans").innerText();
     // both plans in the definition's own words, and rescue as something Pro does not give yet
     for (const line of [...WATCH_FEATURES, ...PRO_FEATURES, PRO_NOT_YET]) expect(text, line).toContain(line);

@@ -54,6 +54,9 @@ Works with Phantom, Backpack and Solflare through Wallet Standard, which is what
 the older page objects of Phantom and Backpack. Solflare's older page object cannot be guarded; the settings
 page tells you when Warden meets it.
 
+You can watch it work before you trust it with anything: warden.lamportrobotics.com/try has a practice wallet
+that holds nothing and eight requests to try on it.
+
 No account, no model, and by default nothing goes to Lamport. The only network request is to read on-chain
 lookup tables from a Solana RPC you can change or turn off. You can turn on simulation, which sends a swap,
 unsigned, to your RPC to find out what it would do; it is off until you choose it.
