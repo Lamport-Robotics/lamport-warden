@@ -232,6 +232,10 @@ of the customer and the subscription.
   them, and are read again when there is room.
 - **The last wallet cannot be removed while the plan runs**, because that removes the profile and the
   subscription would go on charging with nobody behind it.
+- **Room is kept for those who pay.** The service holds only so many wallets. When the paid plan is set up, a
+  fifth of the places (`SENTINEL_RESERVED_FOR_PRO`) are not given to free sign-ups, so that someone paying
+  for ten wallets can add them whoever signed up free in the meantime. Full is still full: nobody is put out
+  to make room.
 - **Only a subscription to this plan counts.** The Stripe account can sell other things; a subscription whose
   one item is not one of the plan's two prices changes nothing here, whatever profile it names.
 - **One checkout page at a time, good for half an hour.** Opening another closes the one before at Stripe, so

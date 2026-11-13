@@ -361,6 +361,43 @@ describe("what the owner is told about the plan", () => {
   });
 });
 
+describe("room for those who pay", () => {
+  it("the last places are kept for the paid plan: a free sign-up is turned away, a paying profile still adds its wallets", async () => {
+    const store = new MemoryStore();
+    const accounts = new Accounts(store, Buffer.alloc(32, 9), { maxWallets: 10, reservedForPro: 4 });
+    const stripe = new FakeStripe();
+    const billing = new Billing(cfg, accounts, new Chain(), new Stripe(cfg.secretKey, stripe.fetch));
+    const paying = accounts.admit(A, null, T0);
+    const profile = paying.ok ? paying.profile : "";
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    // five more free profiles: six places taken, which is all that is open to anyone
+    for (let i = 0; i < 5; i++) expect(accounts.admit(addr(40 + i), null, T0 + i)).toMatchObject({ ok: true, created: true });
+    expect(accounts.places()).toEqual({ taken: 6, open: 6, inAll: 10 });
+    expect(accounts.admit(addr(50), null, T0 + 9)).toEqual({ ok: false, status: 503, why: "Sentinel is watching as many wallets as it can for now. Try again later." });
+    // a free profile cannot add a second wallet either
+    const free = accounts.profileOf(addr(40))!;
+    expect(accounts.admit(addr(51), free, T0 + 9)).toMatchObject({ ok: false, status: 503 });
+    // the paying profile adds wallets into the places kept for it, up to the whole house
+    for (let i = 0; i < 4; i++) expect(accounts.admit(addr(60 + i), profile, T0 + 10 + i), `wallet ${i}`).toMatchObject({ ok: true });
+    expect(accounts.places().taken).toBe(10);
+    expect(accounts.admit(addr(70), profile, T0 + 20)).toMatchObject({ ok: false, status: 503 }); // and no further: full is full
+    // everyone already here still signs in
+    expect(accounts.admit(addr(40), null, T0 + 30)).toMatchObject({ ok: true, created: false });
+  });
+
+  it("is a fifth of the house when there is a plan to pay for, and nothing when there is not", () => {
+    const base = { SENTINEL_RPC_URL: "https://rpc.example", SENTINEL_DATA_KEY: Buffer.alloc(32, 1).toString("base64") };
+    const paid = { ...base, SENTINEL_STRIPE_SECRET_KEY: "sk_test_x", SENTINEL_STRIPE_WEBHOOK_SECRET: "whsec_x", SENTINEL_STRIPE_PRICE_FULL: "price_1", SENTINEL_STRIPE_PRICE_HOLDER: "price_2" };
+    expect(configFrom(base)).toMatchObject({ ok: true, config: { maxWallets: 100, reservedForPro: 0 } });
+    expect(configFrom(paid)).toMatchObject({ ok: true, config: { maxWallets: 100, reservedForPro: 20 } });
+    expect(configFrom({ ...paid, SENTINEL_MAX_WALLETS: "7" })).toMatchObject({ ok: true, config: { reservedForPro: 1 } });
+    expect(configFrom({ ...paid, SENTINEL_RESERVED_FOR_PRO: "0" })).toMatchObject({ ok: true, config: { reservedForPro: 0 } });
+    for (const bad of ["100", "-1", "2.5", "many"]) expect(configFrom({ ...paid, SENTINEL_RESERVED_FOR_PRO: bad })).toEqual({ ok: false, why: "SENTINEL_RESERVED_FOR_PRO has to be a whole number, zero or more, and less than SENTINEL_MAX_WALLETS." });
+    // with no limit on the house there is nothing to keep
+    expect(new Accounts(new MemoryStore(), Buffer.alloc(32, 9)).places()).toEqual({ taken: 0, open: null, inAll: null });
+  });
+});
+
 describe("a plan its owner cancelled", () => {
   const END = T0 + 20 * 86_400; // 30 November 2026
 
