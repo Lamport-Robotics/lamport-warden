@@ -1,0 +1,3 @@
+[submodule "pincer1"]
+	path = pincer1
+	url = https://github.com/Lamport-Robotics/pincer1.git
