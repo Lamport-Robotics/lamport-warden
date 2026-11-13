@@ -22,6 +22,8 @@ export type SignalKind =
   | "delegate_replaced" | "authority_changed" | "wallet_reassigned" | "known_drainer" | "lookalike"
   | "unlimited_approval" | "foreign_nonce" | "new_large_payment" | "burst" | "new_program" | "odd_hour"
   | "taken_by_permission" | "unexplained_loss"
+  // more names the wallet than can be read (watcher.ts)
+  | "watch_behind"
   | "inbound_from_drainer" | "inbound_from_lookalike"
   // not about the wallet but about the watching of it (blindness.ts)
   | "watch_stopped" | "watch_resumed";
@@ -34,6 +36,8 @@ export interface Signal {
   /** Unlike the wallet's past, as opposed to something done to it. Dropped for a transaction the owner reported. */
   soft: boolean;
   sentence: string;
+  /** For a taking: whose permissions it went under. What "this was me" from the owner makes familiar. */
+  takers?: string[];
 }
 
 const SYSTEM = "11111111111111111111111111111111";
@@ -58,6 +62,8 @@ export interface TokenAccountState {
   slot?: number;
   /** Set while it holds less than the transactions found so far account for: when that was first seen, unix seconds. */
   fellAt?: number;
+  /** When its own list of transactions was last read for that, so that many such accounts take turns. */
+  lookedAt?: number;
 }
 
 /** Outbound transfers of the recent past, for the burst rule. The watcher keeps one per wallet. */
@@ -88,6 +94,8 @@ export interface WatchContext {
   window?: BurstWindow;
   /** The wallet's token accounts as on record, by address: who holds a permission to spend from each. */
   tokenAccounts?: Readonly<Record<string, TokenAccountState>>;
+  /** Holders of a permission whose takings the owner has said were theirs (a marketplace selling what they listed). */
+  trustedTakers?: ReadonlySet<string>;
 
 }
 
@@ -254,7 +262,7 @@ function listed(parts: string[], more: number): string {
  * transaction that need not even name the wallet); or a power the token gives its issuer. Either way the
  * owner did not do it, and whatever the permission still covers can go the same way.
  */
-function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts">): Signal | null {
+function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts" | "trustedTakers">): Signal | null {
   const permitted = (account: string) => ctx.tokenAccounts?.[account]?.delegate ?? null;
   // what Sentinel's own delegate moves is a rescue, into the owner's vault, and is reported as one
   const losses = tokenLossesOf(tx, ctx.wallet).filter((l) => !(ctx.sentinelDelegate && permitted(l.account) === ctx.sentinelDelegate));
@@ -268,23 +276,55 @@ function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, 
   else if (delegates.length === 1) rest = ` It went under a permission to spend that your wallet gave ${short(delegates[0]!)} at some earlier time${signer ? `; ${short(signer)} signed the transaction` : ""}. Whatever that permission still covers can go the same way until your wallet revokes it.`;
   else if (delegates.length > 1) rest = ` It went under permissions to spend that your wallet gave at some earlier time. Whatever those still cover can go the same way until your wallet revokes them.`;
   else rest = signer ? ` ${short(signer)} signed it.` : "";
-  return signal("taken_by_permission", "urgent", false, start + rest);
+  // What came back in the same transaction is said, because a sale of something the owner listed looks just
+  // like this. It does not soften the alert: a thief can send a wallet one lamport.
+  const moved = movementOf(tx, ctx.wallet);
+  const got = [...(moved.lamports > 0n ? [fmtSol(moved.lamports)] : []), ...moved.tokens.filter((t) => t.delta > 0n).slice(0, 3).map((t) => fmtToken(t.delta, t.mint, { decimals: t.decimals }))];
+  if (got.length > 0) rest += ` Your wallet received ${listed(got, 0)} in the same transaction.`;
+  // Only the owner saying so makes it ordinary: "this was me" on an earlier taking under the same permission.
+  const familiar = delegates.length > 0 && delegates.every((d) => ctx.trustedTakers?.has(d));
+  if (familiar) rest += " You have said that what this permission takes is your doing.";
+  return { ...signal("taken_by_permission", familiar ? "info" : "urgent", false, start + rest), ...(delegates.length > 0 ? { takers: delegates } : {}) };
 }
 
 /**
- * A transaction that does not name the wallet at all, found on one of its token accounts: what it took, if it
- * took anything. (One that names the wallet is read with the wallet's own, by `assessTransaction`.)
+ * A transaction found on one of the wallet's token accounts, which the wallet did not sign: what it took, if
+ * it took anything. One that does not name the wallet is certainly not the wallet's. One that names it is
+ * judged by who signed, and when that cannot be read nothing is said. (Such a transaction is also in the
+ * wallet's own list and `assessTransaction` says the same of it there; the watcher tells of it once.)
  */
-export function assessTaken(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts">): Assessment {
-  if (tx.failed || accountKeys(tx).includes(ctx.wallet)) return finish([], false, false);
-  const taken = takenSignal(tx, signersOf(tx), ctx);
+export function assessTaken(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts" | "trustedTakers">): Assessment {
+  if (tx.failed) return finish([], false, false);
+  const signers = signersOf(tx);
+  if (accountKeys(tx).includes(ctx.wallet) && (signers.length === 0 || signers.includes(ctx.wallet))) return finish([], false, false);
+  const taken = takenSignal(tx, signers, ctx);
   return finish(taken ? [taken] : [], false, false);
 }
 
-/** A token account holds less than the transactions Sentinel could find account for, and it has stopped looking. */
-export function assessUnexplainedLoss(before: TokenAccountState, missing: bigint): Assessment {
+/** The same assessment without one kind of signal: for something the owner was already told. */
+export function without(a: Assessment, kind: SignalKind): Assessment {
+  return finish(a.signals.filter((s) => s.kind !== kind), false, false);
+}
+
+/**
+ * A token account holds less than the transactions Sentinel could find account for, and it has stopped looking.
+ *
+ * `hidden`: there were more transactions on the wallet or on that account than it could read. Sending a great
+ * many cheap transactions is how one is hidden among them, so a fall behind such a flood is treated as a
+ * taking: Urgent, though nobody can be named.
+ */
+export function assessUnexplainedLoss(before: TokenAccountState, missing: bigint, hidden = false): Assessment {
   const what = fmtToken(missing, before.mint, before.decimals !== undefined ? { decimals: before.decimals } : undefined);
+  if (hidden) return finish([signal("unexplained_loss", "urgent", false, `${what} left your wallet and your wallet's own transactions do not account for it. So many transactions were sent to your wallet or to that account at the same time that Sentinel could not read them all, which is a way to hide one. If anyone holds a permission to spend from that account, revoke it.`)], false, false);
   return finish([signal("unexplained_loss", "alert", false, `${what} left your wallet and Sentinel could not find the transaction that moved it. Your wallet's own transactions do not account for it. Look at the account's recent activity.`)], false, false);
+}
+
+/** More transactions name the wallet than can be read at the pace the RPC allows. */
+export function assessBehind(waiting: number, skipped: boolean): Assessment {
+  const sentence = skipped
+    ? "More than a thousand transactions have named your wallet since Sentinel last read it. It cannot read that many: the oldest of them are skipped unread, and alerts about the rest will be late. If you are not expecting that much activity, someone may be hiding a transaction among them."
+    : `Your wallet is being named in more transactions than Sentinel can read: ${waiting} are waiting, and alerts about them will be late. If you are not expecting that much activity, someone may be hiding a transaction among them.`;
+  return finish([signal("watch_behind", "alert", false, sentence)], false, false);
 }
 
 /** The wallet's own account changed hands: the program that owns it is no longer the System Program. */

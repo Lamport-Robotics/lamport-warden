@@ -15,7 +15,7 @@ import { fromRpc, tokenLossesOf } from "../src/observed.js";
 import { assessTaken, assessTransaction, assessUnexplainedLoss, type TokenAccountState } from "../src/signals.js";
 import { Baseline } from "../src/baseline.js";
 import { MemoryStore } from "../src/store.js";
-import { EXPLAIN_FOR_SECONDS, MOST_ACCOUNT_LISTS, MOST_EXTRA_READS, MOST_PER_PASS, Watcher, type Notifier } from "../src/watcher.js";
+import { BEHIND_AFTER_SECONDS, BEHIND_EVERY_SECONDS, EXPLAIN_FOR_SECONDS, MOST_ACCOUNT_LISTS, MOST_EXTRA_READS, MOST_PER_PASS, WAIT_FOR_OWN_SECONDS, Watcher, type Notifier } from "../src/watcher.js";
 
 const wallet = Keypair.fromSeed(new Uint8Array(32).fill(7));
 const W = wallet.publicKey.toBase58();
@@ -38,7 +38,8 @@ class Chain implements Rpc {
   slot = 1000;
   lamports = 5_000_000_000;
   accounts = new Map<string, Account>();
-  txs: { signature: string; slot: number; names: string[]; result: any; failed: boolean; listed: boolean; shown: boolean }[] = [];
+  /** `hiddenFrom`: addresses whose list does not show it, as when more was sent to an address than its list goes back. */
+  txs: { signature: string; slot: number; names: string[]; result: any; failed: boolean; listed: boolean; shown: boolean; hiddenFrom: string[] }[] = [];
   calls: string[] = [];
   /** Something that happens on the chain just after the next look is answered. */
   afterLook: (() => void) | null = null;
@@ -58,7 +59,7 @@ class Chain implements Rpc {
    * is whose permission it goes under when that is not the signer (a program's address). `also` are addresses
    * it names without needing them.
    */
-  transfer(signer: PublicKey, moves: [string, string, number][], opts: { authority?: PublicKey; also?: PublicKey[]; failed?: boolean; listed?: boolean; shown?: boolean } = {}): string {
+  transfer(signer: PublicKey, moves: [string, string, number][], opts: { authority?: PublicKey; also?: PublicKey[]; failed?: boolean; listed?: boolean; shown?: boolean; pays?: [PublicKey, number]; hiddenFrom?: string[] } = {}): string {
     const ixs = moves.map(([from, to, amount], i) => {
       const data = Buffer.alloc(9); data[0] = 3; data.writeBigUInt64LE(BigInt(amount), 1);
       const keys = [{ pubkey: new PublicKey(from), isSigner: false, isWritable: true }, { pubkey: new PublicKey(to), isSigner: false, isWritable: true }, { pubkey: opts.authority ?? signer, isSigner: !opts.authority, isWritable: false }];
@@ -76,9 +77,11 @@ class Chain implements Rpc {
     if (signer.toBase58() === W) this.lamports -= 5000;
     const signature = `sig${String(++this.n).padStart(4, "0")}`;
     const lamports = names.map(() => 10_000_000_000);
+    // `pays`: lamports that reach one of the addresses it names, as the price of a sale does
+    const paid = (i: number) => (opts.pays && names[i] === opts.pays[0].toBase58() ? opts.pays[1] : 0);
     this.txs.push({
-      signature, slot: this.slot, names, failed: opts.failed ?? false, listed: opts.listed ?? true, shown: opts.shown ?? true,
-      result: { slot: this.slot, blockTime: T0, transaction: [Buffer.from(tx.serialize({ requireAllSignatures: false, verifySignatures: false })).toString("base64"), "base64"], meta: { err: opts.failed ? { InstructionError: [0, "Custom"] } : null, fee: 5000, preBalances: lamports, postBalances: lamports.map((l, i) => (i === 0 ? l - 5000 : l)), preTokenBalances: pre, postTokenBalances: post } },
+      signature, slot: this.slot, names, failed: opts.failed ?? false, listed: opts.listed ?? true, shown: opts.shown ?? true, hiddenFrom: opts.hiddenFrom ?? [],
+      result: { slot: this.slot, blockTime: T0, transaction: [Buffer.from(tx.serialize({ requireAllSignatures: false, verifySignatures: false })).toString("base64"), "base64"], meta: { err: opts.failed ? { InstructionError: [0, "Custom"] } : null, fee: 5000, preBalances: lamports, postBalances: lamports.map((l, i) => (i === 0 ? l - 5000 : l) + paid(i)), preTokenBalances: pre, postTokenBalances: post } },
     });
     return signature;
   }
@@ -100,7 +103,7 @@ class Chain implements Rpc {
       case "getSignaturesForAddress": {
         this.calls.push(params[0] === W ? "list:wallet" : "list:account");
         const { limit = 1000, before, until } = params[1] ?? {};
-        let list = this.txs.filter((t) => t.listed && t.names.includes(params[0])).reverse();
+        let list = this.txs.filter((t) => t.listed && t.names.includes(params[0]) && !t.hiddenFrom.includes(params[0])).reverse();
         if (before) list = list.slice(list.findIndex((t) => t.signature === before) + 1);
         if (until) { const i = list.findIndex((t) => t.signature === until); if (i >= 0) list = list.slice(0, i); }
         return list.slice(0, limit).map((t) => ({ signature: t.signature, slot: t.slot, err: t.failed ? { InstructionError: [0, "Custom"] } : null }));
@@ -137,6 +140,8 @@ async function watched(build: (chain: Chain) => void, opts: { sentinelDelegate?:
     chain, store, told,
     /** The wallet's next turn, a minute later. */
     round: async () => { now += 60; chain.slot += 10; const r = await watcher.passAll(); return { raised: r.raised, calls: chain.took() }; },
+    /** The owner presses "This was me" on the alert about this transaction. */
+    thisWasMe: (signature: string) => watcher.confirmOwn(W, signature),
     /** The service stops and starts: what it remembered of the transactions it read is gone, and the record is not. */
     restart: () => { watcher = make(); },
     amountOnRecord: (account: string) => store.record(W).tokenAccounts[account]?.amount,
@@ -506,6 +511,162 @@ describe("tokens taken through a permission the wallet gave earlier", () => {
   });
 });
 
+describe("when someone tries to hide it", () => {
+  it("reads what happened to the account oldest first, so nothing sent after a taking buries it", async () => {
+    let mine = "", theirs = "", dust = "";
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: thief.toBase58() }); theirs = c.account(thief, 0); dust = c.account(payer, usdc(5)); });
+    const taking = s.chain.transfer(thief, [[mine, theirs, usdc(25)]]);
+    for (let i = 0; i < 120; i++) s.chain.transfer(payer, [[dust, mine, 1]]); // more than the reads of many passes
+    const r = await s.round();
+    expect(r.raised.map((e) => [e.signature, e.level])).toEqual([[taking, "urgent"]]);
+    expect(r.calls.filter((c) => c === "tx")).toHaveLength(MOST_EXTRA_READS); // and no more read than a pass reads
+    // the taking and nine of the payments in account for the fall: the rest of them are not read at all
+    expect(await s.round()).toEqual({ raised: [], calls: ["look"] });
+    expect(s.amountOnRecord(mine)).toBe(String(usdc(75) + 120));
+  });
+
+  it("goes as far back in the account's list as the amount on record, however much was sent since", async () => {
+    let mine = "", theirs = "", dust = "";
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: thief.toBase58() }); theirs = c.account(thief, 0); dust = c.account(payer, usdc(5)); });
+    const taking = s.chain.transfer(thief, [[mine, theirs, usdc(25)]]);
+    for (let i = 0; i < 1100; i++) s.chain.transfer(payer, [[dust, mine, 1]]); // more than one answer of the list holds
+    const r = await s.round();
+    expect(r.calls.filter((c) => c === "list:account")).toHaveLength(2);
+    expect(r.raised.map((e) => e.signature)).toEqual([taking]);
+  });
+
+  it("does not wait long for a wallet's own list that someone keeps full", async () => {
+    let mine = "", theirs = "", a = "", b = "";
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: thief.toBase58() }); theirs = c.account(thief, 0); a = c.account(payer, usdc(1)); b = c.account(payer, 0); });
+    const taking = s.chain.transfer(thief, [[mine, theirs, usdc(25)]]);
+    const flood = () => { for (let k = 0; k < MOST_PER_PASS + 5; k++) s.chain.transfer(payer, [[a, b, 1]], { also: [wallet.publicKey] }); };
+    const turns: string[] = [];
+    for (let i = 0; i < 16; i++) { flood(); const r = await s.round(); turns.push(r.raised.map((e) => `${e.signals.join("+")}:${e.level}${e.signature === taking ? "!" : ""}`).join(",") || "-"); }
+    // the taking is told of two minutes in, with the wallet's list still unread
+    const at = turns.indexOf("taken_by_permission:urgent!");
+    expect(at).toBe(WAIT_FOR_OWN_SECONDS / 60);
+    expect(s.store.record(W).more).toBe(true);
+    // and ten minutes in, that the wallet is being named in more than can be read: once
+    expect(turns.filter((t) => t === "watch_behind:alert")).toHaveLength(1);
+    expect(turns.indexOf("watch_behind:alert")).toBe(BEHIND_AFTER_SECONDS / 60);
+    expect(s.told.at(-1)!.sentence).toMatch(/^Your wallet is being named in more transactions than Sentinel can read: \d+ are waiting, and alerts about them will be late\. If you are not expecting that much activity, someone may be hiding a transaction among them\.$/);
+    expect(s.kinds().sort()).toEqual(["taken_by_permission:urgent", "watch_behind:alert"]);
+    expect(BEHIND_EVERY_SECONDS).toBe(6 * 3600);
+  });
+
+  it("tells of a taking that names the wallet from the account's list, when the wallet's own list never shows it, and not again when it does", async () => {
+    let mine = "", theirs = "";
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: thief.toBase58() }); theirs = c.account(thief, 0); });
+    // as when a thousand transactions that name the wallet land after it: the wallet's list no longer reaches back to it
+    const taking = s.chain.transfer(thief, [[mine, theirs, usdc(25)]], { also: [wallet.publicKey], hiddenFrom: [W] });
+    const r = await s.round();
+    expect(r.calls).toEqual(["look", "list:wallet", "list:account", "tx"]);
+    expect(r.raised.map((e) => [e.signature, e.signals, e.level])).toEqual([[taking, ["taken_by_permission"], "urgent"]]);
+    // the wallet's list shows it after all (another node, a longer list). Nothing of the wallet's has moved,
+    // so it is read at the wallet's next now-and-then pass: read there, and said once
+    s.chain.txs.find((t) => t.signature === taking)!.hiddenFrom = [];
+    const later: string[] = [];
+    for (let i = 0; i < 10; i++) { const again = await s.round(); expect(again.raised).toEqual([]); later.push(...again.calls); }
+    expect(later.filter((c) => c === "tx")).toHaveLength(1);
+    expect(s.kinds()).toEqual(["taken_by_permission:urgent"]);
+  });
+
+  it("says at once when more names the wallet than its list can even hold, and that some of it goes unread", async () => {
+    let mine = "", a = "", b = "";
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100)); a = c.account(payer, usdc(5)); b = c.account(payer, 0); });
+    for (let k = 0; k < 1001; k++) s.chain.transfer(payer, [[a, b, 1]], { also: [wallet.publicKey] });
+    s.chain.transfer(payer, [[a, mine, 1]]); // and something reaches the wallet, so its turn is a pass
+    const r = await s.round();
+    expect(r.raised.map((e) => [e.signals, e.level, e.sentence])).toEqual([[["watch_behind"], "alert", "More than a thousand transactions have named your wallet since Sentinel last read it. It cannot read that many: the oldest of them are skipped unread, and alerts about the rest will be late. If you are not expecting that much activity, someone may be hiding a transaction among them."]]);
+    // not again for six hours, though it stays behind
+    expect((await s.round()).raised).toEqual([]);
+    expect(s.store.record(W).more).toBe(true);
+  });
+
+  it("calls a fall behind a flood a taking, urgent, when it cannot read far enough to name anyone", async () => {
+    let mine = "", theirs = "", dust = "";
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: thief.toBase58() }); theirs = c.account(thief, 0); dust = c.account(payer, usdc(5)); });
+    // the flood first and the taking behind it: read oldest first, ten a pass, ten minutes do not reach it
+    for (let i = 0; i < 150; i++) s.chain.transfer(payer, [[dust, mine, 1]]);
+    s.chain.transfer(thief, [[mine, theirs, usdc(25)]]);
+    const rounds = EXPLAIN_FOR_SECONDS / 60;
+    for (let i = 0; i < rounds; i++) expect((await s.round()).raised).toEqual([]);
+    const r = await s.round();
+    expect(r.raised).toHaveLength(1);
+    expect(r.raised[0]).toMatchObject({ level: "urgent", signals: ["unexplained_loss"], rescueWorthy: true });
+    // what is missing is said against what the payments in that were read added
+    expect(r.raised[0]!.sentence).toMatch(/^25 USDC left your wallet and your wallet's own transactions do not account for it\. So many transactions were sent to your wallet or to that account at the same time that Sentinel could not read them all, which is a way to hide one\. If anyone holds a permission to spend from that account, revoke it\.$/);
+    expect(s.store.record(W).unsettled).toBeUndefined();
+  });
+
+  it("gives each account its turn when more of them hold less than one pass looks into, and gives up on none before its turn", async () => {
+    const mine: string[] = []; let theirs = "";
+    const n = MOST_ACCOUNT_LISTS * 2;
+    const s = await watched((c) => { for (let i = 0; i < n; i++) mine.push(c.account(wallet.publicKey, usdc(10), { delegate: thief.toBase58() })); theirs = c.account(thief, 0); });
+    // every taking is where the RPC does not show it yet
+    const takings = mine.map((a) => s.chain.transfer(thief, [[a, theirs, usdc(1)]], { listed: false }));
+    const looked = new Set<string>();
+    for (let i = 0; i < 2; i++) { await s.round(); for (const [a, t] of Object.entries(s.store.record(W).tokenAccounts)) if (t.lookedAt) looked.add(a); }
+    expect(looked.size).toBe(n); // two passes, five each: all ten, not the same five twice
+    for (const t of s.chain.txs) if (takings.includes(t.signature)) t.listed = true;
+    const found: string[] = [];
+    for (let i = 0; i < 2; i++) found.push(...(await s.round()).raised.map((e) => e.signature));
+    expect(found.sort()).toEqual([...takings].sort());
+    expect(s.store.record(W).unsettled).toBeUndefined();
+  });
+});
+
+describe("a sale of something the owner listed", () => {
+  const market = key(81);
+  async function listed() {
+    let nft = "", buyers = "", other = "", lent = "", third = "";
+    const s = await watched((c) => {
+      nft = c.account(wallet.publicKey, 1, { delegate: market.toBase58(), mint: BONK, decimals: 0 }); other = c.account(wallet.publicKey, 1, { delegate: market.toBase58(), mint: USDC, decimals: 0 });
+      third = c.account(wallet.publicKey, 1, { delegate: market.toBase58(), mint: BONK, decimals: 0 });
+      lent = c.account(wallet.publicKey, usdc(50), { delegate: thief.toBase58() }); // and a permission of another kind, held by someone else
+      buyers = c.account(friend, 0, { mint: BONK, decimals: 0 });
+    });
+    return { ...s, nft, buyers, other, lent, third };
+  }
+
+  it("is told as what it is to the eye, a taking, with what the wallet was paid in the same transaction", async () => {
+    const s = await listed();
+    const sale = s.chain.transfer(friend, [[s.nft, s.buyers, 1]], { authority: market, also: [wallet.publicKey], pays: [wallet.publicKey, 2_500_000_000] });
+    const r = await s.round();
+    expect(r.raised.map((e) => [e.signature, e.level, e.takers])).toEqual([[sale, "urgent", [market.toBase58()]]]);
+    expect(r.raised[0]!.sentence).toBe(`1 token ${short(BONK)} left your wallet in a transaction your wallet did not sign. It went under a permission to spend that your wallet gave ${short(market.toBase58())} at some earlier time; ${short(friend.toBase58())} signed the transaction. Whatever that permission still covers can go the same way until your wallet revokes it. Your wallet received 2.5 SOL in the same transaction.`);
+  });
+
+  it("is not softened by a payment, which a thief can make as well as a buyer", async () => {
+    const s = await listed();
+    s.chain.transfer(thief, [[s.nft, s.buyers, 1]], { authority: market, also: [wallet.publicKey], pays: [wallet.publicKey, 1] });
+    const r = await s.round();
+    expect(r.raised[0]).toMatchObject({ level: "urgent", rescueWorthy: true });
+    expect(r.raised[0]!.sentence).toContain("Your wallet received 1 lamports in the same transaction.");
+  });
+
+  it("becomes ordinary when the owner says the first one was theirs: the next under the same permission is a line on the page", async () => {
+    const s = await listed();
+    const first = s.chain.transfer(friend, [[s.nft, s.buyers, 1]], { authority: market, also: [wallet.publicKey], pays: [wallet.publicKey, 2_500_000_000] });
+    await s.round();
+    expect(await s.thisWasMe(first)).toBe(true);
+    expect(s.store.record(W).trustedTakers).toEqual([market.toBase58()]);
+    const told = s.told.length;
+    const second = s.chain.transfer(friend, [[s.other, s.chain.account(friend, 0), 1]], { authority: market, also: [wallet.publicKey], pays: [wallet.publicKey, 1_000_000_000] });
+    const r = await s.round();
+    expect(r.raised.map((e) => [e.signature, e.level, e.rescueWorthy])).toEqual([[second, "info", false]]);
+    expect(r.raised[0]!.sentence).toContain("You have said that what this permission takes is your doing.");
+    expect(s.told).toHaveLength(told); // on the page, and nobody's phone rings
+    // and the same when the sale does not name the wallet at all, and is come upon in the token account's own list
+    const quiet = s.chain.transfer(friend, [[s.third, s.chain.account(friend, 0, { mint: BONK, decimals: 0 }), 1]], { authority: market });
+    expect((await s.round()).raised.map((e) => [e.signature, e.level])).toEqual([[quiet, "info"]]);
+    expect(s.told).toHaveLength(told);
+    // somebody else's permission is still what it was
+    s.chain.transfer(thief, [[s.lent, s.chain.account(thief, 0), usdc(50)]]);
+    expect((await s.round()).raised.map((e) => [e.level, e.takers])).toEqual([["urgent", [thief.toBase58()]]]);
+  });
+});
+
 describe("the sentence", () => {
   const account = (delegate: string | null, mint = USDC): TokenAccountState => ({ address: "", mint, owner: W, delegate, closeAuthority: null });
   /** A taking as the watcher reads it from the chain, and the accounts on record it is judged against. */
@@ -548,9 +709,15 @@ describe("the sentence", () => {
     expect(a.signals).toMatchObject([{ kind: "taken_by_permission", level: "urgent", soft: false, byTable: true }]);
   });
 
-  it("leaves a transaction that names the wallet to the rules for the wallet's own, which say the same", () => {
+  it("says the same of a transaction that names the wallet, wherever it is come upon, and nothing of one the wallet signed", () => {
     const t = taking(1, { also: [wallet.publicKey] });
-    expect(assessTaken(t.tx, { wallet: W, tokenAccounts: t.onRecord }).level).toBeNull();
+    // found on the token account's list: judged by who signed it, not by whom it names
+    expect(assessTaken(t.tx, { wallet: W, tokenAccounts: t.onRecord })).toMatchObject({ level: "urgent", sentence: expect.stringContaining("did it, using a permission to spend") });
+    // the wallet's own payment, found the same way: its own business
+    const chain = new Chain();
+    const mine = chain.account(wallet.publicKey, usdc(10)), theirs = chain.account(friend, 0);
+    const own = fromRpc(chain.transfer(wallet.publicKey, [[mine, theirs, usdc(1)]]), chain.txs[0]!.result)!;
+    expect(assessTaken(own, { wallet: W }).level).toBeNull();
     const a = assessTransaction(t.tx, { wallet: W, baseline: Baseline.empty(), drainers: new Set(), tokenAccounts: t.onRecord });
     expect(a.signals.map((s) => s.kind)).toEqual(["taken_by_permission"]);
     expect(a.sentence).toContain(`${short(thief.toBase58())} did it, using a permission to spend`);
@@ -586,6 +753,20 @@ describe("the sentence", () => {
     const handed = { ...named.tx, postTokenBalances: named.tx.postTokenBalances.map((p) => (p.owner === W ? { ...p, owner: thief.toBase58() } : p)) };
     expect(tokenLossesOf(handed, W)).toEqual([]);
     expect(assessTransaction(handed, { wallet: W, baseline: Baseline.empty(), drainers: new Set(), tokenAccounts: named.onRecord }).signals.map((x) => x.kind)).toEqual(["authority_changed"]);
+  });
+
+  it("is ordinary only when every permission it went under is one the owner has called their own doing", () => {
+    const other = key(82).toBase58();
+    const two = taking(2, { delegates: [thief.toBase58(), other] });
+    const ctx = { wallet: W, tokenAccounts: two.onRecord };
+    expect(assessTaken(two.tx, { ...ctx, trustedTakers: new Set([thief.toBase58()]) })).toMatchObject({ level: "urgent", rescueWorthy: true });
+    const both = assessTaken(two.tx, { ...ctx, trustedTakers: new Set([thief.toBase58(), other]) });
+    expect(both).toMatchObject({ level: "info", rescueWorthy: false });
+    expect(both.sentence).toContain("You have said that what this permission takes is your doing.");
+    expect(both.signals[0]!.takers!.sort()).toEqual([thief.toBase58(), other].sort());
+    // a taking nobody's permission explains is never ordinary, whatever is trusted
+    const none = taking(1, { delegates: [null] });
+    expect(assessTaken(none.tx, { wallet: W, tokenAccounts: none.onRecord, trustedTakers: new Set([thief.toBase58()]) }).level).toBe("urgent");
   });
 
   it("says what is missing when no transaction was found", () => {
