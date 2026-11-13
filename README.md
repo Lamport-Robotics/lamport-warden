@@ -106,6 +106,12 @@ notice, and that test is the only thing that will say so.
 1280 x 800 screenshots (`pnpm shots` retakes them from the built extension); `PRIVACY.md` is the privacy
 policy, also served at https://warden.lamportrobotics.com/privacy/. Run `pnpm test:wallets` first.
 
+## Sentinel
+
+`sentinel/program` is the first piece of Warden Sentinel: the on-chain program that lets a rescue service move
+an owner's tokens into that owner's own Lamport Vault and nowhere else. Devnet only, not deployed. It has its
+own README, toolchain (Rust and Agave) and CI job; nothing in the extension uses it yet.
+
 ## The engine is pinned
 
 `pincer1/` is the [Pincer1 repo](https://github.com/Lamport-Robotics/pincer1) at one commit. The decoder

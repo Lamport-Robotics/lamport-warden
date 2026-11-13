@@ -1,0 +1,30 @@
+[package]
+name = "sentinel-program-tests"
+version = "0.1.0"
+description = "LiteSVM tests for lamport-sentinel, run against the built program"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# These are the test VM's own Solana crates. They are a different generation from the ones the program is
+# built with (Anchor 0.32, Solana 2.3), which is why this crate does not depend on the program: every
+# instruction is built here by hand, byte for byte, and checked against the compiled program.
+[dependencies]
+litesvm = "0.18"
+solana-account = "4"
+solana-address = { version = "2.7", features = ["curve25519"] }
+solana-clock = "3"
+solana-instruction = "3"
+solana-keypair = "3"
+solana-message = "4"
+solana-signer = "3"
+solana-transaction = "4"
+solana-transaction-error = "3"
+solana-instruction-error = "2"
+sha2 = "0.10"
+# solana-keypair 3.1 needs the base58 decoder's error type to be a std error, and nothing else in this tree
+# turns that feature on. Naming the crate here does.
+five8_core = { version = "0.1.2", features = ["std"] }
