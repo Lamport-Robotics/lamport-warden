@@ -32,7 +32,10 @@ export function cleanNtfyTarget(input: unknown, hosts: ReadonlySet<string>): str
 }
 
 export class Accounts {
-  constructor(private store: MemoryStore, private dataKey: Buffer, private opts: { ntfyHosts?: ReadonlySet<string> } = {}) {}
+  constructor(private store: MemoryStore, private dataKey: Buffer, private opts: { ntfyHosts?: ReadonlySet<string>; maxWallets?: number } = {}) {}
+
+  /** No room for another wallet across the whole service: what it can read is finite, and a full house is said, not hidden. */
+  private full(): boolean { return this.opts.maxWallets !== undefined && Object.keys(this.data.owners).length >= this.opts.maxWallets; }
 
   private get data() { return this.store.accounts; }
   private get ntfyHosts(): ReadonlySet<string> { return this.opts.ntfyHosts ?? new Set(["ntfy.sh"]); }
@@ -87,6 +90,7 @@ export class Accounts {
     const owner = this.data.owners[wallet];
     if (into === null) {
       if (owner) return { ok: true, profile: owner.profile, created: false };
+      if (this.full()) return refuse(503, "Sentinel is watching as many wallets as it can for now. Try again later.");
       const id = randomBytes(12).toString("base64url");
       this.data.profiles[id] = { id, tier: "watch", createdAt: now, autoRescue: false };
       this.data.owners[wallet] = { profile: id, addedAt: now };
@@ -97,6 +101,7 @@ export class Accounts {
     const profile = this.data.profiles[into];
     if (!profile) return refuse(401, "sign in again.");
     if (owner) return owner.profile === into ? { ok: true, profile: into, created: false } : refuse(409, "that wallet is already watched under another profile.");
+    if (this.full()) return refuse(503, "Sentinel is watching as many wallets as it can for now. Try again later.");
     if (this.walletsOf(into).length >= WALLET_LIMIT[profile.tier]) return refuse(403, `this profile watches ${WALLET_LIMIT[profile.tier]} wallets, which is its limit.`);
     this.data.owners[wallet] = { profile: into, addedAt: now };
     this.store.watch({ address: wallet });

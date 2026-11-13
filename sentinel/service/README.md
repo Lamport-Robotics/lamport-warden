@@ -153,8 +153,29 @@ SENTINEL_RPC_URL=https://… SENTINEL_DATA_KEY=$(openssl rand -base64 32) pnpm s
 refuses to start without an RPC and a data key. Keep the data key: without it the stored channels cannot be
 read and owners have to add them again.
 
-It has been run against the public devnet RPC with a throwaway wallet: sign-in, a replayed sign-in refused, a
-report, a first read of the wallet, and removal leaving nothing in the file.
+`pnpm test:service` builds it and starts the built file once, with a probe beside it: sign-in, a first read,
+an RPC failure reported as blind, removal. It is there because the first deployment crashed within seconds of
+its first request. A bundled dependency written for CommonJS read `__filename`, which an ES module does not
+have, and left Node's error handling broken; on the server's Node the next error anywhere ended the process.
+The build now defines the name, and the probe fails on any Node if it comes back. CI runs it.
+
+## Deployed
+
+`sentinel/deploy.sh [ssh-host]` puts the service and the page on the server behind
+`warden.lamportrobotics.com`: the page at `/sentinel/`, the API at `/sentinel/api/`. It runs the smoke test
+first, and each step is safe to repeat.
+
+- The service runs under systemd as a user of its own (`DynamicUser`), able to write one folder,
+  `/var/lib/lamport-sentinel`, and nothing else.
+- `/etc/lamport-sentinel.env` (root only) holds its settings. The data key in it was made on the server and
+  has never left it. Lose it and the stored alert channels cannot be read.
+- It reads the public mainnet RPC once a minute and watches at most 100 wallets in all
+  (`SENTINEL_MAX_WALLETS`); past that, new sign-ups are told it is full. The public RPC is free and rationed.
+  More wallets, or faster reads, need an RPC key of its own.
+- The paid plan is not configured there: `/v1/billing` answers `{"enabled": false}`.
+
+After deploying it was checked from outside with a throwaway wallet: sign-in, a first read of the wallet from
+mainnet, removal, and an empty data file afterwards.
 
 ## Not here yet
 

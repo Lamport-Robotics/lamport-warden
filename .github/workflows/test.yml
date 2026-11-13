@@ -24,6 +24,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      # the Sentinel service as the server runs it: one built file, started, read from, and made to fail
+      - run: pnpm test:service
 
   browser:
     # the built extension in Chromium, in front of wallets that inject the way Phantom, Solflare and Backpack do
