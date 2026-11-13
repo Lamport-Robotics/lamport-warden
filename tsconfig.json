@@ -34,6 +34,7 @@
     "test",
     "sentinel/service",
     "sentinel/web/src",
+    "site/try/src",
     "vitest.config.ts",
     "vitest.browser.config.ts",
     "vitest.wallets.config.ts"

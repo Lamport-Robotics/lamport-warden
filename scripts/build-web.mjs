@@ -29,3 +29,29 @@ await build({
 await cp(join(web, 'index.html'), join(dist, 'index.html'));
 await cp(join(web, 'sentinel.css'), join(dist, 'sentinel.css'));
 console.log('sentinel/web/dist is ready');
+
+// The practice page (site/try): the same way, into site/try/dist. It uses the Sentinel page's stylesheet.
+const tryPage = join(root, 'site', 'try');
+const tryDist = join(tryPage, 'dist');
+await rm(tryDist, { recursive: true, force: true });
+await mkdir(tryDist, { recursive: true });
+await build({
+  root,
+  configFile: false,
+  mode: 'production',
+  logLevel: 'warn',
+  publicDir: false,
+  define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+  build: {
+    outDir: tryDist,
+    emptyOutDir: false,
+    target: 'es2022',
+    sourcemap: false,
+    minify: false,
+    modulePreload: false,
+    rollupOptions: { input: { try: join(tryPage, 'src', 'try.ts') }, output: { format: 'iife', name: 'warden_try_page', entryFileNames: '[name].js', inlineDynamicImports: true } },
+  },
+});
+await cp(join(tryPage, 'index.html'), join(tryDist, 'index.html'));
+await cp(join(tryPage, 'try.css'), join(tryDist, 'try.css'));
+console.log('site/try/dist is ready');

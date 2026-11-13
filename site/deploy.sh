@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Puts site/index.html and site/privacy/ up as https://warden.lamportrobotics.com on the server lamportrobotics.com runs on.
+# Puts site/index.html, site/privacy/ and the practice page (site/try/) up as https://warden.lamportrobotics.com on the server lamportrobotics.com runs on.
 #
 #   site/deploy.sh [ssh-host]        default host: can
 #
@@ -10,13 +10,18 @@ set -euo pipefail
 HOST="${1:-can}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-ssh -o BatchMode=yes "$HOST" 'install -d -o lamport -g lamport -m 755 /opt/lamportrobotics/warden /opt/lamportrobotics/warden/privacy'
+# the practice page is built (its script bundles the wallet libraries); the other two pages are files as they are
+(cd "$HERE/.." && node scripts/build-web.mjs >/dev/null)
+for f in index.html try.css try.js; do [ -s "$HERE/try/dist/$f" ] || { echo "site/try/dist/$f was not built"; exit 1; }; done
+
+ssh -o BatchMode=yes "$HOST" 'install -d -o lamport -g lamport -m 755 /opt/lamportrobotics/warden /opt/lamportrobotics/warden/privacy /opt/lamportrobotics/warden/try'
 scp -q -o BatchMode=yes "$HERE/index.html" "$HOST:/opt/lamportrobotics/warden/index.html"
 scp -q -o BatchMode=yes "$HERE/privacy/index.html" "$HOST:/opt/lamportrobotics/warden/privacy/index.html"
+scp -q -o BatchMode=yes "$HERE/try/dist/index.html" "$HERE/try/dist/try.css" "$HERE/try/dist/try.js" "$HOST:/opt/lamportrobotics/warden/try/"
 ssh -o BatchMode=yes "$HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail
-chown lamport:lamport /opt/lamportrobotics/warden/index.html /opt/lamportrobotics/warden/privacy/index.html
-chmod 644 /opt/lamportrobotics/warden/index.html /opt/lamportrobotics/warden/privacy/index.html
+chown lamport:lamport /opt/lamportrobotics/warden/index.html /opt/lamportrobotics/warden/privacy/index.html /opt/lamportrobotics/warden/try/index.html /opt/lamportrobotics/warden/try/try.css /opt/lamportrobotics/warden/try/try.js
+chmod 644 /opt/lamportrobotics/warden/index.html /opt/lamportrobotics/warden/privacy/index.html /opt/lamportrobotics/warden/try/index.html /opt/lamportrobotics/warden/try/try.css /opt/lamportrobotics/warden/try/try.js
 cd /etc/caddy
 if grep -q '^warden.lamportrobotics.com' Caddyfile; then echo "pages replaced; the Caddy block was already there"; exit 0; fi
 backup="Caddyfile.bak-warden-$(date +%Y%m%d-%H%M%S)"

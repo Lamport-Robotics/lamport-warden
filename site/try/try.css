@@ -1,0 +1,22 @@
+/* The practice page's own pieces. The rest is the Sentinel page's stylesheet. */
+ul.tries { list-style: none; display: grid; gap: 12px; margin-top: 8px; }
+ul.tries li { border: 1px solid var(--line); border-radius: 16px; padding: 18px 20px; background: var(--raise); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 18px; align-items: start; }
+ul.tries li.locked { opacity: .55; }
+ul.tries h3 { margin: 0; font-weight: 500; font-size: 18px; letter-spacing: -.03em; }
+ul.tries .about { color: var(--dim); font-size: 15px; margin: 4px 0 0; }
+ul.tries .will { font-size: 14px; color: var(--mute); margin: 8px 0 0; }
+ul.tries .will b { font-weight: 500; }
+ul.tries .will.stops b { color: var(--stop); }
+ul.tries .will.asks b { color: var(--care); }
+ul.tries .will.quiet b { color: var(--ok); }
+ul.tries button { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+ul.tries .result { grid-column: 1 / -1; margin: 8px 0 0; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); font-size: 15px; }
+ul.tries .result.good { border-color: var(--ok); }
+ul.tries .result.bad { border-color: var(--stop); }
+ul.tries .result.plain, ul.tries .result.pending { color: var(--dim); }
+.notice.good { border-color: var(--ok); }
+.notice.care { border-color: var(--care); }
+@media (max-width: 640px) {
+  ul.tries li { grid-template-columns: minmax(0, 1fr); }
+  ul.tries button { grid-column: 1; grid-row: auto; justify-self: start; margin-top: 10px; }
+}
