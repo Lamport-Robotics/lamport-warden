@@ -14,6 +14,11 @@ import type { Rpc } from "./rpc.js";
 import { BurstWindow, assessTokenAccount, assessTransaction, assessWalletAccount, type Assessment, type Level, type TokenAccountState, type WatchContext } from "./signals.js";
 import type { Store, StoredEvent, WatchedWallet } from "./store.js";
 
+/** How many of a wallet's token accounts are kept and compared. */
+export const MAX_TOKEN_ACCOUNTS = 1000;
+/** How many new transactions one pass reads. */
+export const MOST_PER_PASS = 25;
+
 const TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"];
 
 /** Sends an alert to the owner. The text is a plain sentence: it never carries a link, and never asks for a signature. */
@@ -38,6 +43,8 @@ export interface WatcherOptions {
   historyLimit?: number;
   /** How often a quiet wallet's accounts are read anyway (default 900 seconds). */
   accountsEverySeconds?: number;
+  /** How many new transactions one pass reads at most (default 25); the rest wait for the next pass. */
+  mostPerPass?: number;
   /** How many wallets are read at the same time (default 1). The RPC client keeps the pace; this keeps a slow answer from holding up the rest. */
   readers?: number;
   now?: () => number;
@@ -107,7 +114,8 @@ export class Watcher {
     const out: string[] = [];
     let before: string | undefined;
     for (;;) {
-      const page: any[] = (await this.rpc.call("getSignaturesForAddress", [wallet, { limit: Math.min(1000, limit - out.length), ...(before ? { before } : {}), ...(until ? { until } : {}) }])) ?? [];
+      // confirmed, like everything else read here: a transaction the RPC has just pushed word of is in the list, not thirteen seconds behind it
+      const page: any[] = (await this.rpc.call("getSignaturesForAddress", [wallet, { limit: Math.min(1000, limit - out.length), commitment: "confirmed", ...(before ? { before } : {}), ...(until ? { until } : {}) }])) ?? [];
       for (const s of page) out.push(s.signature);
       if (page.length < 1000 || out.length >= limit) break;
       before = page[page.length - 1].signature;
@@ -115,8 +123,9 @@ export class Watcher {
     return out.reverse();
   }
 
-  private async transaction(signature: string): Promise<ObservedTx | null> {
-    return fromRpc(signature, await this.rpc.call("getTransaction", [signature, { encoding: "base64", maxSupportedTransactionVersion: 0, commitment: "confirmed" }]));
+  /** `background`: part of a new wallet's history, which waits for anything that is about a wallet already watched. */
+  private async transaction(signature: string, background = false): Promise<ObservedTx | null> {
+    return fromRpc(signature, await this.rpc.call("getTransaction", [signature, { encoding: "base64", maxSupportedTransactionVersion: 0, commitment: "confirmed" }], background ? { background: true } : undefined));
   }
 
   private async tokenAccounts(wallet: string): Promise<Record<string, TokenAccountState>> {
@@ -129,7 +138,12 @@ export class Watcher {
         out[entry.pubkey] = { address: entry.pubkey, mint: String(info.mint), owner: String(info.owner), delegate: typeof info.delegate === "string" ? info.delegate : null, closeAuthority: typeof info.closeAuthority === "string" ? info.closeAuthority : null };
       }
     }
-    return out;
+    // A wallet can have thousands of token accounts (an exchange's has), and every one of them would be kept
+    // and written out with each save. A thousand are kept, the same thousand every time; a wallet of an
+    // ordinary person has a few dozen.
+    const addresses = Object.keys(out);
+    if (addresses.length <= MAX_TOKEN_ACCOUNTS) return out;
+    return Object.fromEntries(addresses.sort().slice(0, MAX_TOKEN_ACCOUNTS).map((a) => [a, out[a]!]));
   }
 
   private watching(wallet: string): boolean { return this.store.wallets().some((w) => w.address === wallet); }
@@ -168,7 +182,8 @@ export class Watcher {
     if (record.cursor === null && record.baseline === null) {
       const history = await this.signaturesSince(wallet, null, this.opts.historyLimit ?? 200);
       for (const signature of history) {
-        const tx = await this.transaction(signature);
+        // the past of a wallet that is new here can wait its turn behind news of wallets already watched
+        const tx = await this.transaction(signature, true);
         if (tx) baseline.learn(tx, wallet);
       }
       record.cursor = history.at(-1) ?? null;
@@ -176,7 +191,9 @@ export class Watcher {
     } else {
       const fresh = await this.signaturesSince(wallet, record.cursor, 1000);
       somethingNew = fresh.length > 0;
-      for (const signature of fresh) {
+      // So many in one pass, oldest first, and the rest on the next: a wallet that transacts without pause
+      // (a bot, an exchange) must not hold a reader, and the RPC's allowance, for as long as it likes.
+      for (const signature of fresh.slice(0, this.opts.mostPerPass ?? MOST_PER_PASS)) {
         const tx = await this.transaction(signature);
         // a transaction the RPC does not have yet is read on the next pass: the cursor stays before it
         if (!tx) break;

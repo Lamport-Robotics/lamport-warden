@@ -17,6 +17,9 @@
  *                         Unset: what the public Solana RPC takes when that is the RPC, no limit otherwise.
  *                         "0" lifts one. A paid RPC takes more: set these to what its plan allows.
  *   SENTINEL_READERS      how many wallets are read at the same time (default 3)
+ *   SENTINEL_PUSH         "off" to read wallets only in turn. Otherwise the RPC is also asked, over a websocket,
+ *                         to say when a watched wallet is in a transaction, and that wallet is read at once (push.ts)
+ *   SENTINEL_RPC_WS_URL   the RPC's websocket address, when it is not the RPC's own address with wss:// in front
  *   SENTINEL_READS_PER_MINUTE  how many reads of a wallet a minute are promised in all. A free wallet is one,
  *                         a paid one three. Unset: four fifths of what the pace above allows, the rest being
  *                         for what a read leads to (a new transaction, a first look at a new wallet); no
@@ -44,13 +47,14 @@ import { Blindness, RESUMED_SENTENCE, stoppedSentence } from "./blindness.js";
 import { ChannelNotifier } from "./notify.js";
 import { Ops } from "./ops.js";
 import { PLANS, type ChannelKind } from "./plans.js";
+import { Push, pushUrlFor } from "./push.js";
 import { HttpRpc, PUBLIC_RPC_PACE, type Pace } from "./rpc.js";
 import { listen } from "./server.js";
 import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore, type StoredEvent } from "./store.js";
 import { Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: ChannelKind; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: ChannelKind; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -102,6 +106,12 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
     if (!Number.isFinite(n) || n < 0 || n > 10_000) return { ok: false, why: `${name} has to be a number of calls per ten seconds, or 0 for no limit.` };
     if (n > 0) rpcPace[key] = n;
   }
+  // where the RPC says, unasked, that a wallet was in a transaction: its own address as a websocket, unless told otherwise or told not to
+  let pushUrl: string | null = null;
+  if (env.SENTINEL_PUSH !== "off") {
+    pushUrl = env.SENTINEL_RPC_WS_URL ? env.SENTINEL_RPC_WS_URL : pushUrlFor(rpcUrl);
+    try { if (!pushUrl || !/^wss?:$/.test(new URL(pushUrl).protocol)) throw new Error(); } catch { return { ok: false, why: "SENTINEL_RPC_WS_URL has to be the RPC's websocket address (wss://…)." }; }
+  }
   const readers = Number(env.SENTINEL_READERS ?? 3);
   if (!Number.isInteger(readers) || readers < 1 || readers > 32) return { ok: false, why: "SENTINEL_READERS has to be a whole number from 1 to 32." };
   const opsChannel = env.SENTINEL_OPS_CHANNEL ? cleanTarget(env.SENTINEL_OPS_CHANNEL, ntfyHosts) : null;
@@ -118,7 +128,7 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const reads: ReadBudget | null = perMinute > 0
     ? { perMinute, cost: { watch: 60 / pollSeconds, pro: 60 / proPollSeconds }, reservedForPro: billing.billing ? Math.floor(perMinute * (reservedForPro / maxWallets)) : 0 }
     : null;
-  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
+  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -149,16 +159,31 @@ export function pacer(tierOf: (wallet: string) => "watch" | "pro", seconds: { wa
   const last = new Map<string, number>();
   /** When a wallet was first asked about: what a wallet that was never read is measured from. */
   const known = new Map<string, number>();
+  /** Wallets the RPC has just said something about, and when each was last read on its word. */
+  const urgent = new Set<string>();
+  const hurried = new Map<string, number>();
   let picked: string[] = [];
   const promiseOf = (wallet: string) => seconds[tierOf(wallet)];
   const since = (wallet: string, now: number) => { if (!known.has(wallet)) known.set(wallet, now); return last.get(wallet) ?? known.get(wallet)!; };
-  const isDue = (wallet: string, now: number) => !last.has(wallet) || now - last.get(wallet)! >= promiseOf(wallet) - 1; // a second of slack: a round that starts a moment early still counts
+  const isDue = (wallet: string, now: number) => urgent.has(wallet) || !last.has(wallet) || now - last.get(wallet)! >= promiseOf(wallet) - 1; // a second of slack: a round that starts a moment early still counts
   return {
     pick(wallet: string, now: number): boolean {
       since(wallet, now);
       if (!isDue(wallet, now)) return false;
+      if (urgent.delete(wallet)) hurried.set(wallet, now);
       last.set(wallet, now);
       picked.push(wallet);
+      return true;
+    },
+    /**
+     * The RPC says this wallet has just been in a transaction: it is read next, ahead of its turn. Not more
+     * often than every `gap` seconds on such a word, so a wallet that never stops transacting costs a few
+     * times its promised reads and no more. False when it was too soon, and the word is dropped: the wallet's
+     * own turn is never far off.
+     */
+    hurry(wallet: string, now: number, gap = Math.max(5, Math.floor(promiseOf(wallet) / 4))): boolean {
+      if (now - (hurried.get(wallet) ?? -Infinity) < gap) return false;
+      urgent.add(wallet);
       return true;
     },
     /**
@@ -169,7 +194,7 @@ export function pacer(tierOf: (wallet: string) => "watch" | "pro", seconds: { wa
     due(wallets: string[], now: number, most = Infinity): string[] {
       return wallets
         .filter((w) => { since(w, now); return isDue(w, now); })
-        .map((w) => ({ w, behind: (now - since(w, now)) / promiseOf(w), fresh: !last.has(w) }))
+        .map((w) => ({ w, behind: urgent.has(w) ? Infinity : (now - since(w, now)) / promiseOf(w), fresh: !last.has(w) }))
         .sort((a, b) => (b.behind === a.behind ? Number(b.fresh) - Number(a.fresh) : b.behind - a.behind))
         .slice(0, most)
         .map((x) => x.w);
@@ -189,7 +214,7 @@ export function pacer(tierOf: (wallet: string) => "watch" | "pro", seconds: { wa
       return { count, worst };
     },
     tried(): string[] { const t = picked; picked = []; return t; },
-    forget(keep: (wallet: string) => boolean): void { for (const m of [last, known]) for (const w of m.keys()) if (!keep(w)) m.delete(w); },
+    forget(keep: (wallet: string) => boolean): void { for (const m of [last, known, hurried]) for (const w of m.keys()) if (!keep(w)) m.delete(w); for (const w of urgent) if (!keep(w)) urgent.delete(w); },
   };
 }
 
@@ -260,6 +285,25 @@ export const nearlyOutOfReads = (promised: number, open: number, inAll: number =
     ? `The wallets Sentinel watches are promised ${Math.round(promised)} of the ${open} reads a minute it gives to anyone${inAll > open ? ` (${inAll - open} more are kept for the paid plan)` : ""}. New owners are turned away when they are all promised; a faster RPC is what makes room.`
     : null;
 
+/**
+ * A round, with the push line looked after before it: told which wallets to listen for, asked now and then
+ * whether it is still there, and whoever runs the service told when it has been down for a quarter of an
+ * hour. A line that is down slows alerts to the pace of the plans; it stops nothing.
+ */
+export function pushedRounds(round: (now?: number) => Promise<void>, push: Pick<Push, "watch" | "check" | "state"> | null, wallets: () => string[], ops?: Pick<Ops, "say">, clock: () => number = () => Math.floor(Date.now() / 1000)): () => Promise<void> {
+  let lastCheck = 0, downSince: number | null = null;
+  return async () => {
+    const now = clock();
+    if (push) {
+      push.watch(wallets());
+      if (now - lastCheck >= 30) { lastCheck = now; push.check(); }
+      downSince = push.state.connected ? null : downSince ?? now;
+      if (downSince !== null && now - downSince >= LATE_FOR_SECONDS) void ops?.say("The RPC has not been telling Sentinel about transactions as they happen for a quarter of an hour (the push line is down). Wallets are still read in turn, at the pace of their plans, so alerts come later than they could.", "push-down", 6 * 3600);
+    }
+    await round(now);
+  };
+}
+
 /** How full the service is, in words, once it is nearly full; null before that. */
 export const nearlyFull = (taken: number, open: number, inAll: number = open): string | null =>
   taken >= Math.ceil(open * 0.9)
@@ -286,7 +330,12 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   // Short rounds, one after another with a breath between: each takes the few wallets furthest behind their
   // promise, so whoever becomes due while a round is under way waits for a handful of reads and not for all.
   const batch = Math.max(2, Math.ceil((cfg.rpcPace.heavyPer10s ?? 40) / 3));
-  const stopRounds = startRounds(watchRound({ watcher, store, notifier, pace, blindness: new Blindness(), state, ops, batch }), ROUND_GAP_SECONDS);
+  const round = watchRound({ watcher, store, notifier, pace, blindness: new Blindness(), state, ops, batch });
+  // And the RPC is asked to say when a watched wallet is in a transaction: that wallet is then read next,
+  // ahead of its turn. Only a reason to read sooner; the reading in turn above goes on whatever this does.
+  const push = cfg.pushUrl ? new Push({ url: cfg.pushUrl, onMention: (wallet) => { pace.hurry(wallet, Math.floor(Date.now() / 1000)); } }) : null;
+  push?.start();
+  const stopRounds = startRounds(pushedRounds(round, push, () => store.wallets().map((w) => w.address), ops), ROUND_GAP_SECONDS);
 
   // once an hour: today's snapshot if there is none yet, and a word when the house is nearly full
   const stopHourly = startRounds(async () => {
@@ -313,7 +362,7 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   }, 86_400) : () => undefined;
 
   const server = await listen({
-    accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => state,
+    accounts, store, watcher, nonces: new NonceBook(), origin: cfg.origin, health: () => ({ ...state, push: push ? (push.state.connected ? "on" as const : "down" as const) : "off" as const }),
     testChannel: (profile, id) => notifier.test(profile, id),
     notice: (profile, sentence, opts) => notifier.notice(profile, sentence, opts),
     webhookFailed: (why) => { void ops.say(`A webhook from Stripe could not be applied (${why.slice(0, 120)}). Stripe sends it again; if this repeats, a plan may not be starting or ending when it should.`, "webhook-failed", 3600); },
@@ -322,5 +371,5 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const started = `watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : "set up, checkout closed") : "not set up"}`;
   // said at most every ten minutes, so a service that keeps falling over does not fill the channel
   void ops.say(`Sentinel started: ${started}.`, "started", 600);
-  return async () => { stopRounds(); stopHourly(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); };
+  return async () => { stopRounds(); push?.stop(); stopHourly(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); };
 }

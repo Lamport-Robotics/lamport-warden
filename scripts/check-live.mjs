@@ -45,5 +45,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const answer = await ask(url);
   const why = answer.ok ? wrongWith(answer.health, Math.floor(Date.now() / 1000)) : answer.why;
   if (why) { console.error(`Sentinel is not watching: ${why}`); process.exit(1); }
-  console.log(`Sentinel is watching: ${answer.health.watching} wallet(s), last round ${Math.floor(Date.now() / 1000) - answer.health.lastPassAt} s ago, ${answer.health.blind} unread, ${answer.health.late ?? 0} read later than promised.`);
+  console.log(`Sentinel is watching: ${answer.health.watching} wallet(s), last round ${Math.floor(Date.now() / 1000) - answer.health.lastPassAt} s ago, ${answer.health.blind} unread, ${answer.health.late ?? 0} read later than promised, push ${answer.health.push ?? "off"}.`);
 }

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { HttpRpc, type Rpc } from "../src/rpc.js";
 import { FileStore, MemoryStore } from "../src/store.js";
-import { NtfyNotifier, Watcher, type Notifier } from "../src/watcher.js";
+import { MAX_TOKEN_ACCOUNTS, MOST_PER_PASS, NtfyNotifier, Watcher, type Notifier } from "../src/watcher.js";
 import type { Level, TokenAccountState } from "../src/signals.js";
 
 const wallet = Keypair.fromSeed(new Uint8Array(32).fill(7));
@@ -147,6 +147,51 @@ describe("the watcher", () => {
     chain.pay(wallet.publicKey, fake, 0.5, NOON + 2400);
     await watcher.pass(me);
     expect(store.events(W).map((e) => e.undelivered === true)).toEqual([false, true, false, true]);
+  });
+
+  it("reads a new wallet's history as work that can wait, and what is new for a wallet already watched as work that cannot", async () => {
+    const { chain, store, sent } = setup();
+    const asked: [string, boolean][] = [];
+    const rpc: Rpc = { call: (method, params, opts) => { asked.push([method, opts?.background === true]); return chain.call(method, params as any[]); } };
+    const watcher = new Watcher(rpc, store, sent, { now: () => NOON });
+    await watcher.pass(me);
+    const history = asked.filter(([m]) => m === "getTransaction");
+    expect(history).toHaveLength(30);
+    expect(history.every(([, background]) => background)).toBe(true);
+    asked.length = 0;
+    chain.pay(wallet.publicKey, friend, 0.4, NOON + 60);
+    await watcher.pass(me);
+    expect(asked.filter(([m]) => m === "getTransaction")).toEqual([["getTransaction", false]]);
+    // listing what is new is never put behind anything
+    expect(asked.filter(([m]) => m === "getSignaturesForAddress")).toEqual([["getSignaturesForAddress", false]]);
+  });
+
+  it("reads so many new transactions in one pass and the rest in the next, missing none", async () => {
+    const { chain, store, sent } = setup();
+    let now = NOON;
+    const watcher = new Watcher(chain, store, sent, { now: () => now, mostPerPass: 3 });
+    await watcher.pass(me);
+    const signatures = Array.from({ length: 8 }, (_, i) => chain.pay(wallet.publicKey, friend, 0.4, NOON + 60 + i));
+    const fetched = async () => { chain.calls = []; now += 60; await watcher.pass(me); return chain.calls.filter((c) => c === "getTransaction").length; };
+    expect(await fetched()).toBe(3);
+    expect(store.record(W).cursor).toBe(signatures[2]);
+    expect(await fetched()).toBe(3);
+    expect(await fetched()).toBe(2);
+    expect(store.record(W).cursor).toBe(signatures[7]);
+    expect(await fetched()).toBe(0);
+    expect(MOST_PER_PASS).toBe(25);
+  });
+
+  it("keeps a thousand of a wallet's token accounts, the same thousand each time, however many it has", async () => {
+    const { chain, store, watcher } = setup();
+    chain.tokenAccounts = Array.from({ length: 1200 }, (_, i) => ({ address: Keypair.fromSeed(new Uint8Array(32).fill(0).map((_, j) => (j === 0 ? i % 256 : j === 1 ? Math.floor(i / 256) : 7))).publicKey.toBase58(), mint: USDC, owner: W, delegate: null, closeAuthority: null }));
+    await watcher.pass(me);
+    const kept = Object.keys(store.record(W).tokenAccounts);
+    expect(kept).toHaveLength(MAX_TOKEN_ACCOUNTS);
+    chain.tokenAccounts.reverse(); // the RPC answers in another order
+    chain.pay(wallet.publicKey, friend, 0.4, NOON + 60);
+    expect(await watcher.pass(me)).toEqual([]); // nothing is taken for changed
+    expect(Object.keys(store.record(W).tokenAccounts).sort()).toEqual(kept.sort());
   });
 
   it("keeps a note of dust without disturbing the owner", async () => {
