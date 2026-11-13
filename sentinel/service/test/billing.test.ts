@@ -301,8 +301,9 @@ describe("what the owner is told about the plan", () => {
     const { accounts, stripe, billing, said, profile } = setup();
     accounts.addChannel(profile, "https://ntfy.sh/alice-topic-123", T0);
     await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
-    expect(said).toEqual([{ profile, sentence: planStartedNotice(10, 20), channels: ["ntfy"] }]);
-    expect(said[0]!.sentence).toBe("This profile's Sentinel plan has started: up to 10 wallets, each read every 20 seconds.");
+    expect(said).toEqual([{ profile, sentence: planStartedNotice(10, 20, true), channels: ["ntfy"] }]);
+    expect(said[0]!.sentence).toBe("This profile's Sentinel plan has started: up to 10 wallets, each read every 20 seconds, and at once when the network reports a transaction in one.");
+    expect(planStartedNotice(10, 20)).toBe("This profile's Sentinel plan has started: up to 10 wallets, each read every 20 seconds.");
     // the same news twice is said once
     await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
     expect(said).toHaveLength(1);
@@ -515,7 +516,7 @@ describe("the daily look at Stripe's side", () => {
     expect(accounts.profile(profile)!.tier).toBe("watch");
     expect(await billing.reconcile()).toEqual({ healed: 1, failed: 0, orphans: [] });
     expect(accounts.profile(profile)).toMatchObject({ tier: "pro", billing: { subscription: "sub_1", price: "holder", status: "active" } });
-    expect(said.map((x) => x.sentence)).toEqual([planStartedNotice(10, 20)]);
+    expect(said.map((x) => x.sentence)).toEqual([planStartedNotice(10, 20, true)]);
     // in line already: nothing is changed and nothing more is said
     expect(await billing.reconcile()).toEqual({ healed: 0, failed: 0, orphans: [] });
     expect(said).toHaveLength(1);

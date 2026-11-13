@@ -50,7 +50,7 @@ import { dataKeyFrom } from "./crypto.js";
 import { Blindness, RESUMED_SENTENCE, stoppedSentence } from "./blindness.js";
 import { ChannelNotifier } from "./notify.js";
 import { Ops } from "./ops.js";
-import { PLANS, type ChannelKind } from "./plans.js";
+import { PLANS, type ChannelKind, type Tier } from "./plans.js";
 import { Push, pushUrlFor } from "./push.js";
 import { HttpRpc, PUBLIC_RPC_PACE, type Pace } from "./rpc.js";
 import { listen } from "./server.js";
@@ -323,17 +323,26 @@ export const nearlyOutOfReads = (promised: number, open: number, inAll: number =
     ? `The wallets Sentinel watches are promised ${Math.round(promised)} of the ${open} reads a minute it gives to anyone${inAll > open ? ` (${inAll - open} more are kept for the paid plan)` : ""}. New owners are turned away when they are all promised; a faster RPC is what makes room.`
     : null;
 
+/** The wallets whose plan has them read as soon as the network reports a transaction in them: the push line listens for these and no others. */
+export const pushedWallets = (wallets: string[], tierOf: (wallet: string) => Tier): string[] => wallets.filter((w) => PLANS[tierOf(w)].push);
+
 /**
  * A round, with the push line looked after before it: told which wallets to listen for, asked now and then
  * whether it is still there, and whoever runs the service told when it has been down for a quarter of an
  * hour. A line that is down slows alerts to the pace of the plans; it stops nothing.
  */
-export function pushedRounds(round: (now?: number) => Promise<void>, push: Pick<Push, "watch" | "check" | "state"> | null, wallets: () => string[], ops?: Pick<Ops, "say">, clock: () => number = () => Math.floor(Date.now() / 1000)): () => Promise<void> {
+export function pushedRounds(round: (now?: number) => Promise<void>, push: (Pick<Push, "watch" | "check" | "state"> & { capacity?: number }) | null, wallets: () => string[], ops?: Pick<Ops, "say">, clock: () => number = () => Math.floor(Date.now() / 1000)): () => Promise<void> {
   let lastCheck = 0, downSince: number | null = null;
   return async () => {
     const now = clock();
     if (push) {
-      push.watch(wallets());
+      const wanted = wallets();
+      push.watch(wanted);
+      // the plan that has this promises it for every wallet: whoever runs the service hears before that stops being true
+      const room = push.capacity ?? Infinity;
+      if (wanted.length > room * 0.9) void ops?.say(wanted.length > room
+        ? `The paid plan promises that a wallet is read as soon as the network reports a transaction in it, and ${wanted.length} wallets are on it while the push line takes ${room}. The rest are read in turn only. More lines (SENTINEL_PUSH_LINES), or an RPC that allows more, is what fixes it.`
+        : `${wanted.length} wallets are on the paid plan and the push line takes ${room}: it is nearly full. More lines (SENTINEL_PUSH_LINES), or an RPC that allows more, before it is.`, "push-full", 24 * 3600);
       if (now - lastCheck >= 30) { lastCheck = now; push.check(); }
       downSince = push.state.connected ? null : downSince ?? now;
       if (downSince !== null && now - downSince >= LATE_FOR_SECONDS) void ops?.say("The RPC has not been telling Sentinel about transactions as they happen for a quarter of an hour (the push line is down). Wallets are still read in turn, at the pace of their plans, so alerts come later than they could.", "push-down", 6 * 3600);
@@ -369,7 +378,8 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   if (store.restoredFrom) void ops.say(`The data file was ${store.setAside ? "unreadable" : "missing"}, so Sentinel started from the snapshot ${store.restoredFrom.split("/").pop()}. What changed after that snapshot is lost${store.setAside ? "; the unreadable file was set aside, not deleted" : ""}.`, "restored", 0);
 
   // each wallet at its plan's pace: the paid plan's more often
-  const pace = pacer((w) => accounts.profile(accounts.profileOf(w) ?? "")?.tier ?? "watch", { watch: cfg.pollSeconds, pro: cfg.proPollSeconds });
+  const tierOf = (w: string): Tier => accounts.profile(accounts.profileOf(w) ?? "")?.tier ?? "watch";
+  const pace = pacer(tierOf, { watch: cfg.pollSeconds, pro: cfg.proPollSeconds });
   // Short rounds, one after another with a breath between: each takes the few wallets furthest behind their
   // promise, so whoever becomes due while a round is under way waits for a handful of reads and not for all.
   const batch = Math.max(10, Math.round(((cfg.rpcPace.lightPer10s ?? 200) * 0.2 * ACCOUNTS_PER_CALL) / ACCOUNTS_PER_WALLET));
@@ -378,9 +388,9 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const round = watchRound({ watcher, store, notifier, pace, blindness: new Blindness(), state, ops, batch, mostPasses });
   // And the RPC is asked to say when a watched wallet is in a transaction: that wallet is then read next,
   // ahead of its turn. Only a reason to read sooner; the reading in turn above goes on whatever this does.
-  const push = cfg.pushUrl ? new Push({ url: cfg.pushUrl, lines: cfg.pushLines, perLine: cfg.pushPerLine, onMention: (wallet) => { pace.hurry(wallet, Math.floor(Date.now() / 1000)); } }) : null;
+  const push = cfg.pushUrl ? new Push({ url: cfg.pushUrl, lines: cfg.pushLines, perLine: cfg.pushPerLine, onMention: (wallet) => { if (PLANS[tierOf(wallet)].push) pace.hurry(wallet, Math.floor(Date.now() / 1000)); } }) : null;
   push?.start();
-  const stopRounds = startRounds(pushedRounds(round, push, () => store.wallets().map((w) => w.address), ops), ROUND_GAP_SECONDS);
+  const stopRounds = startRounds(pushedRounds(round, push, () => pushedWallets(store.wallets().map((w) => w.address), tierOf), ops), ROUND_GAP_SECONDS);
 
   // once an hour: today's snapshot if there is none yet, and a word when the house is nearly full
   const stopHourly = startRounds(async () => {

@@ -225,7 +225,7 @@ export class Billing {
     this.accounts.setBilling(profile, { customer: subscription.customer, subscription: subscription.id, price: this.priceOf(subscription), status, ...(periodEnd ? { periodEnd } : {}), ...(endsAt ? { endsAt } : {}) });
     this.accounts.setTier(profile, tier);
     if (tier === "pro") this.open.delete(profile);
-    if (was.tier === "watch" && tier === "pro") this.tell(profile, planStartedNotice(PLANS.pro.wallets, PLANS.pro.pollSeconds));
+    if (was.tier === "watch" && tier === "pro") this.tell(profile, planStartedNotice(PLANS.pro.wallets, PLANS.pro.pollSeconds, PLANS.pro.push));
     else if (status === "past_due" && was.status !== "past_due") this.tell(profile, paymentFailedNotice());
     // cancelling is something a thief with a key could do from the profile's page: the owner hears of it, and of its undoing
     if (tier === "pro" && was.tier === "pro" && endsAt && !was.endsAt) this.tell(profile, planCancelledNotice(endsAt));

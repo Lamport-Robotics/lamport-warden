@@ -74,6 +74,7 @@ Watch is free:
 • "This was me", so it learns who you pay
 
 Pro is $15 a month, or $10 while a wallet in your Sentinel profile holds 250,000 $LAMPORT. It adds:
+• Alerts in seconds: a wallet is read as soon as the network reports a transaction in it, without waiting for its turn
 • 10 wallets watched instead of 3
 • Each wallet read every 20 seconds instead of every minute
 • Up to 5 alert channels, including Discord and Slack, so a team sees an alert together

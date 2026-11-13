@@ -33,8 +33,8 @@ export const reportLinkedNotice = (target: string, wallet: string | null): strin
 
 const dollars = (cents: number) => `$${(cents / 100).toFixed(cents % 100 === 0 ? 0 : 2)}`;
 
-export const planStartedNotice = (wallets: number, seconds: number): string =>
-  `This profile's Sentinel plan has started: up to ${wallets} wallets, each read every ${seconds} seconds.`;
+export const planStartedNotice = (wallets: number, seconds: number, push = false): string =>
+  `This profile's Sentinel plan has started: up to ${wallets} wallets, each read every ${seconds} seconds${push ? ", and at once when the network reports a transaction in one" : ""}.`;
 
 export const planEndedNotice = (wallets: number, pausedNow: number): string =>
   `This profile's Sentinel plan has ended, so it is on the free plan again: ${wallets} wallets, read every minute, alerts to one ntfy channel.${pausedNow > 0 ? ` ${pausedNow} of its wallets ${pausedNow === 1 ? "is" : "are"} no longer watched.` : ""}`;

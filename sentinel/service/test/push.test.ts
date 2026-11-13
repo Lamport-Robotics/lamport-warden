@@ -7,7 +7,7 @@ import "../../../src/polyfill.js";
 import { describe, it, expect } from "vitest";
 import { Keypair } from "@solana/web3.js";
 import { Blindness } from "../src/blindness.js";
-import { LATE_FOR_SECONDS, configFrom, pacer, pushedRounds, watchRound } from "../src/main.js";
+import { LATE_FOR_SECONDS, configFrom, pacer, pushedRounds, pushedWallets, watchRound } from "../src/main.js";
 import { Push, pushUrlFor, type SocketLike } from "../src/push.js";
 import { MemoryStore } from "../src/store.js";
 
@@ -354,6 +354,27 @@ describe("the rounds, with the push line looked after", () => {
     let plain = 0;
     await pushedRounds(async () => { plain += 1; }, null, () => [A])();
     expect(plain).toBe(1);
+  });
+
+  it("listens for the wallets whose plan has it, and for no others", () => {
+    const tier = (w: string) => (w === B ? "pro" as const : "watch" as const);
+    expect(pushedWallets([A, B], tier)).toEqual([B]);
+    expect(pushedWallets([A], tier)).toEqual([]);
+    // the pool says how many it takes: what the notices below are measured against
+    const pool = new Push({ url: "wss://rpc.example", onMention: () => undefined, socket: () => { throw new Error("not opened here"); }, lines: 5, perLine: 90 });
+    expect(pool.capacity).toBe(450);
+  });
+
+  it("tells whoever runs it when the plan's wallets nearly fill the line, and when they no longer fit", async () => {
+    const said: [string, string][] = [];
+    const wallets = (n: number) => Array.from({ length: n }, (_, i) => `wallet${i}`);
+    const run = async (n: number) => { await pushedRounds(async () => undefined, { watch: () => undefined, check: () => undefined, get state() { return { connected: true, listening: n, lines: 1 }; }, capacity: 10 }, () => wallets(n), { say: async (s: string, key: string) => { said.push([key, s]); return true; } }, () => T0)(); };
+    await run(9);
+    expect(said).toEqual([]);
+    await run(10);
+    expect(said).toEqual([["push-full", "10 wallets are on the paid plan and the push line takes 10: it is nearly full. More lines (SENTINEL_PUSH_LINES), or an RPC that allows more, before it is."]]);
+    await run(11);
+    expect(said[1]).toEqual(["push-full", "The paid plan promises that a wallet is read as soon as the network reports a transaction in it, and 11 wallets are on it while the push line takes 10. The rest are read in turn only. More lines (SENTINEL_PUSH_LINES), or an RPC that allows more, is what fixes it."]);
   });
 
   it("is on unless turned off, at the RPC's own address unless another is given", () => {

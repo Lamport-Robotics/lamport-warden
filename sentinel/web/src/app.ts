@@ -15,7 +15,7 @@ const API = "/sentinel/api/v1";
 const SESSION = "sentinel.session";
 
 interface WalletRow { address: string; armed: boolean; reporting: boolean; paused: boolean; lastReadAt: number | null }
-interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack"; hint: string; active: boolean; lastDeliveredAt: number | null; failing: { since: number; why: string } | null }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number } }
+interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack"; hint: string; active: boolean; lastDeliveredAt: number | null; failing: { since: number; why: string } | null }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number; push?: boolean } }
 interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; signals: string[]; sentence: string; answer: string | null; undelivered?: boolean }
 type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
@@ -165,7 +165,8 @@ function render(): void {
     return li;
   }));
   $("walletLimit").textContent = `${mine.wallets.length} of ${mine.limits.wallets} wallets on this plan.`;
-  $("pace").textContent = paceText(mine.limits.pollSeconds, watching);
+  // being told as it happens is the paid plan's: the free one is read in turn whatever the line is doing
+  $("pace").textContent = paceText(mine.limits.pollSeconds, watching ? { push: watching.push && mine.limits.push === true, late: watching.late } : null);
   const add = $("addChoices");
   if (mine.wallets.length < mine.limits.wallets) choices(add, "link"); else add.replaceChildren();
 
