@@ -38,6 +38,8 @@
  *   SENTINEL_STRIPE_PRICE_FULL, SENTINEL_STRIPE_PRICE_HOLDER   the two monthly price ids (scripts/stripe-sentinel-setup.mjs)
  *   SENTINEL_STRIPE_PORTAL_CONFIG   the customer portal the setup script made (optional)
  *   SENTINEL_CHECKOUT          "open" to sell; anything else keeps checkout closed and honours existing subscriptions
+ *   SENTINEL_CHECKOUT_TESTERS  wallet addresses, comma-separated (twenty at most), that may buy while checkout is
+ *                              closed: a profile one of them is in. For running a real payment before selling.
  *   SENTINEL_PRICE_CENTS, SENTINEL_HOLDER_PRICE_CENTS          what the page shows (default 1500 and 1000)
  *   SENTINEL_HOLDER_MINT, SENTINEL_HOLDER_MIN                  the token and whole-token amount for the holder price
  *                                                              (default $LAMPORT, 250000)
@@ -73,9 +75,12 @@ function billingFrom(env: Record<string, string | undefined>, origin: string, rp
   const cents = (name: string, fallback: number) => { const v = Number(env[name] ?? fallback); return Number.isInteger(v) && v > 0 ? v : null; };
   const centsFull = cents("SENTINEL_PRICE_CENTS", 1500), centsHolder = cents("SENTINEL_HOLDER_PRICE_CENTS", 1000), holderMin = cents("SENTINEL_HOLDER_MIN", 250_000);
   if (!centsFull || !centsHolder || !holderMin) return { ok: false, why: "SENTINEL_PRICE_CENTS, SENTINEL_HOLDER_PRICE_CENTS and SENTINEL_HOLDER_MIN have to be whole numbers above zero." };
+  // a tester that is misspelled would buy nothing and say nothing: every one has to be an address
+  const checkoutTesters = (env.SENTINEL_CHECKOUT_TESTERS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (checkoutTesters.length > 20 || checkoutTesters.some((a) => !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a))) return { ok: false, why: "SENTINEL_CHECKOUT_TESTERS has to be wallet addresses separated by commas, twenty at most." };
   return { ok: true, billing: {
     secretKey: env.SENTINEL_STRIPE_SECRET_KEY!, webhookSecret: env.SENTINEL_STRIPE_WEBHOOK_SECRET!, priceFull: env.SENTINEL_STRIPE_PRICE_FULL!, priceHolder: env.SENTINEL_STRIPE_PRICE_HOLDER!,
-    centsFull, centsHolder, holderMint: env.SENTINEL_HOLDER_MINT || LAMPORT_MINT, holderMin, pageUrl: `${origin}/sentinel/`, checkoutOpen: env.SENTINEL_CHECKOUT === "open",
+    centsFull, centsHolder, holderMint: env.SENTINEL_HOLDER_MINT || LAMPORT_MINT, holderMin, pageUrl: `${origin}/sentinel/`, checkoutOpen: env.SENTINEL_CHECKOUT === "open", ...(checkoutTesters.length > 0 ? { checkoutTesters } : {}),
     holderRpcUrl: env.SENTINEL_HOLDER_RPC_URL || rpcUrl,
     ...(/^bpc_[A-Za-z0-9]+$/.test(env.SENTINEL_STRIPE_PORTAL_CONFIG ?? "") ? { portalConfiguration: env.SENTINEL_STRIPE_PORTAL_CONFIG } : {}),
   } };
@@ -423,7 +428,7 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
     webhookFailed: (why) => { void ops.say(`A webhook from Stripe could not be applied (${why.slice(0, 120)}). Stripe sends it again; if this repeats, a plan may not be starting or ending when it should.`, "webhook-failed", 3600); },
     ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}),
   }, { port: cfg.port, trustProxy: cfg.trustProxy });
-  const started = `watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : "set up, checkout closed") : "not set up"}`;
+  const started = `watching ${store.wallets().length} wallet(s), API on 127.0.0.1:${cfg.port}, page ${cfg.origin}, paid plan ${cfg.billing ? (cfg.billing.checkoutOpen ? "on sale" : `set up, checkout closed${cfg.billing.checkoutTesters?.length ? ` to all but ${cfg.billing.checkoutTesters.length} tester wallet(s)` : ""}`) : "not set up"}`;
   // said at most every ten minutes, so a service that keeps falling over does not fill the channel
   void ops.say(`Sentinel started: ${started}.`, "started", 600);
   // on the way out, what was waiting to be written (when each wallet was last looked at) is written

@@ -424,6 +424,12 @@ of the customer and the subscription.
   plan at the end of the paid month (`at_period_end`), which is what the page says.
 - **Checkout is closed unless `SENTINEL_CHECKOUT=open`.** With the Stripe settings in place and checkout
   closed, the page shows the prices and existing subscriptions are honoured, and nothing is sold.
+- **A real payment before it is on sale.** `SENTINEL_CHECKOUT_TESTERS` names up to twenty wallet addresses,
+  separated by commas. A profile that one of them is in sees the button and can buy while checkout is closed
+  to everyone else, so the whole path (the page, Stripe's checkout with a real card, the webhook, the tier,
+  the portal, cancelling) can be run once for real. A wallet is in a profile only by its own signature, so
+  nobody can put a tester's wallet into theirs. Take the setting out again afterwards, or leave it: it sells
+  to nobody else.
 
 `scripts/stripe-sentinel-setup.mjs` makes the product, the two prices, the customer portal and the webhook in
 a Stripe account, and can be run again safely. `test/stripe.real.test.ts` runs the whole path against Stripe

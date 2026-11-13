@@ -35,6 +35,12 @@ export interface BillingConfig {
   pageUrl: string;
   /** Checkout can be closed while the rest keeps working: existing subscriptions are still honoured. */
   checkoutOpen: boolean;
+  /**
+   * Wallets that may buy while checkout is closed to everyone else: a profile that one of them is in is sold
+   * to. It is how the whole path (the page, Stripe, the webhook, the tier, the portal) is run for real, with
+   * a real card, before the plan is on sale. A wallet is in a profile only by its own signature.
+   */
+  checkoutTesters?: readonly string[];
   /** The customer portal set up for this plan (the setup script makes it). Absent: the account's default. */
   portalConfiguration?: string;
 }
@@ -125,6 +131,13 @@ export class Billing {
     return false;
   }
 
+  /** Whether this profile may buy: checkout is open, or one of its wallets is named as a tester. */
+  private sellsTo(profile: string): boolean {
+    if (this.cfg.checkoutOpen) return true;
+    const testers = this.cfg.checkoutTesters ?? [];
+    return testers.length > 0 && this.accounts.walletsOf(profile).some((w) => testers.includes(w));
+  }
+
   async quote(profile: string): Promise<Quote> {
     const p = this.accounts.profile(profile)!;
     // shown as not holding when the balance cannot be read; checkout itself refuses rather than guess
@@ -132,7 +145,7 @@ export class Billing {
     const price = p.billing && PAID.has(p.billing.status) ? p.billing.price : holder ? "holder" : "full";
     const subscribed = !!p.billing && PAID.has(p.billing.status);
     return {
-      enabled: true, checkoutOpen: this.cfg.checkoutOpen, tier: p.tier, subscribed, status: p.billing?.status ?? null,
+      enabled: true, checkoutOpen: this.sellsTo(profile), tier: p.tier, subscribed, status: p.billing?.status ?? null,
       price, cents: price === "holder" ? this.cfg.centsHolder : this.cfg.centsFull, centsFull: this.cfg.centsFull, centsHolder: this.cfg.centsHolder, holder, holderMin: this.cfg.holderMin,
       renewsAt: subscribed && !p.billing!.endsAt ? p.billing!.periodEnd ?? null : null,
       endsAt: subscribed ? p.billing!.endsAt ?? null : null,
@@ -143,7 +156,7 @@ export class Billing {
   async checkout(profile: string): Promise<{ ok: true; url: string } | { ok: false; status: number; why: string }> {
     const p = this.accounts.profile(profile);
     if (!p) return { ok: false, status: 401, why: "sign in again." };
-    if (!this.cfg.checkoutOpen) return { ok: false, status: 403, why: "the paid plan is not on sale yet." };
+    if (!this.sellsTo(profile)) return { ok: false, status: 403, why: "the paid plan is not on sale yet." };
     if (p.billing && PAID.has(p.billing.status)) return { ok: false, status: 409, why: "this profile already has the paid plan." };
     let holder: boolean;
     try { holder = await this.holder(profile); } catch { return { ok: false, status: 502, why: "I could not read your wallet's balance just now, so I can't tell which price is yours. Try again in a minute." }; }
