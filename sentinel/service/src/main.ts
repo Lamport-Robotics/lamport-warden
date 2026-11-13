@@ -12,6 +12,8 @@
  *   SENTINEL_NTFY_HOSTS   ntfy hosts alerts may go to, comma-separated (default ntfy.sh)
  *   SENTINEL_TRUST_PROXY  "1" when a proxy this process trusts sets X-Forwarded-For
  *   SENTINEL_MAX_WALLETS  how many wallets it watches in all (default 100): each costs RPC calls every round
+ *   SENTINEL_RESERVED_FOR_PRO  how many of those places are kept for profiles on the paid plan (default: a
+ *                         fifth of them when the paid plan is set up, none when it is not)
  *   SENTINEL_OPS_CHANNEL  where whoever runs the service is told what no owner can act on (ops.ts): an ntfy
  *                         topic on one of the hosts above, or a Discord or Slack webhook. Unset: only the log.
  *
@@ -39,7 +41,7 @@ import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore } from "./store.js";
 import { Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: ChannelKind; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: ChannelKind; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -85,7 +87,10 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   if (env.SENTINEL_OPS_CHANNEL && !opsChannel) return { ok: false, why: "SENTINEL_OPS_CHANNEL has to be an ntfy topic on an allowed host, or a Discord or Slack webhook." };
   const billing = billingFrom(env, origin, rpcUrl);
   if (!billing.ok) return billing;
-  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
+  // room kept for those who pay: only when there is something to pay for
+  const reservedForPro = Number(env.SENTINEL_RESERVED_FOR_PRO ?? (billing.billing ? Math.floor(maxWallets / 5) : 0));
+  if (!Number.isInteger(reservedForPro) || reservedForPro < 0 || reservedForPro >= maxWallets) return { ok: false, why: "SENTINEL_RESERVED_FOR_PRO has to be a whole number, zero or more, and less than SENTINEL_MAX_WALLETS." };
+  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -164,15 +169,17 @@ export function watchRound(o: {
 }
 
 /** How full the service is, in words, once it is nearly full; null before that. */
-export const nearlyFull = (watching: number, max: number): string | null =>
-  watching >= Math.ceil(max * 0.9) ? `Sentinel is watching ${watching} of the ${max} wallets it has room for. New owners are turned away when it is full.` : null;
+export const nearlyFull = (taken: number, open: number, inAll: number = open): string | null =>
+  taken >= Math.ceil(open * 0.9)
+    ? `Sentinel holds ${taken} of the ${open} wallets it takes from anyone${inAll > open ? ` (${inAll - open} more places are kept for the paid plan)` : ""}. New owners are turned away when it is full.`
+    : null;
 
 export async function run(env: Record<string, string | undefined>): Promise<() => Promise<void>> {
   const read = configFrom(env);
   if (!read.ok) throw new Error(read.why);
   const cfg = read.config;
   const store = new FileStore(join(cfg.dataDir, "sentinel.json"));
-  const accounts = new Accounts(store, cfg.dataKey, { ntfyHosts: cfg.ntfyHosts, maxWallets: cfg.maxWallets });
+  const accounts = new Accounts(store, cfg.dataKey, { ntfyHosts: cfg.ntfyHosts, maxWallets: cfg.maxWallets, reservedForPro: cfg.reservedForPro });
   const notifier = new ChannelNotifier(accounts);
   const ops = new Ops(cfg.opsChannel, store.said, { saved: () => store.flush() });
   const watcher = new Watcher(new HttpRpc(cfg.rpcUrl), store, notifier);
@@ -188,7 +195,8 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const stopHourly = startRounds(async () => {
     const now = Math.floor(Date.now() / 1000);
     try { store.snapshot(now); } catch (e) { void ops.say(`Today's snapshot of the data file could not be written (${String((e as Error).message ?? e).slice(0, 120)}).`, "snapshot-failed"); }
-    const full = nearlyFull(store.wallets().length, cfg.maxWallets);
+    const places = accounts.places();
+    const full = nearlyFull(places.taken, places.open ?? cfg.maxWallets, places.inAll ?? cfg.maxWallets);
     if (full) void ops.say(full, "nearly-full", 86_400);
   }, 3600);
 

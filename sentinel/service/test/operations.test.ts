@@ -209,7 +209,9 @@ describe("a line to whoever runs the service", () => {
       expect(configFrom({ ...base, SENTINEL_OPS_CHANNEL: bad })).toEqual({ ok: false, why: "SENTINEL_OPS_CHANNEL has to be an ntfy topic on an allowed host, or a Discord or Slack webhook." });
     }
     expect(nearlyFull(89, 100)).toBeNull();
-    expect(nearlyFull(90, 100)).toBe("Sentinel is watching 90 of the 100 wallets it has room for. New owners are turned away when it is full.");
+    expect(nearlyFull(90, 100)).toBe("Sentinel holds 90 of the 100 wallets it takes from anyone. New owners are turned away when it is full.");
+    expect(nearlyFull(72, 80, 100)).toBe("Sentinel holds 72 of the 80 wallets it takes from anyone (20 more places are kept for the paid plan). New owners are turned away when it is full.");
+    expect(nearlyFull(71, 80, 100)).toBeNull();
     expect(nearlyFull(1, 1)).not.toBeNull();
     expect(nearlyFull(0, 5)).toBeNull();
   });

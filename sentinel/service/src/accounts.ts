@@ -10,7 +10,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { hashToken, randomToken, sameHash, seal, unseal } from "./crypto.js";
-import { PLANS, type ChannelKind } from "./plans.js";
+import { PLANS, type ChannelKind, type Tier } from "./plans.js";
 import type { Channel, MemoryStore, Profile, StoredEvent, WalletOwner } from "./store.js";
 
 export const SESSION_SECONDS = 7 * 86_400;
@@ -47,10 +47,24 @@ export function cleanTarget(input: unknown, ntfyHosts: ReadonlySet<string>): { k
 const hintOf = (kind: ChannelKind, url: string): string => (kind === "ntfy" ? `${new URL(url).host}/…${url.slice(-4)}` : `${kind === "discord" ? "Discord" : "Slack"} webhook …${url.slice(-4)}`);
 
 export class Accounts {
-  constructor(private store: MemoryStore, private dataKey: Buffer, private opts: { ntfyHosts?: ReadonlySet<string>; maxWallets?: number } = {}) {}
+  constructor(private store: MemoryStore, private dataKey: Buffer, private opts: { ntfyHosts?: ReadonlySet<string>; maxWallets?: number; reservedForPro?: number } = {}) {}
 
-  /** No room for another wallet across the whole service: what it can read is finite, and a full house is said, not hidden. */
-  private full(): boolean { return this.opts.maxWallets !== undefined && Object.keys(this.data.owners).length >= this.opts.maxWallets; }
+  /**
+   * No room for another wallet: what the service can read is finite, and a full house is said, not hidden.
+   * The last places are kept for profiles on the paid plan. Someone who pays for ten wallets has to be able
+   * to add them, whoever signed up free in the meantime.
+   */
+  private full(tier: Tier): boolean {
+    if (this.opts.maxWallets === undefined) return false;
+    const room = tier === "pro" ? this.opts.maxWallets : this.opts.maxWallets - (this.opts.reservedForPro ?? 0);
+    return Object.keys(this.data.owners).length >= room;
+  }
+
+  /** How many wallets are in the service, and how many it takes: from anyone, and in all. */
+  places(): { taken: number; open: number | null; inAll: number | null } {
+    const max = this.opts.maxWallets;
+    return { taken: Object.keys(this.data.owners).length, open: max === undefined ? null : max - (this.opts.reservedForPro ?? 0), inAll: max ?? null };
+  }
 
   private get data() { return this.store.accounts; }
   private get ntfyHosts(): ReadonlySet<string> { return this.opts.ntfyHosts ?? new Set(["ntfy.sh"]); }
@@ -108,7 +122,7 @@ export class Accounts {
     const owner = this.owner(wallet);
     if (into === null) {
       if (owner) return { ok: true, profile: owner.profile, created: false };
-      if (this.full()) return refuse(503, "Sentinel is watching as many wallets as it can for now. Try again later.");
+      if (this.full("watch")) return refuse(503, "Sentinel is watching as many wallets as it can for now. Try again later.");
       const id = randomBytes(12).toString("base64url");
       this.data.profiles[id] = { id, tier: "watch", createdAt: now, autoRescue: false };
       this.data.owners[wallet] = { profile: id, addedAt: now };
@@ -119,7 +133,7 @@ export class Accounts {
     const profile = this.profile(into);
     if (!profile) return refuse(401, "sign in again.");
     if (owner) return owner.profile === into ? { ok: true, profile: into, created: false } : refuse(409, "that wallet is already watched under another profile.");
-    if (this.full()) return refuse(503, "Sentinel is watching as many wallets as it can for now. Try again later.");
+    if (this.full(profile.tier)) return refuse(503, "Sentinel is watching as many wallets as it can for now. Try again later.");
     if (this.walletsOf(into).length >= PLANS[profile.tier].wallets) return refuse(403, `this profile watches ${PLANS[profile.tier].wallets} wallets, which is its plan's limit.`);
     this.data.owners[wallet] = { profile: into, addedAt: now };
     this.store.watch({ address: wallet });
