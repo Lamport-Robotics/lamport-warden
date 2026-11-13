@@ -284,9 +284,10 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       // who it paid becomes someone this wallet pays; read from the chain again, not taken from the page
       if (answer === "this_was_me" && event.signature) {
         const takers = event.takers ?? [];
-        // For a taking under a permission it also makes that permission's holder familiar, which is less
-        // protection from then on: the profile's channels are told, once it has in fact been done.
-        void watcher.confirmOwn(event.wallet, event.signature).then((done) => { if (done && takers.length > 0) notice(session, takerTrustedNotice(takers, event.wallet, who!.wallet)); }).catch(() => undefined);
+        // For a taking under one permission it also makes that permission's holder familiar (the watcher does
+        // it; never for a taking under several), which is less protection from then on: the profile's
+        // channels are told, once it has in fact been done.
+        void watcher.confirmOwn(event.wallet, event.signature).then((done) => { if (done && takers.length === 1) notice(session, takerTrustedNotice(takers, event.wallet, who!.wallet)); }).catch(() => undefined);
       }
       return ok();
     }

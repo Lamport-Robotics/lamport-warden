@@ -64,6 +64,8 @@ export interface TokenAccountState {
   fellAt?: number;
   /** When its own list of transactions was last read for that, so that many such accounts take turns. */
   lookedAt?: number;
+  /** True when, looking into that, a transaction somebody else signed was found on the account. */
+  others?: boolean;
 }
 
 /** Outbound transfers of the recent past, for the burst rule. The watcher keeps one per wallet. */
@@ -331,11 +333,18 @@ export function assessUnexplainedLoss(before: TokenAccountState, missing: bigint
   return finish([signal("unexplained_loss", "alert", false, `${what} left your wallet and Sentinel could not find the transaction that moved it. Your wallet's own transactions do not account for it. Look at the account's recent activity.`)], false, false);
 }
 
-/** More transactions name the wallet than can be read at the pace the RPC allows. */
-export function assessBehind(waiting: number, skipped: boolean): Assessment {
-  const sentence = skipped
-    ? "More than a thousand transactions have named your wallet since Sentinel last read it. It cannot read that many: the oldest of them are skipped unread, and alerts about the rest will be late. If you are not expecting that much activity, someone may be hiding a transaction among them."
-    : `Your wallet is being named in more transactions than Sentinel can read: ${waiting} are waiting, and alerts about them will be late. If you are not expecting that much activity, someone may be hiding a transaction among them.`;
+/**
+ * More transactions name the wallet than can be read at the pace the RPC allows. They are read in order and
+ * none is passed over, so this is lateness and the owner is told of it. `lost`: the RPC no longer knows where
+ * reading stopped, and some of the wallet's past could not be followed back.
+ */
+export function assessBehind(waiting: number, far: boolean, lost = false): Assessment {
+  const why = "If you are not expecting that much activity, someone may be trying to delay the reading of one of them.";
+  const sentence = lost
+    ? `Sentinel could not follow your wallet's transactions back to where it stopped reading: there are too many, or the RPC no longer has that far back. It has gone on from the oldest it could reach, and what came before that was not checked. ${why}`
+    : far
+      ? `More than a thousand transactions have named your wallet since Sentinel last read it. It reads them in order, none is skipped, and it is behind: alerts about them will be late. ${why}`
+      : `Your wallet is being named in more transactions than Sentinel can read at once: ${waiting} are waiting, and alerts about them will be late. ${why}`;
   return finish([signal("watch_behind", "alert", false, sentence)], false, false);
 }
 

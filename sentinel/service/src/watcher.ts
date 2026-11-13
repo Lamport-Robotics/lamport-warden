@@ -9,7 +9,7 @@
  * rescuer's job, in another process, with another key.
  */
 import { Baseline } from "./baseline.js";
-import { fromRpc, tokenDeltasOf, type ObservedTx } from "./observed.js";
+import { fromRpc, signersOf, tokenDeltasOf, type ObservedTx } from "./observed.js";
 import type { Rpc } from "./rpc.js";
 import { BurstWindow, assessBehind, assessTaken, assessTokenAccount, assessTransaction, assessUnexplainedLoss, assessWalletAccount, without, type Assessment, type Level, type TokenAccountState, type WatchContext } from "./signals.js";
 import type { Store, StoredEvent, WalletRecord, WatchedWallet } from "./store.js";
@@ -23,13 +23,19 @@ export const ACCOUNTS_PER_CALL = 100;
 
 /** How long the watcher looks for the transaction behind a fall in a token account's holding before it says it could not find one. */
 export const EXPLAIN_FOR_SECONDS = 600;
-/** How many token accounts' own lists of transactions one pass asks for, and how many transactions from them it reads. The rest wait for the wallet's next turn. */
+/** How long a wallet may have gone unread before what its token accounts held then is no longer something to explain: it is taken as it is found. */
+export const STALE_AFTER_SECONDS = 6 * 3600;
+/** How many times one pass asks for a token account's own list of transactions (a page each), and how many transactions from them it reads. The rest wait for the wallet's next turn. */
 export const MOST_ACCOUNT_LISTS = 5;
 export const MOST_EXTRA_READS = 10;
 /** How long a fall waits for the wallet's own list to be read through before the account's own list is read regardless. */
 export const WAIT_FOR_OWN_SECONDS = 120;
 /** How many pages, of a thousand signatures, of a token account's own list are asked for to get back to the amount on record. */
 const ACCOUNT_LIST_PAGES = 3;
+/** How many pages, of a thousand signatures, of a wallet's own list one pass asks for when it is far behind. The rest on its next turns. */
+const OWN_LIST_PAGES = 3;
+/** How far back a wallet's own list is followed at most, in pages: a cursor the RPC no longer knows must not mean reading its whole history. */
+const OWN_LIST_PAGES_IN_ALL = 200;
 /** How long a wallet's list may have more in it than is read before its owner is told, and how often they are told. */
 export const BEHIND_AFTER_SECONDS = 600;
 export const BEHIND_EVERY_SECONDS = 6 * 3600;
@@ -86,6 +92,8 @@ export interface WatcherOptions {
    * accounts finds them unchanged (default 600 seconds). A number, or a way to work one out as the service grows.
    */
   fullEverySeconds?: number | (() => number);
+  /** How many pages of a wallet's own list are followed back at most before giving up on reaching where reading stopped (default 200). */
+  ownListPagesInAll?: number;
   /** How many wallets are read at the same time (default 1). The RPC client keeps the pace; this keeps a slow answer from holding up the rest. */
   readers?: number;
   now?: () => number;
@@ -103,6 +111,12 @@ export class Watcher {
    * spending without reading anything twice. Lost when the service starts again, and then read again.
    */
   private moves = new Map<string, Map<string, Map<string, { slot: number; delta: bigint }>>>();
+  /**
+   * A wallet's transactions that are listed and not yet read, the oldest first (`queue`), and, while its list
+   * is still being followed back to where reading stopped, how far that has got (`scan`). Nothing is ever
+   * skipped: a wallet sent a flood of transactions is read late, in order, and never past one.
+   */
+  private waiting = new Map<string, { queue: string[]; scan: { before: string; tail: string[]; pages: number } | null }>();
   constructor(private rpc: Rpc, private store: Store, private notifier: Notifier, private opts: WatcherOptions = {}) {}
 
   private exclusive<T>(wallet: string, work: () => Promise<T>): Promise<T> {
@@ -151,8 +165,10 @@ export class Watcher {
       record.baseline = baseline.toJSON();
       // If it was a taking under a permission (a marketplace selling what the owner listed), whoever holds
       // that permission is from now on someone whose takings are the owner's doing: the newest twenty.
-      const takers = this.store.events(wallet).filter((e) => e.signature === signature).flatMap((e) => e.takers ?? []);
-      if (takers.length > 0) record.trustedTakers = [...new Set([...(record.trustedTakers ?? []), ...takers])].slice(-20);
+      // One holder, never several: a transaction that took under two permissions (a sale, and a thief's old
+      // approval riding in it) is not a reason to make both familiar.
+      const takers = [...new Set(this.store.events(wallet).filter((e) => e.signature === signature).flatMap((e) => e.takers ?? []))];
+      if (takers.length === 1) record.trustedTakers = [...new Set([...(record.trustedTakers ?? []), ...takers])].slice(-20);
       this.store.save(wallet, record);
       return true;
     });
@@ -160,31 +176,64 @@ export class Watcher {
 
   private now(): number { return this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000); }
 
-  /** Signatures newer than `until`, oldest first: the newest `limit` of them, and `cut` when there were more than that. */
-  private async signaturesSince(wallet: string, until: string | null, limit: number): Promise<{ signatures: string[]; cut: boolean }> {
-    const out: string[] = [];
-    let before: string | undefined, cut = false;
-    for (;;) {
-      // confirmed, like everything else read here: a transaction the RPC has just pushed word of is in the list, not thirteen seconds behind it
-      const page: any[] = (await this.rpc.call("getSignaturesForAddress", [wallet, { limit: Math.min(1000, limit - out.length), commitment: "confirmed", ...(before ? { before } : {}), ...(until ? { until } : {}) }])) ?? [];
-      for (const s of page) out.push(s.signature);
-      if (page.length < 1000) break;
-      // a full page and no room for another: there are older ones this did not take
-      if (out.length >= limit) { cut = true; break; }
-      before = page[page.length - 1].signature;
+  /** A wallet's newest signatures, oldest first: what a baseline is built from the first time it is read. */
+  private async newest(wallet: string, limit: number): Promise<string[]> {
+    const page: any[] = (await this.rpc.call("getSignaturesForAddress", [wallet, { limit: Math.min(1000, limit), commitment: "confirmed" }])) ?? [];
+    return page.map((s) => s.signature).reverse();
+  }
+
+  /**
+   * The wallet's next transactions after `cursor`, in the order they happened, `most` of them at most.
+   *
+   * The RPC lists newest first, a thousand at a time, so the next ones are at the far end. When there are
+   * more than a thousand, the list is followed back, a few pages a pass, until it reaches the cursor; the
+   * oldest thousand are then kept and read through, twenty-five a pass, before it is asked for again.
+   * `far` says that is going on: the wallet is more than a thousand behind. Nothing is passed over, so a
+   * transaction cannot be hidden by sending a thousand after it: it is read before any of them.
+   */
+  private async nextOwn(wallet: string, cursor: string, most: number): Promise<{ next: string[]; more: boolean; far: boolean; lost: boolean }> {
+    const state = this.waiting.get(wallet) ?? { queue: [], scan: null };
+    let far = state.scan !== null, lost = false;
+    // What is waiting from an earlier pass was listed then: once it is read, the list has to be asked for
+    // again before the wallet can be called caught up.
+    const listedNow = state.queue.length === 0;
+    if (listedNow) {
+      let before = state.scan?.before, tail = state.scan?.tail ?? [], pages = state.scan?.pages ?? 0, reached = false;
+      for (let i = 0; i < OWN_LIST_PAGES && !reached; i++) {
+        // confirmed, like everything else read here: a transaction the RPC has just pushed word of is in the list, not thirteen seconds behind it
+        const page: any[] = (await this.rpc.call("getSignaturesForAddress", [wallet, { limit: 1000, commitment: "confirmed", until: cursor, ...(before ? { before } : {}) }])) ?? [];
+        pages += 1;
+        // the oldest thousand of everything seen so far, newest first
+        tail = [...tail, ...page.map((s) => s.signature)].slice(-1000);
+        if (page.length < 1000) reached = true;
+        else { before = page[page.length - 1].signature; far = true; }
+        // a cursor the RPC no longer knows would have this follow the wallet's whole past: it stops, and says so
+        if (!reached && pages >= (this.opts.ownListPagesInAll ?? OWN_LIST_PAGES_IN_ALL)) { reached = true; lost = true; }
+      }
+      if (reached) { state.queue = tail.reverse(); state.scan = null; } else state.scan = { before: before!, tail, pages };
     }
-    return { signatures: out.reverse(), cut };
+    if (state.queue.length > 0 || state.scan) this.waiting.set(wallet, state); else this.waiting.delete(wallet);
+    return { next: state.queue.slice(0, most), more: state.queue.length > most || state.scan !== null || !listedNow, far, lost };
+  }
+
+  /** So many of the wallet's waiting transactions have been read. */
+  private readOwn(wallet: string, count: number): void {
+    const state = this.waiting.get(wallet);
+    if (!state) return;
+    state.queue.splice(0, count);
+    if (state.queue.length === 0 && !state.scan) this.waiting.delete(wallet);
   }
 
   /**
    * A token account's own transactions since a slot, the oldest first, and whether that reaches all the way
    * back to it. Failed ones are left out: they moved nothing.
    */
-  private async accountList(account: string, after: number): Promise<{ list: { signature: string; slot: number }[]; whole: boolean }> {
+  private async accountList(account: string, after: number, pages: number, background: boolean): Promise<{ list: { signature: string; slot: number }[]; whole: boolean; asked: number }> {
     const out: { signature: string; slot: number }[] = [];
-    let before: string | undefined, whole = false;
-    pages: for (let page = 0; page < ACCOUNT_LIST_PAGES; page++) {
-      const answer: any[] = (await this.rpc.call("getSignaturesForAddress", [account, { limit: 1000, commitment: "confirmed", ...(before ? { before } : {}) }])) ?? [];
+    let before: string | undefined, whole = false, asked = 0;
+    pages: for (let page = 0; page < Math.min(pages, ACCOUNT_LIST_PAGES); page++) {
+      asked += 1;
+      const answer: any[] = (await this.rpc.call("getSignaturesForAddress", [account, { limit: 1000, commitment: "confirmed", ...(before ? { before } : {}) }], background ? { background: true } : undefined)) ?? [];
       for (const s of answer) {
         if (typeof s?.signature !== "string") continue;
         if (!(Number(s.slot) > after)) { whole = true; break pages; }
@@ -194,7 +243,7 @@ export class Watcher {
       before = answer[answer.length - 1].signature;
     }
     // the RPC answers newest first
-    return { list: out.reverse(), whole };
+    return { list: out.reverse(), whole, asked };
   }
 
   /** Whether the owner was already told of a taking in this transaction. It can be come upon twice: in the wallet's list and in a token account's. */
@@ -207,7 +256,7 @@ export class Watcher {
     return fromRpc(signature, await this.rpc.call("getTransaction", [signature, { encoding: "base64", maxSupportedTransactionVersion: 0, commitment: "confirmed" }], background ? { background: true } : undefined));
   }
 
-  private async tokenAccounts(wallet: string): Promise<Record<string, TokenAccountState>> {
+  private async tokenAccounts(wallet: string, known: Record<string, unknown> = {}): Promise<Record<string, TokenAccountState>> {
     const out: Record<string, TokenAccountState> = {};
     for (const programId of TOKEN_PROGRAMS) {
       const res = await this.rpc.call("getTokenAccountsByOwner", [wallet, { programId }, { encoding: "jsonParsed", commitment: "confirmed" }]);
@@ -225,9 +274,15 @@ export class Watcher {
     // A wallet can have thousands of token accounts (an exchange's has), and every one of them would be kept
     // and written out with each save. A thousand are kept, the same thousand every time; a wallet of an
     // ordinary person has a few dozen.
+    //
+    // Which thousand matters: anyone can open token accounts in a wallet's name, for a little rent, and
+    // must not be able to push the ones worth watching off the record by opening a thousand. So first the
+    // ones somebody holds a permission to spend from, then the ones already on record, then the ones that
+    // hold something, and only then the rest; by address within each.
     const addresses = Object.keys(out);
     if (addresses.length <= MAX_TOKEN_ACCOUNTS) return out;
-    return Object.fromEntries(addresses.sort().slice(0, MAX_TOKEN_ACCOUNTS).map((a) => [a, out[a]!]));
+    const rank = (a: string) => (out[a]!.delegate ? 0 : Object.hasOwn(known, a) ? 1 : out[a]!.amount !== undefined && out[a]!.amount !== "0" ? 2 : 3);
+    return Object.fromEntries(addresses.sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : 1)).slice(0, MAX_TOKEN_ACCOUNTS).map((a) => [a, out[a]!]));
   }
 
   private watching(wallet: string): boolean { return this.store.wallets().some((w) => w.address === wallet); }
@@ -315,7 +370,7 @@ export class Watcher {
       const adopt = () => {
         entry.amount = now.amount; entry.slot = now.slot;
         if (now.decimals !== undefined) entry.decimals = now.decimals;
-        delete entry.fellAt; delete entry.lookedAt;
+        delete entry.fellAt; delete entry.lookedAt; delete entry.others;
         this.accounted(wallet, address, now.slot);
       };
       if (!was || was.amount === undefined || was.slot === undefined || !DIGITS.test(was.amount) || was.owner !== wallet) { adopt(); continue; }
@@ -323,6 +378,7 @@ export class Watcher {
         entry.amount = was.amount!; entry.slot = was.slot!;
         if (fellAt !== undefined) entry.fellAt = fellAt; else delete entry.fellAt;
         if (lookedAt !== undefined) entry.lookedAt = lookedAt; else delete entry.lookedAt;
+        if (was.others) entry.others = true; else delete entry.others;
       };
       // an answer from a node that is behind the one that answered last says nothing new
       if (now.slot <= was.slot) { keep(was.fellAt); if (was.fellAt !== undefined) pending = true; continue; }
@@ -336,8 +392,13 @@ export class Watcher {
       if (listUnread && this.now() - fellAt < WAIT_FOR_OWN_SECONDS) { keep(fellAt); pending = true; continue; }
       // more such accounts than one pass looks into: this one waits its turn, and is not given up on meanwhile
       if (lists >= MOST_ACCOUNT_LISTS) { keep(fellAt); pending = true; continue; }
-      lists += 1;
-      const { list, whole } = await this.accountList(address, was.slot);
+      // The first look into a fall is news and is read like news. Looking again at one that is still not
+      // accounted for gives way to everything else the RPC is asked: a wallet cannot hold the RPC's
+      // allowance by keeping a fall unexplained.
+      const again = was.fellAt !== undefined;
+      const { list, whole, asked } = await this.accountList(address, was.slot, MOST_ACCOUNT_LISTS - lists, again);
+      lists += asked;
+      let others = was.others === true;
       // Everything since the amount on record, the oldest first: what took the tokens is then read before
       // whatever was sent after it to bury it. And all of it, not only until what is missing is found:
       // another taking can be behind a payment in, and one that landed after the look is told of now.
@@ -346,9 +407,11 @@ export class Watcher {
         if (this.moves.get(wallet)?.get(address)?.has(s.signature)) continue;
         if (reads >= MOST_EXTRA_READS) { unread += 1; continue; }
         reads += 1;
-        const tx = await this.transaction(s.signature);
+        const tx = await this.transaction(s.signature, again);
         if (!tx) { unread += 1; continue; }
         this.note(wallet, tx, before, address);
+        // somebody else's transaction touched the account: what is not accounted for is not all the wallet's own doing
+        if (!tx.failed && !signersOf(tx).includes(wallet)) others = true;
         if (this.told(wallet, tx.signature)) continue;
         // whoever it names: one the wallet signed is the wallet's own, and the rule says nothing of it
         const event = await this.raise(wallet, assessTaken(tx, { wallet, sentinelDelegate: w.sentinelDelegate, tokenAccounts: before, trustedTakers: trusted }), tx);
@@ -357,10 +420,15 @@ export class Watcher {
       if (explained()) { adopt(); continue; }
       // Not all of it is accounted for: the RPC may be a moment behind, or there was more to read than one
       // pass reads. It is looked for again on the wallet's next turn, and for ten minutes.
-      if (this.now() - fellAt < EXPLAIN_FOR_SECONDS) { keep(fellAt, this.now()); pending = true; continue; }
-      // Ten minutes on. If there was more than could be read, on the wallet or on the account, that is how a
-      // taking is hidden, and it is said as one.
-      const event = await this.raise(wallet, assessUnexplainedLoss(was, this.moved(wallet, address, was.slot, now.slot) - diff, listUnread || unread > 0 || !whole), null);
+      if (this.now() - fellAt < EXPLAIN_FOR_SECONDS) { keep(fellAt, this.now()); if (others) entry.others = true; pending = true; continue; }
+      // Ten minutes on, and there is still more than could be read, on the wallet or on the account.
+      const unreadLeft = listUnread || unread > 0 || !whole;
+      // If all that was read on the account was the wallet's own doing, so is the backlog: a wallet that
+      // transacts faster than it can be read, or one come back to after a long while. Its owner is told it
+      // is behind (above), and is not told of a theft.
+      if (unreadLeft && !others) { adopt(); continue; }
+      // If somebody else's transactions are among them, that is how a taking is hidden, and it is said as one.
+      const event = await this.raise(wallet, assessUnexplainedLoss(was, this.moved(wallet, address, was.slot, now.slot) - diff, unreadLeft), null);
       if (event) raised.push(event);
       adopt();
     }
@@ -426,17 +494,24 @@ export class Watcher {
 
   private async passNow(w: WatchedWallet, print?: string, held?: Held): Promise<StoredEvent[]> {
     const wallet = w.address;
-    if (!this.watching(wallet)) { this.moves.delete(wallet); return []; }
+    if (!this.watching(wallet)) { this.moves.delete(wallet); this.waiting.delete(wallet); return []; }
     const record = this.store.record(wallet);
     /** Its token accounts as they were on record when this pass began. */
     const before = record.tokenAccounts;
+    // A wallet that has not been read for hours (its plan lapsed and came back, the service was away) has
+    // weeks of its own doing between what its accounts held then and now. That is not explained one
+    // transaction at a time: what they hold now is taken as it is found, as on a first read.
+    if (record.lastSeenAt !== null && this.now() - record.lastSeenAt > STALE_AFTER_SECONDS) {
+      for (const t of Object.values(before)) { delete t.amount; delete t.slot; delete t.fellAt; delete t.lookedAt; delete t.others; }
+      this.moves.delete(wallet);
+    }
     const baseline = Baseline.from(record.baseline);
     const raised: StoredEvent[] = [];
     const ctxBase: Omit<WatchContext, "ownerSigned"> = { wallet, baseline, sentinelDelegate: w.sentinelDelegate, drainers: this.opts.drainers ?? new Set(), reviewedPrograms: this.opts.reviewedPrograms, window: this.windows.get(wallet) ?? this.windows.set(wallet, new BurstWindow()).get(wallet)!, tokenAccounts: before, trustedTakers: new Set(record.trustedTakers ?? []) };
 
     let somethingNew = false, listUnread = false, accountsRead = false;
     if (record.cursor === null && record.baseline === null) {
-      const { signatures: history } = await this.signaturesSince(wallet, null, this.opts.historyLimit ?? 200);
+      const history = await this.newest(wallet, this.opts.historyLimit ?? 200);
       for (const signature of history) {
         // the past of a wallet that is new here can wait its turn behind news of wallets already watched
         const tx = await this.transaction(signature, true);
@@ -445,12 +520,12 @@ export class Watcher {
       record.cursor = history.at(-1) ?? null;
       somethingNew = true;
     } else {
-      const { signatures: fresh, cut } = await this.signaturesSince(wallet, record.cursor, 1000);
-      somethingNew = fresh.length > 0;
       // So many in one pass, oldest first, and the rest on the next: a wallet that transacts without pause
       // (a bot, an exchange) must not hold a reader, and the RPC's allowance, for as long as it likes.
+      const { next: fresh, more, far, lost } = await this.nextOwn(wallet, record.cursor!, this.opts.mostPerPass ?? MOST_PER_PASS);
+      somethingNew = fresh.length > 0;
       let read = 0;
-      for (const signature of fresh.slice(0, this.opts.mostPerPass ?? MOST_PER_PASS)) {
+      for (const signature of fresh) {
         const tx = await this.transaction(signature);
         // a transaction the RPC does not have yet is read on the next pass: the cursor stays before it
         if (!tx) break;
@@ -465,17 +540,18 @@ export class Watcher {
         if (a.level === null || a.level === "info") baseline.learn(tx, wallet);
         record.cursor = signature;
       }
-      // what is listed and not yet read is read on this wallet's very next turn, not when its accounts next move
-      listUnread = read < fresh.length;
+      this.readOwn(wallet, read);
+      // what is listed and not yet read is read on this wallet's next turns, not when its accounts next move
+      listUnread = read < fresh.length || more;
       record.more = listUnread;
       // More names the wallet than is being read. Its owner hears of it when that has gone on for ten
-      // minutes, or at once when there was more than could even be listed: a wallet can be sent a flood of
-      // cheap transactions to bury one, and being behind is then itself the news.
+      // minutes, or at once when it is more than a thousand behind: a wallet can be sent a flood of cheap
+      // transactions to delay the reading of one, and being behind is then itself the news.
       const t = this.now();
       if (!listUnread) delete record.moreSince; else record.moreSince ??= t;
-      if (listUnread && (cut || t - record.moreSince! >= BEHIND_AFTER_SECONDS) && t - (record.behindToldAt ?? -Infinity) >= BEHIND_EVERY_SECONDS) {
+      if (listUnread && (far || lost || t - record.moreSince! >= BEHIND_AFTER_SECONDS) && t - (record.behindToldAt ?? -Infinity) >= BEHIND_EVERY_SECONDS) {
         record.behindToldAt = t;
-        const event = await this.raise(wallet, assessBehind(fresh.length - read, cut), null);
+        const event = await this.raise(wallet, assessBehind((this.waiting.get(wallet)?.queue.length ?? 0), far, lost), null);
         if (event) raised.push(event);
       }
     }
@@ -491,7 +567,7 @@ export class Watcher {
     // a record written before this was kept had its accounts read on every pass: its last pass is when
     const accountsReadAt = record.accountsReadAt ?? record.lastSeenAt ?? undefined;
     if (somethingNew || accountsReadAt === undefined || at - accountsReadAt >= (this.opts.accountsEverySeconds ?? 900)) {
-      const accounts = await this.tokenAccounts(wallet);
+      const accounts = await this.tokenAccounts(wallet, before);
       if (record.lastSeenAt !== null) {
         for (const [address, before] of Object.entries(record.tokenAccounts)) {
           const after = accounts[address] ?? (await this.accountElsewhere(address));
@@ -546,17 +622,21 @@ export class Watcher {
     const all = this.store.wallets();
     const chosen = all.filter((w) => !only || only(w.address));
     // a wallet no longer watched has nothing remembered about it
-    if (this.moves.size > 0) { const watched = new Set(all.map((w) => w.address)); for (const wallet of this.moves.keys()) if (!watched.has(wallet)) this.moves.delete(wallet); }
+    if (this.moves.size > 0 || this.waiting.size > 0) {
+      const watched = new Set(all.map((w) => w.address));
+      for (const kept of [this.moves, this.waiting]) for (const wallet of kept.keys()) if (!watched.has(wallet)) kept.delete(wallet);
+    }
     const now = this.now();
     const every = typeof this.opts.fullEverySeconds === "function" ? this.opts.fullEverySeconds() : this.opts.fullEverySeconds ?? 600;
     // Why a wallet would need its transactions read, most pressing first: the RPC has just spoken of it (0);
-    // a pass left some unread, or left a token account's holding unaccounted for (1); it was never read (3);
-    // or only that it has been long enough (4). A look that differs is 2, and is decided below.
+    // a look that differs (1, decided below); it was never read (2); a pass left some unread, or left a
+    // token account's holding unaccounted for (3); or only that it has been long enough (4). News goes
+    // before catching up: a wallet that is kept behind, by its owner or by anyone, waits for the others.
     const kept = new Map<string, { print: string | undefined; known: boolean; why: number | null }>();
     for (const w of chosen) {
       const r = this.store.record(w.address);
       const known = r.lastSeenAt !== null;
-      const why = opts.full?.(w.address) === true ? 0 : r.more === true || r.unsettled === true ? 1 : !known ? 3 : now - (r.passedAt ?? 0) >= every ? 4 : null;
+      const why = opts.full?.(w.address) === true ? 0 : !known ? 2 : r.more === true || r.unsettled === true ? 3 : now - (r.passedAt ?? 0) >= every ? 4 : null;
       kept.set(w.address, { print: r.glance?.print, known, why });
     }
     // a wallet never read has no token accounts on record to look at: its first pass finds them
@@ -569,7 +649,7 @@ export class Watcher {
       if (failure !== undefined) { blind.push({ wallet: w.address, why: failure }); continue; }
       const print = prints.get(w.address);
       const moved = k.known && (print === undefined || print !== k.print);
-      if (k.why !== null || moved) wanted.push({ w, print, held: held.get(w.address), why: Math.min(k.why ?? 2, moved ? 2 : 9), moved }); else same.push(w.address);
+      if (k.why !== null || moved) wanted.push({ w, print, held: held.get(w.address), why: Math.min(k.why ?? 1, moved ? 1 : 9), moved }); else same.push(w.address);
     }
     // A round is kept short: it reads through so many wallets and no more, the most pressing first. One that
     // is only due for its now-and-then pass, with its accounts as they were, has been read by the look and

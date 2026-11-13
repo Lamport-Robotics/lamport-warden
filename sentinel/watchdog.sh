@@ -42,8 +42,11 @@ last=$(cat "$STAMP" 2>/dev/null || echo 0)
 channel=$(grep '^SENTINEL_OPS_CHANNEL=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
 case "$channel" in
   https://discord.com/*|https://discordapp.com/*|https://hooks.slack.com/*) ;;
+  *'"'*|*' '*) ;;
   https://*/*)
-    if curl -fsS -m 10 -H "Title: Warden Sentinel: operations" -d "The watchdog beside Sentinel found it not watching, twice, and started it again. What it found: $out" "$channel" >/dev/null 2>&1; then
+    # the channel's address is all it takes to read what is sent there, and other people have accounts on this
+    # machine: curl reads it from its input, not from arguments anyone can list
+    if printf 'url = "%s"\n' "$channel" | curl -fsS -m 10 -H "Title: Warden Sentinel: operations" -d "The watchdog beside Sentinel found it not watching, twice, and started it again. What it found: $out" -K - >/dev/null 2>&1; then
       echo "$now" > "$STAMP"
     fi
     ;;

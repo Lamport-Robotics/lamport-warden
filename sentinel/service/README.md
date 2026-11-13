@@ -138,7 +138,8 @@ finding the transaction, the owner gets `unexplained_loss`, and the new amount i
 
 ### Somebody trying to hide it
 
-The code is public, and a transaction costs a thief almost nothing, so each of these was tried:
+The code is public, and a transaction costs a thief almost nothing, so each of these was tried (twice, by a
+reviewer who had not written any of it):
 
 - **Dust after the taking**, to push it out of what is read. The account's list is read oldest first from the
   slot on record, and as far back as three thousand signatures, so what took the tokens is read before
@@ -146,15 +147,42 @@ The code is public, and a transaction costs a thief almost nothing, so each of t
 - **Filling the wallet's own list** (thirty transactions a turn that merely name it), so that "the wallet's
   own transactions are read first" never ends. A fall waits two minutes for the wallet's list and no longer;
   then the account's own list is read regardless.
-- **Naming the wallet in the taking**, and burying it under a thousand more that name it, so the wallet's
-  list (which takes the newest thousand) never shows it. The taking is judged where it is found, on the
-  account's list, by who signed it and not by whom it names.
+- **Naming the wallet in the taking**, and burying it under a thousand more that name it. The taking is
+  judged where it is found, on the account's list, by who signed it and not by whom it names.
+- **Burying one of the wallet's own** (a thief who has the key drains it, then sends a thousand transactions
+  that name it). The wallet's list is never skipped ahead in: when more is waiting than one answer of the
+  RPC holds, the list is followed back to where reading stopped, three pages a pass, and read from there in
+  order. The drain is the oldest and is read first. A flood buys lateness, in proportion to what it costs,
+  and the owner is told the wallet is behind (`watch_behind`: at once when it is more than a thousand
+  behind, otherwise after ten minutes; at most every six hours).
 - **A flood before the taking**, so that reading oldest first does not reach it in ten minutes.
-  `unexplained_loss` is then Urgent and says why: tokens left, the wallet did not move them, and there was
-  more than could be read, which is how one is hidden. Nobody can be named, and the owner is told to revoke.
-- Beside these the owner is told, at Alert, when more names the wallet than is being read: after ten minutes
-  of it, or at once when there was more than the list holds and the oldest go unread (`watch_behind`, at
-  most every six hours).
+  `unexplained_loss` is then Urgent and says why: tokens left, somebody else's transactions were on the
+  account, and there was more than could be read, which is how one is hidden. Nobody can be named, and the
+  owner is told to revoke.
+- **A thousand token accounts opened in the wallet's name** (anyone can, for a little rent), to push the one
+  with the permission on it off the record, which keeps a thousand. Kept first are the accounts somebody may
+  spend from, then the ones already on record, then the ones that hold something.
+
+### A wallet's own doing is not a theft
+
+The same machinery must not cry theft at a wallet that is merely busy, or was away.
+
+- A wallet that transacts faster than it is read falls behind, and its token accounts hold less than what
+  has been read explains. When ten minutes pass and everything read on the account was the wallet's own, the
+  backlog is the wallet's own too: the amount is taken as it is and nothing is said but that it is behind.
+- A wallet not read for six hours (its plan lapsed and came back, the service was away) has too much of its
+  own past between then and now to explain one transaction at a time. What its accounts hold is taken as it
+  is found, as on a first read, and compared from then on.
+
+### One wallet's trouble is not everyone's
+
+Whoever can add a wallet can make it expensive to read, so what one wallet may take is bounded:
+
+- a pass asks for five pages of token-account lists at most, and reads ten transactions from them;
+- the first look into a fall is read like news; looking again at one that is still unexplained gives way to
+  everything else asked of the RPC;
+- in a round, news goes first (the RPC's word, a look that differs, a new wallet). A wallet that is catching
+  up, on its own list or on an unexplained fall, takes the places that are left.
 
 ### A sale is a taking too
 
@@ -163,7 +191,9 @@ transaction moving the token under it: to the chain, the same thing as a theft. 
 Urgent, with what the wallet was paid in the same transaction, so that the owner recognises it. A payment
 does not soften the alert: a thief can send a wallet one lamport. What does is the owner. "This was me" on
 such an alert makes whoever holds that permission familiar for that wallet (`trustedTakers` on the record,
-the newest twenty), and what it takes afterwards is Info: on the page, and nobody's phone rings. Because
+the newest twenty), and what it takes afterwards is Info: on the page, and nobody's phone rings. Only when
+the taking went under one permission: a thief's old approval can ride in a sale, and a transaction that
+took under two makes neither familiar. Because
 that is less protection from then on, and anyone signed in to the profile can press it, the profile's
 channels are told when it is done (`takerTrustedNotice`), with the wallet that was signed in.
 
@@ -176,9 +206,11 @@ channels are told when it is done (`takerTrustedNotice`), with the wallet that w
   those somebody holds a permission to spend from, then those that hold something. The rest are compared
   when the wallet's accounts are next read in full, which for a quiet wallet is about every twenty minutes.
 - A record from before amounts were kept has nothing to compare with until its first read after the upgrade.
-- Transactions the wallet itself signs are read from its own list, twenty-five a pass, oldest first. A flood
-  of transactions naming the wallet delays alerts about those (the owner is told it is behind, as above);
-  what happened to its balances and permissions is still seen by the look, every turn.
+- Transactions the wallet itself signs are read from its own list, twenty-five a pass, in order, none
+  skipped. A flood of transactions naming the wallet delays alerts about those (the owner is told it is
+  behind, as above); what happened to its balances and permissions is still seen by the look, every turn.
+- SOL that leaves is told of by the transaction that sent it, when that is read. There is no comparing of
+  the wallet's SOL against what was read, as there is for tokens.
 
 `taken.test.ts` runs all of this against a chain written for it; `taken.validator.test.ts` runs the plain
 case against a local validator and the Token program itself (a real approval, a real transfer by the
@@ -339,13 +371,16 @@ lost server. For that there is a copy somewhere else:
   is kept only if it unpacks and is the service's own file.
 - On a Mac it also puts into the login keychain, never into a file and never onto a command line, the two
   things a restored file is no use without: the data key (the stored alert channels are sealed with it) and
-  the address of the operator's channel. Stripe's keys are not copied: they can be made again at Stripe. A
+  the address of the operator's channel. The key is kept under its own fingerprint, and a copy's name ends
+  in that fingerprint (`sentinel-<time>-k<eight characters>.json.gz`): a server set up again has a new key,
+  which is kept beside the old one and never over it, and each copy says which key opens it. Stripe's keys are not copied: they can be made again at Stripe. A
   process running as that user on that Mac can read both the copies and the key; the keychain keeps the key
   out of the folder, out of other backups of the folder, and out of anything that reads files.
 - Nothing is removed when a copy fails, so a server that is gone does not take its backups with it a week
-  later. Nothing is removed either when the server's file has no wallets in it and the copy before had
-  several: a server that was lost and set up again looks like that, and the script and the look both say so.
-- It ends with 2 when the copy was made and the key for it is not in the keychain and could not be read.
+  later. Nothing is removed either while the server's file has no wallets in it and a copy kept here has
+  several, on that run or any later one: a server that was lost and set up again looks like that, and the
+  script and the look both say so until someone restores or removes the old copies.
+- It ends with 2 when the copy was made and its key could not be read from the server.
 - `sentinel/watch-from-here.sh` asks the deployed service the same question as the check from GitHub, from
   that machine, and looks at the copies: it says so, as a notification there and on the operator's ntfy
   channel, when the service does not answer or is not watching, and when no copy has been made for two days.
@@ -356,8 +391,9 @@ lost server. For that there is a copy somewhere else:
 
 To restore onto a new server: deploy (`sentinel/deploy.sh`), stop the service, gunzip the newest copy to
 `/var/lib/private/lamport-sentinel/sentinel.json` owned by the service's user, set `SENTINEL_DATA_KEY` in
-`/etc/lamport-sentinel.env` to what `security find-generic-password -s lamport-sentinel-data-key -a <host> -w`
-prints, and start it. Whatever happened after the copy was made is lost: at most a day.
+`/etc/lamport-sentinel.env` to what
+`security find-generic-password -s lamport-sentinel-data-key -a '<host>#<the eight characters after -k in the copy's name>' -w`
+prints (the key that copy was sealed with, not the one the new server made for itself), and start it. Whatever happened after the copy was made is lost: at most a day.
 
 ## A line to whoever runs it
 
