@@ -74,6 +74,18 @@ export class BurstWindow {
     this.sends.push({ at, lamports, emptied });
     this.sends = this.sends.filter((s) => at - s.at <= this.seconds);
   }
+  /** What was last said about this run of sends, and when. */
+  private said: { level: Level; at: number } | null = null;
+  /**
+   * Whether to say it: once for a run of sends, and again only when it has got worse (an Alert that becomes
+   * Urgent) or when as long as the window has gone by. Otherwise a wallet that sends without pause would be
+   * told the same thing on every one of them.
+   */
+  worthSaying(level: Level, at: number): boolean {
+    if (this.said && at - this.said.at < this.seconds && RANK[level] <= RANK[this.said.level]) return false;
+    this.said = { level, at };
+    return true;
+  }
   get count(): number { return this.sends.length; }
   get lamports(): bigint { return this.sends.reduce((n, s) => n + s.lamports, 0n); }
   get emptied(): number { return this.sends.reduce((n, s) => n + s.emptied, 0); }
@@ -213,8 +225,8 @@ export function assessTransaction(tx: ObservedTx, ctx: WatchContext): Assessment
       const before = at >= 0 ? BigInt(tx.preBalances[at] ?? 0) : 0n;
       const earlier = ctx.window.lamports - (sol > 0n ? sol : 0n);
       const most = (before > 0n && ctx.window.lamports * 2n > before + earlier) || ctx.window.emptied >= 3;
-      if (most) out.push(signal("burst", "urgent", true, `Most of what your wallet held has left it in the last ${Math.round(ctx.window.seconds / 60)} minutes, in ${ctx.window.count} transaction${ctx.window.count === 1 ? "" : "s"}.`));
-      else if (ctx.window.count >= 4) out.push(signal("burst", "alert", true, `${ctx.window.count} payments have left your wallet in the last ${Math.round(ctx.window.seconds / 60)} minutes.`));
+      if (most) { if (ctx.window.worthSaying("urgent", tx.blockTime)) out.push(signal("burst", "urgent", true, `Most of what your wallet held has left it in the last ${Math.round(ctx.window.seconds / 60)} minutes, in ${ctx.window.count} transaction${ctx.window.count === 1 ? "" : "s"}.`)); }
+      else if (ctx.window.count >= 4 && ctx.window.worthSaying("alert", tx.blockTime)) out.push(signal("burst", "alert", true, `${ctx.window.count} payments have left your wallet in the last ${Math.round(ctx.window.seconds / 60)} minutes.`));
     }
   }
 

@@ -196,6 +196,20 @@ describe("unlike the wallet's past (soft signals)", () => {
     expect(b.signals.find((s) => s.kind === "burst")).toMatchObject({ level: "urgent", soft: true });
     expect(b.rescueWorthy).toBe(false);
 
+    // It is said once for a run, not on every payment of it: eight payments a minute apart are one Alert,
+    // though each of the last five is "four or more in ten minutes".
+    const busy = watching({ window: new BurstWindow() });
+    expect(Array.from({ length: 8 }, (_, i) => assessTransaction(pay(friend, 0.3, NOON + i * 60, 40), busy).level)).toEqual([null, null, null, "alert", null, null, null, null]);
+    // still at it ten minutes after that was said: said again
+    expect(assessTransaction(pay(friend, 0.3, NOON + 3 * 60 + 600, 40), busy).level).toBe("alert");
+    // and at once, without waiting, when it gets worse: the run that was an Alert takes most of the wallet
+    const worse = watching({ window: new BurstWindow() });
+    for (let i = 0; i < 4; i++) assessTransaction(pay(friend, 0.3, NOON + i * 60, 40), worse);
+    expect(assessTransaction(pay(friend, 0.3, NOON + 240, 40), worse).level).toBeNull();
+    const emptied = assessTransaction(pay(friend, 30, NOON + 300, 38.5), worse);
+    expect(emptied.signals.find((s) => s.kind === "burst")).toMatchObject({ level: "urgent" });
+    expect(assessTransaction(pay(friend, 3, NOON + 330, 8.5), worse).signals.filter((s) => s.kind === "burst")).toEqual([]); // and that once, too
+
     // ten minutes later the window has moved on
     const later = watching({ window: new BurstWindow() });
     for (let i = 0; i < 6; i++) expect(assessTransaction(pay(friend, 0.3, NOON + i * 700, 40), later).level).toBeNull();
