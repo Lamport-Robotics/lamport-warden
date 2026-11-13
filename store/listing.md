@@ -10,8 +10,8 @@ install and a link to the practice page.
 To submit 0.6.1:
 
 1. Package tab: upload `lamport-warden-0.6.1.zip` (`pnpm package`).
-2. Store listing tab: paste the description below again (it now mentions Sentinel) and replace the three
-   screenshots with the ones in `store/screenshots/` (retaken from 0.6.0; nothing in them changed in 0.6.1).
+2. Store listing tab: paste the description below again (it now mentions Sentinel and the practice page)
+   and replace the screenshots with the four in `store/screenshots/` (retaken from 0.6.1).
 3. Privacy tab: paste the storage justification and the data-usage note below again.
 4. Distribution tab: Payments. The extension itself sells nothing; it links to the Sentinel page, where the
    paid plan is sold once checkout is open. Choose "Contains in-app purchases" if checkout is open when you
@@ -86,7 +86,9 @@ whether Pro is on sale. It is paid by card through Stripe; nothing is bought ins
 Warden is advice in front of your wallet, not a lock on it. A page can still reach a wallet in ways an
 extension never sees. It is open source: https://github.com/Lamport-Robotics/lamport-warden
 
-**Screenshots** (1280 x 800): `store/screenshots/`, made by `pnpm shots`.
+**Screenshots** (1280 x 800): `store/screenshots/`, made by `pnpm shots`. Four: a look-alike address blocked,
+a swap with what a simulation showed, the settings page, and the practice page with a request stopped. The
+fourth is taken from the practice page as it is deployed, so `pnpm shots` needs the network for it.
 
 **Small promo tile** (440 x 280): not made yet.
 

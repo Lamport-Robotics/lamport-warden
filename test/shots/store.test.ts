@@ -78,3 +78,24 @@ it("3: the settings page", async () => {
   await page.screenshot({ path: join(out, "3-settings.png") });
   await page.close();
 });
+
+it("4: the practice page, with a request stopped", async () => {
+  // The page as it is deployed, so that it is drawn with the site's own type and mark. It needs the network,
+  // and the practice page to be up; the other three do not.
+  const plain = await launch([WARDEN]);
+  try {
+    const page = await plain.ctx.newPage();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto("https://warden.lamportrobotics.com/try/", { waitUntil: "networkidle" });
+    await page.locator("#warden.good").waitFor({ timeout: 15_000 });
+    const prompt = await Prompt.on(page);
+    await page.locator('#tries li[data-id="approve"] button').click();
+    await prompt.text(8000);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(500);
+    await page.screenshot({ path: join(out, "4-practice-page.png") });
+    await page.close();
+  } finally {
+    await plain.close();
+  }
+}, 60_000);
