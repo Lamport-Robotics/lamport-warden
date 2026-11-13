@@ -21,7 +21,9 @@ export type Level = "info" | "alert" | "urgent";
 export type SignalKind =
   | "delegate_replaced" | "authority_changed" | "wallet_reassigned" | "known_drainer" | "lookalike"
   | "unlimited_approval" | "foreign_nonce" | "new_large_payment" | "burst" | "new_program" | "odd_hour"
-  | "inbound_from_drainer" | "inbound_from_lookalike";
+  | "inbound_from_drainer" | "inbound_from_lookalike"
+  // not about the wallet but about the watching of it (blindness.ts)
+  | "watch_stopped" | "watch_resumed";
 
 export interface Signal {
   kind: SignalKind;

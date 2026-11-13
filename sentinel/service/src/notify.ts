@@ -34,6 +34,8 @@ export function messageFor(kind: ChannelKind, title: string, level: Level, sente
   return { headers: { "content-type": "application/json" }, body: JSON.stringify({ text: `${title}\n${plain}`.slice(0, 3000), mrkdwn: false, unfurl_links: false, unfurl_media: false }) };
 }
 
+export const TEST_SENTENCE = "This is a test from Warden Sentinel. Alerts about your wallets arrive here, one plain sentence each, never with a link.";
+
 export class ChannelNotifier implements Notifier {
   /** What could not be delivered, newest last: the service says so rather than pretending the owner was told. */
   readonly undelivered: { wallet: string; at: number; why: string }[] = [];
@@ -57,6 +59,25 @@ export class ChannelNotifier implements Notifier {
       }
     }
     if (channels.length === 0) this.miss(wallet, "the owner has no channel");
+  }
+
+  /**
+   * Sends one channel a test, so an owner knows an alert would reach them before they need one. Says plainly
+   * whether the channel took it.
+   */
+  async test(profile: string, channelId: string): Promise<{ ok: true } | { ok: false; status: number; why: string }> {
+    const channel = this.accounts.channelOf(profile, channelId);
+    if (!channel.ok) return channel;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), this.opts.timeoutMs ?? 8000);
+    try {
+      const res = await this.post(channel.url, { method: "POST", ...messageFor(channel.kind, "Warden Sentinel: test", "alert", TEST_SENTENCE), redirect: "error", signal: ctl.signal });
+      return res.ok ? { ok: true } : { ok: false, status: 502, why: `the channel did not take it (it answered ${res.status}). Check the address, or remove it and add it again.` };
+    } catch {
+      return { ok: false, status: 502, why: "the channel could not be reached. Check the address, or try again in a minute." };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private miss(wallet: string, why: string): void {
