@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Puts site/index.html up as https://warden.lamportrobotics.com on the server lamportrobotics.com runs on.
+# Puts site/index.html and site/privacy/ up as https://warden.lamportrobotics.com on the server lamportrobotics.com runs on.
 #
 #   site/deploy.sh [ssh-host]        default host: can
 #
@@ -10,14 +10,15 @@ set -euo pipefail
 HOST="${1:-can}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-ssh -o BatchMode=yes "$HOST" 'install -d -o lamport -g lamport -m 755 /opt/lamportrobotics/warden'
+ssh -o BatchMode=yes "$HOST" 'install -d -o lamport -g lamport -m 755 /opt/lamportrobotics/warden /opt/lamportrobotics/warden/privacy'
 scp -q -o BatchMode=yes "$HERE/index.html" "$HOST:/opt/lamportrobotics/warden/index.html"
+scp -q -o BatchMode=yes "$HERE/privacy/index.html" "$HOST:/opt/lamportrobotics/warden/privacy/index.html"
 ssh -o BatchMode=yes "$HOST" 'bash -s' <<'REMOTE'
 set -euo pipefail
-chown lamport:lamport /opt/lamportrobotics/warden/index.html
-chmod 644 /opt/lamportrobotics/warden/index.html
+chown lamport:lamport /opt/lamportrobotics/warden/index.html /opt/lamportrobotics/warden/privacy/index.html
+chmod 644 /opt/lamportrobotics/warden/index.html /opt/lamportrobotics/warden/privacy/index.html
 cd /etc/caddy
-if grep -q '^warden.lamportrobotics.com' Caddyfile; then echo "page replaced; the Caddy block was already there"; exit 0; fi
+if grep -q '^warden.lamportrobotics.com' Caddyfile; then echo "pages replaced; the Caddy block was already there"; exit 0; fi
 backup="Caddyfile.bak-warden-$(date +%Y%m%d-%H%M%S)"
 cp -p Caddyfile "$backup"
 cat >> Caddyfile <<'BLOCK'

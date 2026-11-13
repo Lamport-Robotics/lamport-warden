@@ -99,6 +99,13 @@ the settings page.
 Run `pnpm test:wallets` before a release. The wallets change how they put themselves on the page without
 notice, and that test is the only thing that will say so.
 
+## Publishing to the Chrome Web Store
+
+`pnpm package` builds and writes `lamport-warden-<version>.zip`, the file the developer dashboard takes.
+`store/listing.md` has every text field of the listing and the privacy tab; `store/screenshots/` has the
+1280 x 800 screenshots (`pnpm shots` retakes them from the built extension); `PRIVACY.md` is the privacy
+policy, also served at https://warden.lamportrobotics.com/privacy/. Run `pnpm test:wallets` first.
+
 ## The engine is pinned
 
 `pincer1/` is the [Pincer1 repo](https://github.com/Lamport-Robotics/pincer1) at one commit. The decoder

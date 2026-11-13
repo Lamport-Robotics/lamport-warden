@@ -347,6 +347,18 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     await page.close();
   });
 
+  it("shows the public RPC as the public RPC once it is chosen", async () => {
+    const options = await browser.ctx.newPage();
+    await options.goto(`chrome-extension://${browser.extensionId}/options.html`);
+    await options.check('input[name="rpc"][value="public"]');
+    await options.click("#saveRpc");
+    await expect.poll(() => options.textContent("#rpcNote")).toBe("Saved.");
+    await options.reload();
+    expect(await options.isChecked('input[name="rpc"][value="public"]')).toBe(true);
+    expect(await options.inputValue("#rpcUrl")).toBe("");
+    await options.close();
+  });
+
   it("shows on the settings page what it has learned, and forgets it when asked", async () => {
     const options = await browser.ctx.newPage();
     await options.goto(`chrome-extension://${browser.extensionId}/options.html`);

@@ -15,7 +15,8 @@ async function load() {
   $("version").textContent = `Version ${chrome.runtime.getManifest().version}`;
 
   // lookup tables
-  const mode = s.rpcUrl === "" ? "off" : s.rpcUrl === DEFAULT_RPC ? "public" : "own";
+  // compared as the settings store writes addresses (a trailing slash and all), not as the constant is spelled
+  const mode = s.rpcUrl === "" ? "off" : s.rpcUrl === cleanRpcUrl(DEFAULT_RPC) ? "public" : "own";
   for (const r of document.querySelectorAll<HTMLInputElement>('input[name="rpc"]')) r.checked = r.value === mode;
   $<HTMLInputElement>("rpcUrl").value = mode === "own" ? s.rpcUrl : "";
 

@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lamport Warden: privacy</title>
+<meta name="description" content="What Lamport Warden keeps on your machine, and the two kinds of request that leave your browser.">
+<meta name="theme-color" content="#0b0b0a">
+<link rel="icon" href="/site/mark.svg">
+<link rel="preload" href="/site/fonts/switzer-300.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/site/fonts/switzer-400.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+  @font-face { font-family: Switzer; src: url(/site/fonts/switzer-300.woff2) format("woff2"); font-weight: 300; font-display: swap; }
+  @font-face { font-family: Switzer; src: url(/site/fonts/switzer-400.woff2) format("woff2"); font-weight: 400; font-display: swap; }
+  @font-face { font-family: Switzer; src: url(/site/fonts/switzer-500.woff2) format("woff2"); font-weight: 500; font-display: swap; }
+  :root {
+    --ink: #0b0b0a; --bone: #f2eee3; --dim: rgba(242, 238, 227, .62); --mute: rgba(242, 238, 227, .38); --line: rgba(242, 238, 227, .12);
+    --raise: rgba(242, 238, 227, .04); --stop: #e8735a; --care: #d9b36a;
+    --pad: clamp(20px, 3.4vw, 56px);
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--ink); color: var(--bone); font: 400 17px/1.5 Switzer, system-ui, sans-serif; letter-spacing: -.01em; overflow-x: clip; -webkit-font-smoothing: antialiased; }
+  h1, h2, h3, p, ul { margin: 0; padding: 0; }
+  a { color: inherit; text-decoration: none; }
+  .bar { display: flex; align-items: center; gap: 32px; padding: 18px var(--pad); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 500; font-size: 16px; letter-spacing: -.02em; }
+  .nav { display: flex; gap: 24px; margin-left: auto; font-size: 15px; color: var(--dim); }
+  .nav a:hover { color: var(--bone); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; height: 48px; padding: 0 24px; border-radius: 999px; font-size: 15px; font-weight: 500; letter-spacing: -.01em; white-space: nowrap; border: 1px solid rgba(242, 238, 227, .32); transition: background .3s, border-color .3s, color .3s; }
+  .btn:hover { border-color: var(--bone); }
+  .btn.solid { background: var(--bone); color: var(--ink); border-color: var(--bone); }
+  .sec { padding: clamp(56px, 8vw, 120px) var(--pad); border-top: 1px solid var(--line); }
+  .inner { max-width: 1240px; margin: 0 auto; }
+  .eyebrow { font-size: 14px; color: var(--dim); margin-bottom: 18px; }
+  h1 { font-weight: 300; font-size: clamp(44px, 4.8vw, 84px); line-height: .98; letter-spacing: -.055em; text-wrap: balance; }
+  h2 { font-weight: 300; font-size: clamp(32px, 3.6vw, 56px); line-height: 1.04; letter-spacing: -.05em; margin-bottom: 18px; text-wrap: balance; }
+  h2 span { color: var(--mute); }
+  .lede { color: var(--dim); font-size: clamp(17px, 1.4vw, 20px); max-width: 34em; }
+
+  .hero { padding: clamp(40px, 6vw, 96px) var(--pad) clamp(56px, 8vw, 120px); }
+  .hero .inner { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: clamp(32px, 5vw, 80px); align-items: center; }
+  .hero h1 { margin-bottom: 24px; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
+  .status { font-size: 14px; color: var(--mute); margin-top: 18px; }
+
+  /* the prompt, as the extension draws it */
+  .stage { border: 1px solid var(--line); background: var(--raise); border-radius: 22px; padding: clamp(20px, 3vw, 36px) clamp(16px, 2.4vw, 28px); }
+  .card { background: var(--bone); color: #14130f; border-radius: 14px; padding: 20px 20px 16px; font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: 0; box-shadow: 0 18px 60px rgba(0, 0, 0, .5); max-width: 440px; margin: 0 auto; }
+  .card .tag { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; font-weight: 700; margin-bottom: 10px; color: #a1260d; }
+  .card .sentence { font-size: 16px; margin-bottom: 10px; overflow-wrap: anywhere; }
+  .card .site { font-size: 12px; color: #5c5a50; margin-bottom: 14px; }
+  .card .row { display: flex; justify-content: flex-end; }
+  .card .close { font-weight: 600; border-radius: 999px; padding: 9px 18px; border: 1px solid #14130f; }
+  .caption { font-size: 14px; color: var(--mute); margin-top: 18px; text-align: center; }
+
+  .levels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; margin-top: 40px; border-top: 1px solid var(--line); }
+  .level { padding: 24px 24px 0 0; }
+  .level + .level { padding-left: 24px; border-left: 1px solid var(--line); }
+  .level b { display: block; font-weight: 500; font-size: 20px; letter-spacing: -.03em; margin-bottom: 8px; }
+  .level p { color: var(--dim); font-size: 15px; }
+  .level.care b { color: var(--care); } .level.stop b { color: var(--stop); }
+  ul.catch { list-style: none; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 clamp(24px, 4vw, 64px); margin-top: 40px; }
+  ul.catch li { padding: 20px 0; border-top: 1px solid var(--line); }
+  ul.catch b { display: block; font-weight: 500; font-size: 20px; letter-spacing: -.03em; margin-bottom: 4px; }
+  ul.catch span { color: var(--dim); font-size: 15px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 40px; font-size: 16px; }
+  th, td { text-align: left; padding: 18px 20px 18px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--mute); font-weight: 400; font-size: 14px; }
+  td.no { color: var(--care); }
+  td code { font: 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; overflow-wrap: anywhere; }
+  .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(32px, 5vw, 80px); }
+  .two h2 { font-size: clamp(28px, 2.8vw, 44px); }
+  .two p { color: var(--dim); margin-bottom: 14px; max-width: 32em; }
+  .two a { color: var(--bone); border-bottom: 1px solid var(--mute); }
+  .foot { display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: center; padding: 28px var(--pad) 40px; border-top: 1px solid var(--line); font-size: 14px; color: var(--mute); }
+  .foot nav { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-left: auto; }
+  .foot a:hover { color: var(--bone); }
+  @media (max-width: 860px) {
+    .hero .inner, .two { grid-template-columns: minmax(0, 1fr); }
+    .levels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .level { padding: 20px 16px 20px 0; }
+    .level + .level { padding-left: 0; border-left: 0; }
+    .level:nth-child(even) { padding-left: 16px; border-left: 1px solid var(--line); }
+    .level:nth-child(n+3) { border-top: 1px solid var(--line); }
+    ul.catch { grid-template-columns: minmax(0, 1fr); }
+    th, td { padding-right: 12px; font-size: 15px; }
+    .nav { gap: 16px; }
+    .foot nav { margin-left: 0; }
+  }
+
+  .doc { max-width: 720px; margin: 0 auto; padding: clamp(32px, 5vw, 72px) var(--pad) clamp(56px, 8vw, 120px); }
+  .doc h1 { font-size: clamp(36px, 4vw, 60px); margin-bottom: 24px; }
+  .doc h2 { font-size: clamp(24px, 2.4vw, 32px); margin: 48px 0 14px; }
+  .doc p, .doc li { color: var(--dim); }
+  .doc p { margin-bottom: 14px; }
+  .doc ul, .doc ol { margin: 0 0 14px; padding-left: 22px; }
+  .doc li { margin-bottom: 10px; }
+  .doc b { color: var(--bone); font-weight: 500; }
+  .doc a { color: var(--bone); border-bottom: 1px solid var(--mute); overflow-wrap: anywhere; }
+  .doc code { font: 14px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; color: var(--bone); overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <a class="brand" href="/" aria-label="Lamport Warden">
+    <img src="/site/mark.svg" alt="" width="15" height="20"><span>Lamport Warden</span>
+  </a>
+  <nav class="nav" aria-label="Site">
+    <a href="/">Overview</a>
+    <a href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">Source</a>
+  </nav>
+</header>
+
+<main class="doc">
+  <p class="eyebrow">Privacy</p>
+  <h1>What Warden keeps, and what leaves your browser.</h1>
+  <p>Warden has no account, no Lamport server and no analytics. Lamport Robotics receives nothing from it.</p>
+
+  <h2>What it keeps, and where</h2>
+  <p>In the browser's extension storage on your machine, and nowhere else:</p>
+  <ul>
+    <li><b>Who each wallet has paid.</b> For each wallet address you sign with: the addresses it has paid, how many times, the amounts in SOL, and when. Warden uses this to tell a familiar payment from a new one and to spot look-alike addresses. It records a payment only when a request you let through comes back signed.</li>
+    <li><b>Your settings.</b> The RPC address, whether simulation is on, and the sites you allowed to ask for Privacy Rings keys.</li>
+    <li><b>Wallet objects it could not guard.</b> Their names, with the day each was last seen.</li>
+  </ul>
+  <p>The settings page shows all of it and can forget a wallet's history. Removing the extension removes it all.</p>
+  <p>Warden does not keep the sites you visit or the requests it read.</p>
+
+  <h2>What leaves your browser</h2>
+  <p>Two kinds of request, both to the Solana RPC chosen on the settings page. By default that is the public RPC at <code>api.mainnet-beta.solana.com</code>. It can be your own, or turned off.</p>
+  <ol>
+    <li><b>Reading lookup tables.</b> When a transaction names its accounts through a table stored on chain, Warden asks the RPC for that table. The RPC receives the table's address and, like any server, your IP address. It does not receive your wallet address, the transaction or the site.</li>
+    <li><b>Simulation, only if you turn it on.</b> For a transaction that calls a program Warden cannot read, Warden sends the unsigned transaction and the list of accounts it writes to the RPC, which runs it and answers with the result. The transaction names your wallet. This is off until you turn it on.</li>
+  </ol>
+  <p>Requests are sent without cookies and without a referrer. Nothing is sent to anyone else, nothing is sold, and nothing is used for advertising or to decide creditworthiness or lending.</p>
+
+  <h2>What it can see on a page</h2>
+  <p>Warden runs on every https page because any page can ask a wallet to sign. There it does two things: it puts itself in front of the wallet's signing calls, and it draws its prompt. It does not read the page's content, your passwords or your keys. It never has your private keys: those stay in your wallet.</p>
+
+  <h2>Changes and contact</h2>
+  <p>Changes to this policy are made in the open, in <a href="https://github.com/Lamport-Robotics/lamport-warden/blob/main/PRIVACY.md" rel="noopener">PRIVACY.md in the source</a>.</p>
+  <p>Questions: <a href="mailto:support@lamportrobotics.com">support@lamportrobotics.com</a></p>
+</main>
+
+<footer class="foot">
+  <span>© 2026 Lamport Robotics</span>
+  <nav aria-label="More from Lamport"><a href="/">Warden</a><a href="https://lamportrobotics.com">Pincer1</a><a href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">GitHub</a></nav>
+</footer>
+</body>
+</html>

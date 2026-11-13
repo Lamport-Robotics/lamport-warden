@@ -1,6 +1,7 @@
 # The Warden page
 
-`index.html` is the page for https://warden.lamportrobotics.com. One static file in the main site's type and
+`index.html` is the page for https://warden.lamportrobotics.com, and `privacy/index.html` is the privacy policy
+at `/privacy/` (the same text as `PRIVACY.md`; change both together). One static file in the main site's type and
 colours. It loads nothing but that site's own fonts and logo (`/site/fonts/switzer-*.woff2`, `/site/mark.svg`),
 which are not copied into this repo: the server serves them from the main site's folder.
 

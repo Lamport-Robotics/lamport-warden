@@ -40,7 +40,7 @@
   <p class="soft" id="version"></p>
 
   <h2>Reading lookup tables</h2>
-  <p>Most swaps name their accounts by position in a table stored on chain. To say where the money goes, Warden has to read that table from a Solana RPC. This is the only network call it makes. The RPC learns which table was asked for and your IP address. It does not learn your wallet address, the transaction or the site.</p>
+  <p>Most swaps name their accounts by position in a table stored on chain. To say where the money goes, Warden has to read that table from a Solana RPC. Unless you turn on simulation below, this is the only network call it makes. The RPC learns which table was asked for and your IP address. It does not learn your wallet address, the transaction or the site.</p>
   <label class="choice"><input type="radio" name="rpc" value="public"> <span>The public Solana RPC</span></label>
   <label class="choice"><input type="radio" name="rpc" value="own"> <span>My own RPC</span></label>
   <div class="row"><input type="url" id="rpcUrl" placeholder="https://…" spellcheck="false" autocomplete="off" aria-label="RPC address"></div>
