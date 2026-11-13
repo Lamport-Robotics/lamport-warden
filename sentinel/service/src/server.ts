@@ -105,7 +105,7 @@ const bytes = (v: unknown, max: number): Uint8Array | null => {
   return b.length > 0 && b.length <= max ? new Uint8Array(b) : null;
 };
 const field = (body: unknown, name: string): unknown => (body && typeof body === "object" ? (body as Record<string, unknown>)[name] : undefined);
-const eventView = (e: StoredEvent) => ({ id: e.id, wallet: e.wallet, signature: e.signature || null, at: e.at, level: e.level, signals: e.signals, sentence: e.sentence, canRescue: e.rescueWorthy, answer: e.answer ?? null });
+const eventView = (e: StoredEvent) => ({ id: e.id, wallet: e.wallet, signature: e.signature || null, at: e.at, level: e.level, signals: e.signals, sentence: e.sentence, canRescue: e.rescueWorthy, answer: e.answer ?? null, undelivered: e.undelivered === true });
 
 export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
   const { accounts, store, watcher, nonces } = deps;

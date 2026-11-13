@@ -15,8 +15,8 @@ const API = "/sentinel/api/v1";
 const SESSION = "sentinel.session";
 
 interface WalletRow { address: string; armed: boolean; reporting: boolean; paused: boolean; lastReadAt: number | null }
-interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack"; hint: string; active: boolean }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number } }
-interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; signals: string[]; sentence: string; answer: string | null }
+interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack"; hint: string; active: boolean; lastDeliveredAt: number | null; failing: { since: number; why: string } | null }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number } }
+interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; signals: string[]; sentence: string; answer: string | null; undelivered?: boolean }
 type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
 
@@ -178,7 +178,13 @@ function render(): void {
       acts.push(test);
     }
     acts.push(sure("Remove", "Remove?", async () => { if (await done(call("DELETE", `/channels/${c.id}`), "Removed.")) await refresh(); }));
-    return row(c.hint, c.active ? `${kindName[c.kind]}. Alerts are sent here.` : `${kindName[c.kind]}. Not in use: this plan does not cover it.`, acts, "addr");
+    // a channel that has stopped taking messages is said here, with what it answered, before an alert is missed
+    const standing = !c.active ? `${kindName[c.kind]}. Not in use: this plan does not cover it.`
+      : c.failing ? `${kindName[c.kind]}. The last message could not be delivered here: ${c.failing.why}, first ${ago(c.failing.since)}. Send a test, or remove it and add one that works.`
+      : `${kindName[c.kind]}. Alerts are sent here.${c.lastDeliveredAt ? ` The last message was delivered ${ago(c.lastDeliveredAt)}.` : ""}`;
+    const li = row(c.hint, standing, acts, "addr");
+    if (c.active && c.failing) li.classList.add("failing");
+    return li;
   }) : [row("No channel yet", "Sentinel is watching, but it has nowhere to tell you. Alerts are still listed on this page.")]));
   $("channelLimit").textContent = mine.limits.kinds.length > 1 ? `Up to ${mine.limits.channels} channels on this plan: ntfy topics, Discord webhooks and Slack webhooks.` : "One ntfy channel on this plan. Pro adds Discord and Slack, and up to five channels.";
   $<HTMLInputElement>("ntfyTarget").placeholder = mine.limits.kinds.length > 1 ? "An ntfy topic, or a Discord or Slack webhook address" : "https://ntfy.sh/a-long-topic-name";
@@ -187,7 +193,7 @@ function render(): void {
   $("events").replaceChildren(...(shown.length ? shown.map((a) => {
     const li = el("li"), what = el("div", "", "what"), head = el("b");
     head.append(el("span", a.level === "urgent" ? "Urgent" : a.level === "alert" ? "Alert" : "Note", `tag ${a.level}`), document.createTextNode(a.sentence));
-    what.append(head, el("span", `${short(a.wallet)}${a.at ? ` · ${ago(a.at)}` : ""}${a.answer === "this_was_me" ? " · you said this was you" : a.answer === "ignore" ? " · ignored" : ""}`));
+    what.append(head, el("span", `${short(a.wallet)}${a.at ? ` · ${ago(a.at)}` : ""}${a.answer === "this_was_me" ? " · you said this was you" : a.answer === "ignore" ? " · ignored" : ""}${a.undelivered ? " · not delivered: no channel took it" : ""}`));
     li.append(what);
     // a notice about the watching itself is not something the owner did or did not do: it has no answer
     const aboutWatching = Array.isArray(a.signals) && a.signals.some((s) => s === "watch_stopped" || s === "watch_resumed");

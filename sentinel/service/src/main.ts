@@ -38,7 +38,7 @@ import { PLANS, type ChannelKind } from "./plans.js";
 import { HttpRpc } from "./rpc.js";
 import { listen } from "./server.js";
 import { NonceBook } from "./signin.js";
-import { FileStore, type MemoryStore } from "./store.js";
+import { FileStore, type MemoryStore, type StoredEvent } from "./store.js";
 import { Watcher, type Notifier } from "./watcher.js";
 
 export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: ChannelKind; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
@@ -151,8 +151,10 @@ export function watchRound(o: {
       if (!news) continue;
       if (news === "stopped") stopped += 1; else resumed += 1;
       const sentence = news === "stopped" ? stoppedSentence(o.blindness.afterSeconds) : RESUMED_SENTENCE;
-      o.store.addEvent({ wallet: w, signature: "", slot: 0, at: now, level: "alert", signals: [news === "stopped" ? "watch_stopped" : "watch_resumed"], sentence, rescueWorthy: false });
-      await o.notifier.notify(w, "alert", sentence).catch(() => undefined);
+      const event: StoredEvent = { wallet: w, signature: "", slot: 0, at: now, level: "alert", signals: [news === "stopped" ? "watch_stopped" : "watch_resumed"], sentence, rescueWorthy: false };
+      o.store.addEvent(event);
+      const sent = await o.notifier.notify(w, "alert", sentence).catch(() => ({ delivered: 0, failed: 1 }));
+      if (sent && sent.delivered === 0 && event.id) o.store.markUndelivered(event.id);
     }
     const watched = new Set(o.store.wallets().map((w) => w.address));
     for (const w of blindNow) if (!watched.has(w)) blindNow.delete(w);
