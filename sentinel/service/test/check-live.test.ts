@@ -38,6 +38,13 @@ describe("the check from outside", () => {
     expect(await ask("https://x", { fetchImpl: down, sleep: async () => undefined })).toEqual({ ok: false, why: "the service did not answer in 3 tries (it answered 502)." });
     const dead = async () => { throw Object.assign(new Error("fetch failed"), { cause: { code: "ENOTFOUND" } }); };
     expect(await ask("https://x", { fetchImpl: dead, sleep: async () => undefined, tries: 2 })).toEqual({ ok: false, why: "the service did not answer in 2 tries (ENOTFOUND)." });
+    // asked once, it says once; and a refusal reported as one of several attempts is still named
+    const refused = async () => { throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("all failed"), { name: "AggregateError", errors: [{ code: "ECONNREFUSED" }] }) }); };
+    expect(await ask("https://x", { fetchImpl: refused, tries: 1 })).toEqual({ ok: false, why: "the service did not answer in one try (ECONNREFUSED)." });
+    const worded = async () => { throw Object.assign(new TypeError("fetch failed"), { cause: new Error("bad port") }); };
+    expect(await ask("https://x", { fetchImpl: worded, tries: 1 })).toEqual({ ok: false, why: "the service did not answer in one try (bad port)." });
+    const bare = async () => { throw new TypeError("fetch failed"); };
+    expect(await ask("https://x", { fetchImpl: bare, tries: 1 })).toEqual({ ok: false, why: "the service did not answer in one try (TypeError)." });
   });
 
   it("is what the scheduled workflow runs, with no secret and no permission", () => {

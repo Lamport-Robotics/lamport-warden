@@ -37,11 +37,12 @@ export async function ask(url, { tries = 3, waitMs = 20_000, fetchImpl = fetch, 
       if (res.ok) return { ok: true, health: await res.json() };
       last = `it answered ${res.status}`;
     } catch (e) {
-      last = String(e?.cause?.code ?? e?.name ?? e);
+      // what the connection said, where it said anything: "ECONNREFUSED" tells more than "TypeError"
+      last = String(e?.cause?.code ?? e?.cause?.errors?.[0]?.code ?? e?.cause?.message ?? e?.name ?? e).slice(0, 60);
     }
     if (i < tries - 1) await sleep(waitMs);
   }
-  return { ok: false, why: `the service did not answer in ${tries} tries (${last}).` };
+  return { ok: false, why: `the service did not answer in ${tries === 1 ? "one try" : `${tries} tries`} (${last}).` };
 }
 
 /** True when what is wrong is that no wallet can be read, by a service that is otherwise doing its rounds. */
