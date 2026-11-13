@@ -5,6 +5,7 @@ export default defineConfig({
   resolve: { dedupe: ['@solana/web3.js', 'buffer'] },
   test: {
     environment: 'node',
-    include: ['test/*.test.ts'], // test/browser needs Chromium: pnpm test:browser
+    // test/browser needs Chromium: pnpm test:browser. sentinel/service is the watcher, run in Node like the rest.
+    include: ['test/*.test.ts', 'sentinel/service/test/*.test.ts'],
   },
 });

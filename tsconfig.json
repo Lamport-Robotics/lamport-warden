@@ -32,6 +32,7 @@
   "include": [
     "src",
     "test",
+    "sentinel/service",
     "vitest.config.ts",
     "vitest.browser.config.ts",
     "vitest.wallets.config.ts"
