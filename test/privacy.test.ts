@@ -42,6 +42,9 @@ describe("the privacy policy, about the service", () => {
     expect(mdSentinel).toContain("each session as a hash, for seven days");
     expect(SNAPSHOT_DAYS).toBe(7);
     expect(mdSentinel).toContain("daily backups hold them for up to seven days more");
+    // the copy kept off the server keeps to the same seven days, and the policy says it exists
+    expect(read("sentinel", "backup.sh")).toContain('DAYS="${SENTINEL_BACKUP_DAYS:-7}"');
+    expect(mdSentinel).toContain("one on a second computer that lamport keeps, in case the server is lost");
     // reported signatures: thirty days, in the watcher and in the store
     expect(read("sentinel", "service", "src", "watcher.ts")).toContain("now - at <= 30 * 86_400");
     expect(mdSentinel).toContain("the signatures your browser reported, for 30 days");

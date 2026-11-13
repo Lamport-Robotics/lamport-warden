@@ -6,9 +6,9 @@
 # What it does, each step safe to repeat:
 #   - builds the service (one file) and the page here, starts the built service once to see that it stays
 #     up, and copies them over;
-#   - the first time, writes /etc/lamport-sentinel.env (root only) with a data key made on the server, which
-#     never leaves it, and installs a systemd unit that runs the service as a user of its own with nothing
-#     to read but its own folder;
+#   - the first time, writes /etc/lamport-sentinel.env (root only) with a data key made on the server (the
+#     only other copy is the one sentinel/backup.sh puts in a keychain), and installs a systemd unit that
+#     runs the service as a user of its own with nothing to read but its own folder;
 #   - the first time, adds one route to the web server (/sentinel/api/ -> the service), after a backup and a
 #     check of the new configuration;
 #   - installs a watchdog beside it: a timer that asks every five minutes whether it is still watching, and
