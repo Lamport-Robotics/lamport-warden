@@ -274,7 +274,19 @@ is the notice: GitHub tells whoever watches the repository's workflows. It holds
 that names a wallet or an owner. `node scripts/check-live.mjs` does the same from a terminal.
 
 GitHub switches a scheduled workflow off after sixty days without a commit to the repository, and says so by
-email; it is switched back on from the Actions tab.
+email; it is switched back on from the Actions tab. GitHub also runs schedules late, and sometimes not at
+all: in the first hours after this one was added it did not run once on its own. It is a backstop for the
+day the whole server is gone, not something that will say so within minutes.
+
+### Watched from beside it
+
+What does act within minutes is on the server itself. `sentinel/watchdog.sh`, on a systemd timer, asks the
+service's health address every five minutes the same question (the same `check-live.mjs`). When the answer is
+"not watching" twice, half a minute apart, it starts the service again and tells the operator's channel, once
+an hour at most. systemd already starts a service that dies; this is for one that is up and has stopped
+reading. When the service answers and cannot read the chain it is left alone: that is the RPC's trouble, the
+service says so itself, and starting it again would not help. Being on the same machine, it cannot say that
+the machine is gone.
 
 ## The API
 
@@ -416,6 +428,8 @@ The build now defines the name, and the probe fails on any Node if it comes back
 `warden.lamportrobotics.com`: the page at `/sentinel/`, the API at `/sentinel/api/`. It runs the smoke test
 first, and each step is safe to repeat.
 
+- A watchdog beside it (`lamport-sentinel-watch.timer`) asks every five minutes whether it is still watching,
+  and starts it again when it is not.
 - The service runs under systemd as a user of its own (`DynamicUser`), able to write one folder,
   `/var/lib/lamport-sentinel`, and nothing else.
 - `/etc/lamport-sentinel.env` (root only) holds its settings. The data key in it was made on the server and

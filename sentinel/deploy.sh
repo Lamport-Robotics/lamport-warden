@@ -11,6 +11,8 @@
 #     to read but its own folder;
 #   - the first time, adds one route to the web server (/sentinel/api/ -> the service), after a backup and a
 #     check of the new configuration;
+#   - installs a watchdog beside it: a timer that asks every five minutes whether it is still watching, and
+#     starts it again when it is not;
 #   - restarts the service and asks it how it is.
 #
 # It does not touch the paid plan: Stripe's settings go into the env file by hand (see the service's README).
@@ -26,6 +28,8 @@ node scripts/build-web.mjs
 
 ssh "$HOST" 'mkdir -p /opt/lamport-sentinel /opt/lamportrobotics/warden/sentinel'
 scp -q sentinel/service/dist/sentinel.mjs "$HOST:/opt/lamport-sentinel/sentinel.mjs.new"
+# the watchdog that runs beside the service, and the check it shares with the one that is run from outside
+scp -q scripts/check-live.mjs sentinel/watchdog.sh "$HOST:/opt/lamport-sentinel/"
 scp -q sentinel/web/dist/index.html sentinel/web/dist/sentinel.css sentinel/web/dist/app.js "$HOST:/opt/lamportrobotics/warden/sentinel/"
 
 ssh "$HOST" sh -s <<'REMOTE'
@@ -82,8 +86,34 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNITFILE
+
+# The watchdog: every five minutes, is the service still watching? systemd starts a service that dies again;
+# this starts one again that is up and has stopped reading (sentinel/watchdog.sh says the rest).
+chmod 755 /opt/lamport-sentinel/watchdog.sh
+chmod 644 /opt/lamport-sentinel/check-live.mjs
+cat > /etc/systemd/system/lamport-sentinel-watch.service <<'WATCHUNIT'
+[Unit]
+Description=Warden Sentinel watchdog: is it still watching?
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/lamport-sentinel/watchdog.sh
+WATCHUNIT
+cat > /etc/systemd/system/lamport-sentinel-watch.timer <<'WATCHTIMER'
+[Unit]
+Description=Looks at Warden Sentinel every five minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
+WATCHTIMER
 systemctl daemon-reload
 systemctl enable -q lamport-sentinel.service
+systemctl enable -q --now lamport-sentinel-watch.timer
 
 if ! grep -q "handle_path /sentinel/api/\*" "$CADDY"; then
   cp -p "$CADDY" "$CADDY.bak-sentinel-$(date +%Y%m%d-%H%M%S)"
