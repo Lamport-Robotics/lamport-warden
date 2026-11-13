@@ -1,0 +1,19 @@
+[toolchain]
+anchor_version = "0.32.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.devnet]
+lamport_sentinel = "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+
+[programs.localnet]
+lamport_sentinel = "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[workspace]
+members = ["programs/lamport-sentinel"]

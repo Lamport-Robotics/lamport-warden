@@ -1,0 +1,36 @@
+[package]
+name = "lamport-sentinel"
+version = "0.1.0"
+description = "Warden Sentinel: the rescue program. Delegated tokens can only move into the owner's own Lamport Vault."
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Lamport-Robotics/lamport-warden"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "lamport_sentinel"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+# There is no mainnet build: Lamport Vault has no mainnet program id to pin. Turning this on stops the compile.
+mainnet = []
+
+[dependencies]
+anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
+anchor-spl = { version = "0.32.1", default-features = false, features = ["token", "token_2022", "mint", "associated_token"] }
+
+# The same platform-tools as Lamport Vault: v1.48 (bundled with Agave 2.3) cannot compile edition-2024
+# dependencies; v1.56 can. cargo-build-sbf reads this key.
+[package.metadata.solana]
+tools-version = "v1.56"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

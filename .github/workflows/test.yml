@@ -41,3 +41,44 @@ jobs:
       - run: pnpm install --frozen-lockfile --ignore-scripts
       - run: pnpm exec playwright install --with-deps chromium
       - run: pnpm test:browser
+
+  sentinel-program:
+    # the rescue program: built for Solana's VM, then run in LiteSVM (sentinel/program/README.md)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # the Agave release Lamport Vault pins, and the checksum of its install script
+      AGAVE_VERSION: "2.3.13"
+      AGAVE_INSTALL_SHA256: "44f37013c80bf1122067b250da38339a0b061dafde1f4162f037b4ce0008afa5"
+      PLATFORM_TOOLS: v1.56
+    defaults:
+      run:
+        working-directory: sentinel/program
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10, toolchain: stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: sentinel/program
+      - name: Cache platform-tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/solana
+          key: platform-tools-${{ env.PLATFORM_TOOLS }}-${{ runner.os }}
+      - name: Cache agave ${{ env.AGAVE_VERSION }}
+        id: agave-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.local/share/solana/install
+          key: agave-${{ env.AGAVE_VERSION }}-${{ runner.os }}
+      - name: Install agave ${{ env.AGAVE_VERSION }}
+        if: steps.agave-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL "https://release.anza.xyz/v${AGAVE_VERSION}/install" -o /tmp/agave-install.sh
+          echo "${AGAVE_INSTALL_SHA256}  /tmp/agave-install.sh" | sha256sum -c -
+          sh /tmp/agave-install.sh
+      - run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - run: cargo build-sbf --manifest-path programs/lamport-sentinel/Cargo.toml
+      - run: cargo test -p sentinel-program-tests
