@@ -18,6 +18,7 @@ and answer them. It holds no signing key and moves nothing. There is no rescuer 
 | `src/server.ts` | The HTTP API. |
 | `src/main.ts`, `src/cli.ts` | The process: the watcher on a timer and the API beside it. |
 | `src/billing.ts` | The paid plan: a monthly Stripe subscription at one of two prices, the webhook that moves a profile between tiers, and the daily look at who holds the token. |
+| `src/program.ts` | The rescue program's instructions, for arming (the owner signs) and for a rescue, and the plan of a rescue: which accounts, in what order, in how many transactions. |
 | `src/crypto.ts` | Random tokens and their hashes, the sealed box for channel addresses, and the check of a wallet's signature. All from Node itself. |
 
 It uses Warden's decoder, explainer and `OwnerMemory` from the `pincer1/` submodule, as the extension does.
@@ -177,9 +178,21 @@ first, and each step is safe to repeat.
 After deploying it was checked from outside with a throwaway wallet: sign-in, a first read of the wallet from
 mainnet, removal, and an empty data file afterwards.
 
+## Rescue, so far
+
+`src/program.ts` builds every instruction of the rescue program and is checked byte for byte, and account
+for account, against `sentinel/vectors/instructions.json`, which the program's own test suite writes after
+running each instruction through the compiled program. It also plans a rescue: only accounts that still name
+Sentinel's delegate for the owner's vault, hold something and are not frozen, biggest first, a few to a
+transaction with a priority fee.
+
+That is all of rescue there is. Nothing signs or sends one, the page cannot arm a wallet, and the program is
+not on devnet: the devnet faucet no longer answers the command line, so the deploy key
+(`BgWwL1UVqA8NNMwB68G8t7BuG9a7yR9WApfZrCgy3wBT`) needs about 4 test SOL from https://faucet.solana.com.
+
 ## Not here yet
 
-The Sentinel page that uses this API, the rescuer, the Pincer1 webhook, a subscription in place of the poll,
+The rescuer that signs and sends, arming on the page, the Pincer1 webhook, a subscription in place of the poll,
 more channels than ntfy, and payment in SOL or USDC. Replaying real wallets' public history to count
 false alerts needs an RPC that allows it (the public one refuses most `getTransaction` calls); a free Helius
 key is enough.
