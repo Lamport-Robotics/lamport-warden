@@ -22,7 +22,7 @@ import { WARDEN, launch, type Browser } from "./harness.js";
 import { Accounts } from "../../sentinel/service/src/accounts.js";
 import { Billing, Stripe, type BillingConfig, type StripeFetch } from "../../sentinel/service/src/billing.js";
 import { LAMPORT_MINT } from "../../sentinel/service/src/main.js";
-import { PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../../sentinel/service/src/plans.js";
+import { PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, purchaseTerms, renewalTerms } from "../../sentinel/service/src/plans.js";
 import type { Rpc } from "../../sentinel/service/src/rpc.js";
 import { listen } from "../../sentinel/service/src/server.js";
 import { NonceBook } from "../../sentinel/service/src/signin.js";
@@ -259,6 +259,14 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     const start = page.getByRole("button", { name: "Start Pro for $10 a month" });
     await expect.poll(() => start.isVisible(), { timeout: 10_000 }).toBe(true);
     expect(await page.locator("#plans").innerText()).toContain("You have the holder price: a wallet here holds 250,000 $LAMPORT.");
+    // before the button is pressed: what is charged and how often, how it ends, and what changes the price
+    const terms = await page.locator("#plans ul.terms li").allInnerTexts();
+    expect(terms).toEqual(purchaseTerms(1000, 1500, 1000, 250_000));
+    // SENTINEL_SHOT_BUY=/some/file.png keeps a picture of the plans as someone about to pay sees them
+    if (process.env.SENTINEL_SHOT_BUY) await page.locator("#plans").screenshot({ path: process.env.SENTINEL_SHOT_BUY });
+    expect(terms[0]).toBe("$10 is charged to your card today, and again every month until you cancel. Stripe takes the payment; Sentinel never sees the card.");
+    expect(terms[1]).toContain("Cancel any time from this page.");
+    expect(terms[2]).toContain("$10 a month while they hold 250,000 $LAMPORT between them, $15 otherwise.");
     await start.click();
     await page.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 10_000 });
     const profile = accounts.profileOf(W1)!;
@@ -277,6 +285,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     await page.reload();
     await expect.poll(() => page.locator("#plans .plan.mine h3").innerText(), { timeout: 10_000 }).toBe("Pro");
     expect(await page.locator("#walletLimit").innerText()).toBe("2 of 10 wallets on this plan.");
+    expect(await page.locator("#plans").innerText()).toContain(renewalTerms(1000, 1500, 1000, 250_000));
+    expect(renewalTerms(1000, 1500, 1000, 250_000)).toContain("It renews every month at $10 until you cancel");
     expect(await page.locator("#wallets li .what span").first().innerText()).toContain("Not read yet");
     expect(await page.locator("#channelLimit").innerText()).toBe("Up to 5 channels on this plan: ntfy topics, Discord webhooks and Slack webhooks.");
 
@@ -295,7 +305,17 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     await page.waitForURL(/^https:\/\/billing\.stripe\.com\//, { timeout: 10_000 });
     expect(stripeCalls.at(-1)).toMatchObject({ path: "/billing_portal/sessions", params: { customer: "cus_page" } });
 
-    // cancelled: back to Watch, with the Discord channel kept and out of use
+    // cancelled there: back on the page the plan is said to be ending on its last day, not renewing
+    const lastDay = Math.floor(Date.UTC(2026, 11, 13, 12) / 1000);
+    Object.assign(subscriptions.get("sub_page"), { cancel_at_period_end: true, cancel_at: lastDay });
+    expect(await webhook({ type: "customer.subscription.updated", data: { object: { id: "sub_page" } } })).toBe(200);
+    await page.goto(`${ARMING}/sentinel/`);
+    await expect.poll(() => page.locator("#plans").innerText(), { timeout: 10_000 }).toContain("Cancelled. The plan runs until 13 December 2026 and does not renew: nothing more is charged.");
+    expect(await page.locator("#plans").innerText()).not.toContain("It renews every month");
+    expect(await page.getByRole("button", { name: "Keep the plan, or change card" }).isVisible()).toBe(true);
+    expect(await page.locator("#plans .plan.mine h3").innerText()).toBe("Pro"); // still Pro until then
+
+    // its last day comes: back to Watch, with the Discord channel kept and out of use
     subscriptions.get("sub_page").status = "canceled";
     expect(await webhook({ type: "customer.subscription.deleted", data: { object: { id: "sub_page" } } })).toBe(200);
     await page.goto(`${ARMING}/sentinel/`);

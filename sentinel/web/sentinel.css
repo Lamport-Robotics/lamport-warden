@@ -71,6 +71,9 @@ ul.rows .acts { display: flex; gap: 8px; }
 .plan ul { list-style: none; color: var(--dim); font-size: 15px; margin: 0 0 16px; padding: 0; }
 .plan li { padding: 5px 0; }
 .plan li.not { color: var(--care); }
+/* what is charged, how it ends, what changes the price: under the button, smaller, and not dimmer than the rest */
+.plan ul.terms { margin: 14px 0 0; font-size: 13.5px; line-height: 1.5; }
+.plan ul.terms li { padding: 4px 0; }
 
 .foot { display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: center; padding: 28px var(--pad) 40px; border-top: 1px solid var(--line); font-size: 14px; color: var(--mute); }
 .foot nav { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-left: auto; }

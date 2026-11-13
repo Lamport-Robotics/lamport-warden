@@ -88,8 +88,9 @@ said to the channels it had a moment before (`src/notices.ts`):
 - an alert channel removed, said on that channel before it goes, and a channel added;
 - a wallet removed, and the profile's end when it was the last one;
 - a browser linked to report a wallet's signatures as its owner's;
-- the paid plan starting, a payment failing, the plan ending (said before its extra channels and wallets go),
-  and the price changing for the next bill.
+- the paid plan starting, a payment failing, the plan being cancelled (with its last day) or set to renew
+  again, the plan ending (said before its extra channels and wallets go), and the price changing for the
+  next bill.
 
 Each names the wallet whose signature started the session: "by someone signed in with AbCd..WxYz. If that was
 not you, someone else has the key to AbCd..WxYz." Like every alert, a notice is one plain sentence with no
@@ -230,8 +231,14 @@ of the customer and the subscription.
   no profile here is reported to whoever runs the service, and nothing is done to it: cancelling and
   refunding is a person's decision. A list that could not be read to its end concludes nothing.
 - **The owner hears what the plan does** through the profile's channels: that it started, that a payment
-  failed, that it ended (and how many wallets are no longer watched), and, before the bill that carries it,
-  that the price changes because the wallets now hold, or no longer hold, enough $LAMPORT.
+  failed, that it was cancelled and when it ends (someone with a key could do that from the page), that it
+  ended (and how many wallets are no longer watched), and, before the bill that carries it, that the price
+  changes because the wallets now hold, or no longer hold, enough $LAMPORT.
+- **Everything that bears on the money is said before the button is pressed**, in one place
+  (`purchaseTerms` in `src/plans.ts`): what is charged today and every month until cancelled, how cancelling
+  works, and what moves the price. Someone who has the plan sees when the next bill is due. A plan that was
+  cancelled is shown as ending on its last day, never as renewing. Cancelling in Stripe's portal ends the
+  plan at the end of the paid month (`at_period_end`), which is what the page says.
 - **Checkout is closed unless `SENTINEL_CHECKOUT=open`.** With the Stripe settings in place and checkout
   closed, the page shows the prices and existing subscriptions are honoured, and nothing is sold.
 

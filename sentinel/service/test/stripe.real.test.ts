@@ -78,6 +78,20 @@ describe.skipIf(!usable)("the paid plan against Stripe in test mode", () => {
       // Stripe's own page for the card and for cancelling
       expect(await billing.portal(profile)).toMatchObject({ ok: true, url: expect.stringMatching(/^https:\/\/billing\.stripe\.com\//) });
 
+      // the dates, as Stripe really sends them: the next bill while it runs, the last day once it is cancelled
+      const nowS = Math.floor(Date.now() / 1000);
+      const running = await billing.quote(profile);
+      expect(running.endsAt).toBeNull();
+      expect(running.renewsAt! - nowS).toBeGreaterThan(27 * 86_400);
+      expect(running.renewsAt! - nowS).toBeLessThan(32 * 86_400);
+      await call("POST", `/subscriptions/${sub.id}`, [["cancel_at_period_end", "true"]]);
+      await billing.onEvent({ type: "customer.subscription.updated", data: { object: { id: sub.id } } });
+      const ending = await billing.quote(profile);
+      expect(ending).toMatchObject({ subscribed: true, renewsAt: null, endsAt: running.renewsAt });
+      await call("POST", `/subscriptions/${sub.id}`, [["cancel_at_period_end", "false"]]);
+      await billing.onEvent({ type: "customer.subscription.updated", data: { object: { id: sub.id } } });
+      expect(await billing.quote(profile)).toMatchObject({ renewsAt: running.renewsAt, endsAt: null });
+
       // cancelled: the profile goes back to the free tier
       await fetch(`https://api.stripe.com/v1/subscriptions/${sub.id}`, { method: "DELETE", headers: { authorization: `Bearer ${key}` } });
       await billing.onEvent({ type: "customer.subscription.deleted", data: { object: { id: sub.id } } });

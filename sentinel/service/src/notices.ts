@@ -39,6 +39,15 @@ export const planStartedNotice = (wallets: number, seconds: number): string =>
 export const planEndedNotice = (wallets: number, pausedNow: number): string =>
   `This profile's Sentinel plan has ended, so it is on the free plan again: ${wallets} wallets, read every minute, alerts to one ntfy channel.${pausedNow > 0 ? ` ${pausedNow} of its wallets ${pausedNow === 1 ? "is" : "are"} no longer watched.` : ""}`;
 
+/** A day as it is written in a sentence, in UTC so that the service and the reader mean the same day. */
+export const dayOf = (unix: number): string => new Date(unix * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+
+export const planCancelledNotice = (endsAt: number): string =>
+  `This profile's Sentinel plan was cancelled. It runs until ${dayOf(endsAt)} and does not renew; after that the profile is on the free plan. If that was not you, someone else has the key to one of this profile's wallets.`;
+
+export const planResumedNotice = (): string =>
+  "This profile's Sentinel plan is no longer set to end: it renews as before.";
+
 export const paymentFailedNotice = (): string =>
   "The payment for this profile's Sentinel plan did not go through. The plan stays on while the card is tried again; if it keeps failing, the plan ends.";
 

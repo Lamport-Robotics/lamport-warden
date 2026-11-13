@@ -7,7 +7,8 @@
  */
 import { getWallets } from "@wallet-standard/app";
 import { PAGE_ASKS, WARDEN_ANSWERS, type PageAnswer, type PageAsk } from "../../../src/sentinel-link.js";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../../service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, purchaseTerms, renewalTerms } from "../../service/src/plans.js";
+import { dayOf } from "../../service/src/notices.js";
 import { LINK_STATEMENT, SIGN_IN_STATEMENT, signInText } from "../../service/src/signin-text.js";
 
 const API = "/sentinel/api/v1";
@@ -16,7 +17,7 @@ const SESSION = "sentinel.session";
 interface WalletRow { address: string; armed: boolean; reporting: boolean; paused: boolean; lastReadAt: number | null }
 interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack"; hint: string; active: boolean }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number } }
 interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; signals: string[]; sentence: string; answer: string | null }
-type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number };
+type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -244,16 +245,23 @@ function plans(mine: Me): void {
   );
   pro.append(features);
   if (p?.subscribed) {
-    const b = el("button", "Change card or cancel");
+    // a cancelled plan is said to be ending, never to be renewing
+    const b = el("button", p.endsAt ? "Keep the plan, or change card" : "Change card or cancel");
     b.addEventListener("click", async () => { b.disabled = true; const r = await call("POST", "/billing/portal"); if (r.status === 200 && typeof r.body.url === "string" && r.body.url.startsWith("https://billing.stripe.com/")) location.assign(r.body.url); else { say(String(r.body?.error ?? "That did not work."), true); b.disabled = false; } });
-    pro.append(b, el("p", p.status === "past_due" ? "Your last payment did not go through. Stripe is trying the card again; change it before the plan lapses." : "This is your plan.", "soft"));
+    const standing = p.endsAt
+      ? `Cancelled. The plan runs until ${dayOf(p.endsAt)} and does not renew: nothing more is charged. After that your profile is on Watch, and nothing is deleted.`
+      : `${renewalTerms(p.cents, centsFull, centsHolder, p.holderMin)}${p.renewsAt ? ` The next bill is on ${dayOf(p.renewsAt)}.` : ""}`;
+    pro.append(b, el("p", p.status === "past_due" ? "Your last payment did not go through. Stripe is trying the card again; change it before the plan lapses." : "This is your plan.", "soft"), el("p", standing, "soft"));
   } else if (paid) {
     // on Pro without a subscription of its own: a plan that was given, not bought
     pro.append(el("p", "This is your plan.", "soft"));
   } else if (p?.checkoutOpen) {
     const b = el("button", `Start Pro for ${money(p.cents)} a month`, "solid");
     b.addEventListener("click", async () => { b.disabled = true; const r = await call("POST", "/billing/checkout"); if (r.status === 200 && typeof r.body.url === "string" && r.body.url.startsWith("https://checkout.stripe.com/")) location.assign(r.body.url); else { say(String(r.body?.error ?? "That did not work."), true); b.disabled = false; } });
-    pro.append(b, el("p", "Paid by card through Stripe. Cancel any time; the plan runs to the end of the month you paid for, then your profile goes back to Watch and nothing is deleted.", "soft"));
+    // everything that bears on the money, said before the button is pressed
+    const terms = el("ul", "", "terms");
+    terms.append(...purchaseTerms(p.cents, centsFull, centsHolder, p.holderMin).map((t) => el("li", t)));
+    pro.append(b, terms);
   } else {
     pro.append(el("p", "Not on sale yet.", "soft"));
   }

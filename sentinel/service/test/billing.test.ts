@@ -9,7 +9,7 @@ import { Keypair } from "@solana/web3.js";
 import { Accounts } from "../src/accounts.js";
 import { Billing, Stripe, tokenUnits, verifyStripeSignature, type BillingConfig, type StripeFetch } from "../src/billing.js";
 import { LAMPORT_MINT, configFrom } from "../src/main.js";
-import { paymentFailedNotice, planEndedNotice, planStartedNotice, priceChangedNotice } from "../src/notices.js";
+import { dayOf, paymentFailedNotice, planCancelledNotice, planEndedNotice, planResumedNotice, planStartedNotice, priceChangedNotice } from "../src/notices.js";
 import { ChannelNotifier } from "../src/notify.js";
 import type { Rpc } from "../src/rpc.js";
 import { api } from "../src/server.js";
@@ -358,6 +358,54 @@ describe("what the owner is told about the plan", () => {
     await billing.onEvent(stripe.changed("sub_1", "canceled"));
     expect(posts).toEqual(["discord.com"]);
     expect(accounts.channelsOfProfile(profile)).toEqual([]); // and from now on it is not used
+  });
+});
+
+describe("a plan its owner cancelled", () => {
+  const END = T0 + 20 * 86_400; // 30 November 2026
+
+  it("is said to be ending on its last day, never to be renewing, and the owner hears that it was cancelled", async () => {
+    const { accounts, stripe, billing, said, profile } = setup();
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    stripe.subscriptions.get("sub_1").items.data[0].current_period_end = END;
+    await billing.onEvent(stripe.changed("sub_1", "active"));
+    expect(await billing.quote(profile)).toMatchObject({ subscribed: true, renewsAt: END, endsAt: null });
+    said.length = 0;
+
+    // cancelled on Stripe's page: the plan runs to the end of what was paid for
+    Object.assign(stripe.subscriptions.get("sub_1"), { cancel_at_period_end: true, cancel_at: END });
+    await billing.onEvent(stripe.changed("sub_1", "active"));
+    expect(accounts.profile(profile)).toMatchObject({ tier: "pro", billing: { status: "active", periodEnd: END, endsAt: END } });
+    expect(await billing.quote(profile)).toMatchObject({ subscribed: true, renewsAt: null, endsAt: END });
+    expect(said.map((x) => x.sentence)).toEqual([planCancelledNotice(END)]);
+    expect(said[0]!.sentence).toBe("This profile's Sentinel plan was cancelled. It runs until 30 November 2026 and does not renew; after that the profile is on the free plan. If that was not you, someone else has the key to one of this profile's wallets.");
+    // the same news again is said once
+    await billing.onEvent(stripe.changed("sub_1", "active"));
+    expect(said).toHaveLength(1);
+
+    // changed their mind: it renews again, and that is said too
+    Object.assign(stripe.subscriptions.get("sub_1"), { cancel_at_period_end: false, cancel_at: null });
+    await billing.onEvent(stripe.changed("sub_1", "active"));
+    expect(await billing.quote(profile)).toMatchObject({ renewsAt: END, endsAt: null });
+    expect(accounts.profile(profile)!.billing!.endsAt).toBeUndefined();
+    expect(said[1]!.sentence).toBe(planResumedNotice());
+  });
+
+  it("is read the same from Stripe's older shape, and its end is the plan's end", async () => {
+    const { accounts, stripe, billing, said, profile } = setup();
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    // the period on the subscription itself, and no separate cancel date
+    Object.assign(stripe.subscriptions.get("sub_1"), { current_period_end: END, cancel_at_period_end: true });
+    await billing.onEvent(stripe.changed("sub_1", "active"));
+    expect(await billing.quote(profile)).toMatchObject({ endsAt: END, renewsAt: null });
+    said.length = 0;
+    await billing.onEvent(stripe.changed("sub_1", "canceled"));
+    expect(accounts.profile(profile)).toMatchObject({ tier: "watch", billing: { status: "canceled" } });
+    expect(accounts.profile(profile)!.billing!.endsAt).toBeUndefined();
+    expect(await billing.quote(profile)).toMatchObject({ subscribed: false, renewsAt: null, endsAt: null });
+    expect(said.map((x) => x.sentence)).toEqual([planEndedNotice(3, 0)]); // the end is said once, as the end
+    // a date that is not a date is not taken for one
+    expect(dayOf(END)).toBe("30 November 2026");
   });
 });
 

@@ -68,7 +68,13 @@ export interface Profile {
   createdAt: number;
   autoRescue: boolean;
   /** The subscription behind the paid tier, when there is one. Stripe holds the card and the email; this holds only its ids. */
-  billing?: { customer: string; subscription: string; price: "full" | "holder"; status: string };
+  billing?: {
+    customer: string; subscription: string; price: "full" | "holder"; status: string;
+    /** When the month that is paid for ends: the next bill, or the plan's last day. Unix seconds. */
+    periodEnd?: number;
+    /** Set when the owner cancelled: the plan runs until then and does not renew. */
+    endsAt?: number;
+  };
 }
 /** Which profile a watched wallet belongs to, and the hash of the token its owner's browser reports with. */
 export interface WalletOwner {
