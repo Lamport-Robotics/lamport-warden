@@ -14,7 +14,7 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { Accounts } from "./accounts.js";
-import { paymentFailedNotice, planEndedNotice, planStartedNotice, priceChangedNotice } from "./notices.js";
+import { paymentFailedNotice, planCancelledNotice, planEndedNotice, planResumedNotice, planStartedNotice, priceChangedNotice } from "./notices.js";
 import { PLANS } from "./plans.js";
 import type { Rpc } from "./rpc.js";
 import type { Profile } from "./store.js";
@@ -88,7 +88,15 @@ export async function tokenUnits(rpc: Rpc, wallet: string, mint: string): Promis
 const PAID = new Set(["active", "trialing", "past_due"]);
 const HOLDER_DECIMALS = 6;
 
-export interface Quote { enabled: true; checkoutOpen: boolean; tier: Profile["tier"]; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number }
+export interface Quote {
+  enabled: true; checkoutOpen: boolean; tier: Profile["tier"]; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number;
+  /** For a running plan: when the next bill is due, or null when it was cancelled or Stripe did not say. */
+  renewsAt: number | null;
+  /** For a plan the owner cancelled: its last day. */
+  endsAt: number | null;
+}
+
+const when = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : undefined);
 
 export class Billing {
   /** The checkout page last opened for each profile and not yet paid: there is one at a time. */
@@ -122,9 +130,12 @@ export class Billing {
     // shown as not holding when the balance cannot be read; checkout itself refuses rather than guess
     const holder = await this.holder(profile).catch(() => false);
     const price = p.billing && PAID.has(p.billing.status) ? p.billing.price : holder ? "holder" : "full";
+    const subscribed = !!p.billing && PAID.has(p.billing.status);
     return {
-      enabled: true, checkoutOpen: this.cfg.checkoutOpen, tier: p.tier, subscribed: !!p.billing && PAID.has(p.billing.status), status: p.billing?.status ?? null,
+      enabled: true, checkoutOpen: this.cfg.checkoutOpen, tier: p.tier, subscribed, status: p.billing?.status ?? null,
       price, cents: price === "holder" ? this.cfg.centsHolder : this.cfg.centsFull, centsFull: this.cfg.centsFull, centsHolder: this.cfg.centsHolder, holder, holderMin: this.cfg.holderMin,
+      renewsAt: subscribed && !p.billing!.endsAt ? p.billing!.periodEnd ?? null : null,
+      endsAt: subscribed ? p.billing!.endsAt ?? null : null,
     };
   }
 
@@ -203,15 +214,22 @@ export class Billing {
     const status = String(subscription.status ?? "");
     // a profile has one subscription: news about an old one must not undo the current one
     if (p.billing && p.billing.subscription !== subscription.id && PAID.has(p.billing.status)) return;
-    const was = { tier: p.tier, status: p.billing?.status ?? null };
+    const was = { tier: p.tier, status: p.billing?.status ?? null, endsAt: p.billing && p.billing.subscription === subscription.id ? p.billing.endsAt : undefined };
     const tier = PAID.has(status) ? "pro" : "watch";
+    // Stripe moved the period's dates from the subscription to its item; either is read
+    const periodEnd = when(subscription.items?.data?.[0]?.current_period_end) ?? when(subscription.current_period_end);
+    // cancelled by its owner: it runs to the end of what was paid for, and does not renew
+    const endsAt = tier === "pro" && (subscription.cancel_at_period_end === true || when(subscription.cancel_at)) ? when(subscription.cancel_at) ?? periodEnd : undefined;
     // said before the plan's channels and wallets go, so it reaches the channels the plan paid for
     if (was.tier === "pro" && tier === "watch") this.tell(profile, planEndedNotice(PLANS.watch.wallets, Math.max(0, this.accounts.walletsOf(profile).length - PLANS.watch.wallets)));
-    this.accounts.setBilling(profile, { customer: subscription.customer, subscription: subscription.id, price: this.priceOf(subscription), status });
+    this.accounts.setBilling(profile, { customer: subscription.customer, subscription: subscription.id, price: this.priceOf(subscription), status, ...(periodEnd ? { periodEnd } : {}), ...(endsAt ? { endsAt } : {}) });
     this.accounts.setTier(profile, tier);
     if (tier === "pro") this.open.delete(profile);
     if (was.tier === "watch" && tier === "pro") this.tell(profile, planStartedNotice(PLANS.pro.wallets, PLANS.pro.pollSeconds));
     else if (status === "past_due" && was.status !== "past_due") this.tell(profile, paymentFailedNotice());
+    // cancelling is something a thief with a key could do from the profile's page: the owner hears of it, and of its undoing
+    if (tier === "pro" && was.tier === "pro" && endsAt && !was.endsAt) this.tell(profile, planCancelledNotice(endsAt));
+    else if (tier === "pro" && was.tier === "pro" && !endsAt && was.endsAt) this.tell(profile, planResumedNotice());
   }
 
   /**
@@ -248,7 +266,7 @@ export class Billing {
     let healed = 0, failed = 0;
     const orphans: { subscription: string; profile: string | null }[] = [];
     const seen = new Set<string>();
-    const before = (id: string) => { const p = this.accounts.profile(id); return p ? `${p.tier}/${p.billing?.subscription ?? ""}/${p.billing?.status ?? ""}/${p.billing?.price ?? ""}` : ""; };
+    const before = (id: string) => { const p = this.accounts.profile(id); return p ? `${p.tier}/${p.billing?.subscription ?? ""}/${p.billing?.status ?? ""}/${p.billing?.price ?? ""}/${p.billing?.endsAt ?? ""}` : ""; };
     const sync = (profile: string, subscription: any) => { const was = before(profile); this.apply(profile, subscription); if (before(profile) !== was) healed += 1; };
     try {
       for (const price of [this.cfg.priceFull, this.cfg.priceHolder]) {
