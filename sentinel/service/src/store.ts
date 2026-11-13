@@ -65,9 +65,15 @@ export interface Profile {
   tier: "watch" | "rescue";
   createdAt: number;
   autoRescue: boolean;
+  /** The subscription behind the paid tier, when there is one. Stripe holds the card and the email; this holds only its ids. */
+  billing?: { customer: string; subscription: string; price: "full" | "holder"; status: string };
 }
 /** Which profile a watched wallet belongs to, and the hash of the token its owner's browser reports with. */
-export interface WalletOwner { profile: string; addedAt: number; reportTokenHash?: string }
+export interface WalletOwner {
+  profile: string; addedAt: number; reportTokenHash?: string;
+  /** Kept in the profile but not read: the profile has more wallets than its tier watches. */
+  paused?: boolean;
+}
 /** A way to reach an owner. The target is sealed (crypto.ts): the stored file alone does not say where alerts go. */
 export interface Channel { id: string; profile: string; kind: "ntfy"; target: string; hint: string; addedAt: number }
 export interface Session { tokenHash: string; profile: string; expiresAt: number }
@@ -107,6 +113,12 @@ export class MemoryStore implements Store {
   watch(wallet: WatchedWallet): void {
     if (this.data.wallets.some((w) => w.address === wallet.address)) return;
     this.data.wallets.push(wallet);
+    this.persist();
+  }
+  /** Stops reading a wallet without forgetting it: its record and alerts stay for when it is watched again. */
+  unwatch(address: string): void {
+    if (!this.data.wallets.some((w) => w.address === address)) return;
+    this.data.wallets = this.data.wallets.filter((w) => w.address !== address);
     this.persist();
   }
   /** Stops watching a wallet and forgets what was kept about it: its baseline, its token accounts, its alerts. */

@@ -146,7 +146,7 @@ describe("signing in", () => {
     const body = first.body as any;
     expect(body.session).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(body.profile).toMatchObject({ tier: "watch", autoRescue: false });
-    expect(body.wallets).toEqual([{ address: alice.address, armed: false, reporting: false, lastReadAt: null }]);
+    expect(body.wallets).toEqual([{ address: alice.address, armed: false, reporting: false, paused: false, lastReadAt: null }]);
     expect(s.store.wallets()).toEqual([{ address: alice.address }]);
 
     const again = (await s.signIn(alice)).body as any;

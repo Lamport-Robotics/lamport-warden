@@ -12,6 +12,7 @@
  */
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import { Accounts, CHANNEL_LIMIT, WALLET_LIMIT, type Refusal } from "./accounts.js";
+import { verifyStripeSignature, type Billing } from "./billing.js";
 import { addressBytes, looksLikeSignature } from "./crypto.js";
 import { NonceBook, verifySignIn } from "./signin.js";
 import type { MemoryStore, StoredEvent } from "./store.js";
@@ -26,6 +27,9 @@ export interface ApiRequest {
   body: unknown;
   /** Who is asking, for the limits. */
   ip: string;
+  /** The body as it arrived, and Stripe's signature over it: a webhook is checked against the bytes, not the parse. */
+  raw?: string;
+  stripeSignature?: string;
 }
 export interface ApiResponse { status: number; body: unknown }
 
@@ -40,6 +44,8 @@ export interface ApiDeps {
   now?: () => number;
   /** How the watching is going, for /v1/health. */
   health?: () => { lastPassAt: number | null; blind: number };
+  /** The paid tier. Absent: there is no paid tier, and the page is told so. */
+  billing?: { api: Billing; webhookSecret: string };
 }
 
 /** So many per window, per key. In memory: a restart forgives everyone, which is fine for what these guard. */
@@ -85,6 +91,8 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
         address,
         armed: !!store.wallets().find((w) => w.address === address)?.sentinelDelegate,
         reporting: accounts.reporting(address),
+        // over the plan's limit: kept, not read
+        paused: accounts.paused(address),
         // null until the first read: the page says "not watched yet" rather than nothing
         lastReadAt: store.record(address).lastSeenAt,
       })),
@@ -115,6 +123,17 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       // noted at once; written when the wallet is next free, so the answer does not wait on a pass
       void watcher.ownerSigned(wallet, signature).catch(() => undefined);
       return ok({ ok: true }, 202);
+    }
+
+    // ---- Stripe: a subscription started, changed or ended. Believed only with Stripe's signature over the exact body.
+    if (route === "POST /stripe/webhook") {
+      if (!deps.billing) return no(404, "there is nothing at that address.");
+      if (!verifyStripeSignature(req.raw ?? "", req.stripeSignature, deps.billing.webhookSecret, t)) return no(400, "that is not signed by Stripe.");
+      let event: unknown;
+      try { event = JSON.parse(req.raw ?? ""); } catch { return no(400, "the request is not JSON."); }
+      // a failure here is answered with an error so that Stripe sends it again
+      await deps.billing.api.onEvent(event);
+      return ok({ received: true });
     }
 
     // ---- signing in
@@ -174,6 +193,14 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       return accounts.removeChannel(session, parts[2]) ? ok() : no(404, "there is no such channel.");
     }
 
+    if (route === "GET /billing") return ok(deps.billing ? await deps.billing.api.quote(session) : { enabled: false });
+    if (route === "POST /billing/checkout" || route === "POST /billing/portal") {
+      if (!deps.billing) return no(404, "there is no paid plan here.");
+      if (!limiter.allow(`billing:${session}`, 10, 600, t)) return SLOW_DOWN;
+      const r = route.endsWith("checkout") ? await deps.billing.api.checkout(session) : await deps.billing.api.portal(session);
+      return r.ok ? ok({ url: r.url }) : no(r.status, r.why);
+    }
+
     if (route === "GET /events") return ok({ events: accounts.eventsOf(session).map(eventView) });
 
     if (req.method === "POST" && parts[1] === "events" && parts[2] && parts[3] === "answer" && parts.length === 4) {
@@ -196,20 +223,24 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
 
 const MAX_BODY = 16 * 1024;
 
-function readBody(req: IncomingMessage): Promise<{ ok: true; body: unknown } | { ok: false; status: number; why: string }> {
+function readBody(req: IncomingMessage, keepRaw: boolean): Promise<{ ok: true; body: unknown; raw?: string } | { ok: false; status: number; why: string }> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let size = 0, done = false;
-    const finish = (r: { ok: true; body: unknown } | { ok: false; status: number; why: string }) => { if (!done) { done = true; resolve(r); } };
+    const finish = (r: { ok: true; body: unknown; raw?: string } | { ok: false; status: number; why: string }) => { if (!done) { done = true; resolve(r); } };
+    const limit = keepRaw ? 256 * 1024 : MAX_BODY; // Stripe's events are larger than anything the page sends
     req.on("data", (c: Buffer) => {
       size += c.length;
-      if (size > MAX_BODY) { finish({ ok: false, status: 413, why: "that request is too large." }); req.destroy(); return; }
+      if (size > limit) { finish({ ok: false, status: 413, why: "that request is too large." }); req.destroy(); return; }
       chunks.push(c);
     });
     req.on("error", () => finish({ ok: false, status: 400, why: "the request could not be read." }));
     req.on("end", () => {
       if (size === 0) return finish({ ok: true, body: undefined });
-      try { finish({ ok: true, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) }); } catch { finish({ ok: false, status: 400, why: "the request is not JSON." }); }
+      const raw = Buffer.concat(chunks).toString("utf8");
+      // a webhook is parsed after its signature is checked, from these same bytes
+      if (keepRaw) return finish({ ok: true, body: undefined, raw });
+      try { finish({ ok: true, body: JSON.parse(raw) }); } catch { finish({ ok: false, status: 400, why: "the request is not JSON." }); }
     });
   });
 }
@@ -236,11 +267,13 @@ export function listen(deps: ApiDeps, opts: { port: number; host?: string; trust
       const send = (r: ApiResponse) => { res.writeHead(r.status, headers); res.end(JSON.stringify(r.body)); };
       try {
         if (req.method === "OPTIONS") { res.writeHead(204, headers); res.end(); return; }
-        const read = await readBody(req);
+        const webhook = url.pathname === "/v1/stripe/webhook";
+        const read = await readBody(req, webhook);
         if (!read.ok) return send(no(read.status, read.why));
         const auth = typeof req.headers.authorization === "string" ? /^Bearer ([A-Za-z0-9_-]{20,200})$/.exec(req.headers.authorization) : null;
         const forwarded = opts.trustProxy && typeof req.headers["x-forwarded-for"] === "string" ? req.headers["x-forwarded-for"].split(",")[0]!.trim() : "";
-        send(await handle({ method: req.method ?? "GET", path: url.pathname, bearer: auth ? auth[1]! : null, body: read.body, ip: forwarded || req.socket.remoteAddress || "unknown" }));
+        const stripeSignature = webhook && typeof req.headers["stripe-signature"] === "string" ? req.headers["stripe-signature"] : undefined;
+        send(await handle({ method: req.method ?? "GET", path: url.pathname, bearer: auth ? auth[1]! : null, body: read.body, ip: forwarded || req.socket.remoteAddress || "unknown", raw: read.raw, stripeSignature }));
       } catch (e) {
         // what went wrong stays in the log; the caller is told only that something did
         console.error("sentinel: a request failed", e);
