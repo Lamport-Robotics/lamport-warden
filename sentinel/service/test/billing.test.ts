@@ -372,7 +372,7 @@ describe("room for those who pay", () => {
     await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
     // five more free profiles: six places taken, which is all that is open to anyone
     for (let i = 0; i < 5; i++) expect(accounts.admit(addr(40 + i), null, T0 + i)).toMatchObject({ ok: true, created: true });
-    expect(accounts.places()).toEqual({ taken: 6, open: 6, inAll: 10 });
+    expect(accounts.places()).toEqual({ taken: 6, open: 6, inAll: 10, reads: null });
     expect(accounts.admit(addr(50), null, T0 + 9)).toEqual({ ok: false, status: 503, why: "Sentinel is watching as many wallets as it can for now. Try again later." });
     // a free profile cannot add a second wallet either
     const free = accounts.profileOf(addr(40))!;
@@ -394,7 +394,65 @@ describe("room for those who pay", () => {
     expect(configFrom({ ...paid, SENTINEL_RESERVED_FOR_PRO: "0" })).toMatchObject({ ok: true, config: { reservedForPro: 0 } });
     for (const bad of ["100", "-1", "2.5", "many"]) expect(configFrom({ ...paid, SENTINEL_RESERVED_FOR_PRO: bad })).toEqual({ ok: false, why: "SENTINEL_RESERVED_FOR_PRO has to be a whole number, zero or more, and less than SENTINEL_MAX_WALLETS." });
     // with no limit on the house there is nothing to keep
-    expect(new Accounts(new MemoryStore(), Buffer.alloc(32, 9)).places()).toEqual({ taken: 0, open: null, inAll: null });
+    expect(new Accounts(new MemoryStore(), Buffer.alloc(32, 9)).places()).toEqual({ taken: 0, open: null, inAll: null, reads: null });
+  });
+});
+
+describe("what the RPC will take", () => {
+  // an RPC that takes twelve reads a minute: a free wallet is one of them, a paid one three, and two are kept for the paid plan
+  const reads = { perMinute: 12, cost: { watch: 1, pro: 3 }, reservedForPro: 2 };
+
+  it("a wallet is taken only when its reads still fit, and a paid wallet counts for three", async () => {
+    const store = new MemoryStore();
+    const accounts = new Accounts(store, Buffer.alloc(32, 9), { reads });
+    const stripe = new FakeStripe();
+    const billing = new Billing(cfg, accounts, new Chain(), new Stripe(cfg.secretKey, stripe.fetch));
+    const paying = accounts.admit(A, null, T0);
+    const profile = paying.ok ? paying.profile : "";
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    expect(accounts.readsPromised()).toBe(3); // one paid wallet
+    for (let i = 0; i < 7; i++) expect(accounts.admit(addr(40 + i), null, T0 + i), `free ${i}`).toMatchObject({ ok: true });
+    expect(accounts.places().reads).toEqual({ promised: 10, open: 10, inAll: 12 });
+    // the reads on offer to anyone are all promised: the next free wallet is turned away
+    expect(accounts.admit(addr(50), null, T0 + 9)).toEqual({ ok: false, status: 503, why: "Sentinel is watching as many wallets as it can for now. Try again later." });
+    // two reads are left, kept for the paid plan, and a paid wallet needs three: it does not fit either
+    expect(accounts.admit(addr(60), profile, T0 + 10)).toMatchObject({ ok: false, status: 503 });
+    // a free wallet leaves: now three are free, and the paid profile's second wallet fits exactly
+    accounts.removeWallet(accounts.profileOf(addr(40))!, addr(40));
+    expect(accounts.admit(addr(60), profile, T0 + 11)).toMatchObject({ ok: true });
+    expect(accounts.readsPromised()).toBe(12);
+    expect(accounts.admit(addr(61), profile, T0 + 12)).toMatchObject({ ok: false, status: 503 });
+    // everyone already here still signs in
+    expect(accounts.admit(addr(41), null, T0 + 13)).toMatchObject({ ok: true, created: false });
+  });
+
+  it("a paused wallet is promised nothing, and a plan that ends gives its reads back", async () => {
+    const store = new MemoryStore();
+    const accounts = new Accounts(store, Buffer.alloc(32, 9), { reads: { perMinute: 100, cost: { watch: 1, pro: 3 }, reservedForPro: 0 } });
+    const stripe = new FakeStripe();
+    const billing = new Billing(cfg, accounts, new Chain(), new Stripe(cfg.secretKey, stripe.fetch));
+    const paying = accounts.admit(A, null, T0);
+    const profile = paying.ok ? paying.profile : "";
+    await billing.onEvent(stripe.start("sub_1", profile, "price_full"));
+    for (let i = 0; i < 5; i++) accounts.admit(addr(30 + i), profile, T0 + 1 + i);
+    expect(accounts.readsPromised()).toBe(18); // six paid wallets
+    await billing.onEvent(stripe.changed("sub_1", "canceled"));
+    expect(accounts.readsPromised()).toBe(3); // three free wallets watched, three paused
+  });
+
+  it("is four fifths of what the pace allows unless said, and a share of it is kept when there is a plan to pay for", () => {
+    const base = { SENTINEL_RPC_URL: "https://api.mainnet-beta.solana.com", SENTINEL_DATA_KEY: Buffer.alloc(32, 1).toString("base64") };
+    const paid = { ...base, SENTINEL_STRIPE_SECRET_KEY: "sk_test_x", SENTINEL_STRIPE_WEBHOOK_SECRET: "whsec_x", SENTINEL_STRIPE_PRICE_FULL: "price_1", SENTINEL_STRIPE_PRICE_HOLDER: "price_2" };
+    // nine of the rationed calls in ten seconds is fifty-four a minute; forty-three are promised
+    expect(configFrom(base)).toMatchObject({ ok: true, config: { reads: { perMinute: 43, cost: { watch: 1, pro: 3 }, reservedForPro: 0 } } });
+    expect(configFrom(paid)).toMatchObject({ ok: true, config: { reads: { perMinute: 43, reservedForPro: 8 } } });
+    // an RPC that is not paced has no budget, until one is given; and one can be lifted
+    expect(configFrom({ ...base, SENTINEL_RPC_URL: "https://my-own.rpc.example" })).toMatchObject({ ok: true, config: { reads: null } });
+    expect(configFrom({ ...base, SENTINEL_RPC_URL: "https://my-own.rpc.example", SENTINEL_READS_PER_MINUTE: "600" })).toMatchObject({ ok: true, config: { reads: { perMinute: 600 } } });
+    expect(configFrom({ ...base, SENTINEL_READS_PER_MINUTE: "0" })).toMatchObject({ ok: true, config: { reads: null } });
+    expect(configFrom({ ...base, SENTINEL_READS_PER_MINUTE: "lots" })).toEqual({ ok: false, why: "SENTINEL_READS_PER_MINUTE has to be a number of reads a minute, or 0 for no limit." });
+    // a plan read faster costs more of them
+    expect(configFrom({ ...base, SENTINEL_PRO_POLL_SECONDS: "10" })).toMatchObject({ ok: true, config: { reads: { cost: { watch: 1, pro: 6 } } } });
   });
 });
 

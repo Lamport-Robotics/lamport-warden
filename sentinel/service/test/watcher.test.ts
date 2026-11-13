@@ -175,7 +175,11 @@ describe("the watcher", () => {
   it("sees Sentinel's permission replaced, a token account taken, and the wallet reassigned, between two passes", async () => {
     const { chain, sent, watcher } = setup();
     await watcher.pass(me);
+    // Each of these changes is made by a transaction the wallet signs, which is why it is in the wallet's
+    // list. Here that transaction is an ordinary payment to a friend, which raises nothing of its own.
+    const signedSomething = (n: number) => chain.pay(wallet.publicKey, friend, 0.4, NOON + n);
     chain.tokenAccounts[0]!.delegate = key(68).toBase58();
+    signedSomething(60);
     let raised = await watcher.pass(me);
     expect(raised).toHaveLength(1);
     expect(raised[0]).toMatchObject({ level: "urgent", signals: ["delegate_replaced"], signature: "", rescueWorthy: true });
@@ -183,14 +187,45 @@ describe("the watcher", () => {
     expect(await watcher.pass(me)).toEqual([]);
 
     chain.tokenAccounts[0]!.owner = thief.toBase58();
+    signedSomething(120);
     raised = await watcher.pass(me);
     expect(raised.map((e) => e.signals)).toEqual([["authority_changed"]]);
 
     chain.walletOwner = key(82).toBase58();
+    signedSomething(180);
     raised = await watcher.pass(me);
     expect(raised.map((e) => e.signals)).toEqual([["wallet_reassigned"]]);
     expect(await watcher.pass(me)).toEqual([]);
     expect(sent.list.map(([l]) => l)).toEqual(["urgent", "urgent", "urgent"]);
+  });
+
+  it("reads a quiet wallet with one call, its accounts when something is new, and every quarter of an hour regardless", async () => {
+    const { chain, store, watcher, tick } = setup();
+    await watcher.pass(me); // the first pass reads everything
+    const cost = async () => { chain.calls = []; await watcher.pass(me); return chain.calls; };
+    expect(await cost()).toEqual(["getSignaturesForAddress"]);
+    expect(await cost()).toEqual(["getSignaturesForAddress"]);
+    // something new in the list: the transaction, then the accounts
+    chain.pay(wallet.publicKey, friend, 0.4, NOON + 60);
+    expect(await cost()).toEqual(["getSignaturesForAddress", "getTransaction", "getTokenAccountsByOwner", "getTokenAccountsByOwner", "getAccountInfo"]);
+    expect(await cost()).toEqual(["getSignaturesForAddress"]);
+
+    // a change with no transaction of the wallet's beside it should not be possible. If it happens anyway,
+    // it is not seen at once, and it is seen within the quarter of an hour.
+    chain.tokenAccounts[0]!.delegate = key(69).toBase58();
+    expect(await watcher.pass(me)).toEqual([]);
+    tick(899);
+    expect(await watcher.pass(me)).toEqual([]);
+    tick(1);
+    expect((await watcher.pass(me)).map((e) => e.signals)).toEqual([["delegate_replaced"]]);
+    // a record from before this was kept had its accounts read on every pass: upgrading does not read them all again
+    const old = store.record(W);
+    delete old.accountsReadAt;
+    store.save(W, old);
+    expect(await cost()).toEqual(["getSignaturesForAddress"]);
+    // and a transaction the RPC lists but cannot show yet still has the accounts read
+    chain.pay(wallet.publicKey, friend, 0.4, NOON + 2000, { visible: false });
+    expect(await cost()).toEqual(["getSignaturesForAddress", "getTransaction", "getTokenAccountsByOwner", "getTokenAccountsByOwner", "getAccountInfo"]);
   });
 
   it("misses nothing when the RPC is down: it says it is blind, and reads on from where it was", async () => {

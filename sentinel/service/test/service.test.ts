@@ -520,7 +520,7 @@ describe("over HTTP", () => {
     try {
       const health = await fetch(`${base}/v1/health`, { headers: { Origin: ORIGIN } });
       expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ ok: true, watching: 0, lastPassAt: 123, blind: 0 });
+      expect(await health.json()).toEqual({ ok: true, watching: 0, lastPassAt: 123, blind: 0, late: 0 });
       expect(health.headers.get("access-control-allow-origin")).toBe(ORIGIN);
       expect(health.headers.get("cache-control")).toBe("no-store");
       expect(health.headers.get("x-content-type-options")).toBe("nosniff");

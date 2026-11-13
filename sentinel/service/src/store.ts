@@ -48,6 +48,8 @@ export interface WalletRecord {
   ownerProgram: string | null;
   /** When the wallet was last read successfully, unix seconds: the health check. */
   lastSeenAt: number | null;
+  /** When its accounts (not just its list of transactions) were last read. Absent before the first time. */
+  accountsReadAt?: number;
   /** Signatures the owner's browser reported as theirs, with the time each was reported. */
   ownerSignatures: Record<string, number>;
 }

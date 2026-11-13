@@ -46,8 +46,14 @@ export function cleanTarget(input: unknown, ntfyHosts: ReadonlySet<string>): { k
 
 const hintOf = (kind: ChannelKind, url: string): string => (kind === "ntfy" ? `${new URL(url).host}/…${url.slice(-4)}` : `${kind === "discord" ? "Discord" : "Slack"} webhook …${url.slice(-4)}`);
 
+/**
+ * How many reads of a wallet the RPC will take in a minute, what a wallet on each plan costs of them (a
+ * wallet read every twenty seconds costs three), and how many are kept for the paid plan.
+ */
+export interface ReadBudget { perMinute: number; cost: Record<Tier, number>; reservedForPro: number }
+
 export class Accounts {
-  constructor(private store: MemoryStore, private dataKey: Buffer, private opts: { ntfyHosts?: ReadonlySet<string>; maxWallets?: number; reservedForPro?: number } = {}) {}
+  constructor(private store: MemoryStore, private dataKey: Buffer, private opts: { ntfyHosts?: ReadonlySet<string>; maxWallets?: number; reservedForPro?: number; reads?: ReadBudget } = {}) {}
 
   /**
    * No room for another wallet: what the service can read is finite, and a full house is said, not hidden.
@@ -55,15 +61,31 @@ export class Accounts {
    * to add them, whoever signed up free in the meantime.
    */
   private full(tier: Tier): boolean {
-    if (this.opts.maxWallets === undefined) return false;
-    const room = tier === "pro" ? this.opts.maxWallets : this.opts.maxWallets - (this.opts.reservedForPro ?? 0);
-    return Object.keys(this.data.owners).length >= room;
+    const max = this.opts.maxWallets;
+    if (max !== undefined && Object.keys(this.data.owners).length >= (tier === "pro" ? max : max - (this.opts.reservedForPro ?? 0))) return true;
+    // And what the RPC will take. A wallet is a promise to read it so many times a minute, and a paid one is
+    // promised more: another is taken only when its reads still fit, so that no plan is sold on reads that
+    // cannot be made.
+    const reads = this.opts.reads;
+    return !!reads && this.readsPromised() + reads.cost[tier] > (tier === "pro" ? reads.perMinute : reads.perMinute - reads.reservedForPro);
   }
 
-  /** How many wallets are in the service, and how many it takes: from anyone, and in all. */
-  places(): { taken: number; open: number | null; inAll: number | null } {
-    const max = this.opts.maxWallets;
-    return { taken: Object.keys(this.data.owners).length, open: max === undefined ? null : max - (this.opts.reservedForPro ?? 0), inAll: max ?? null };
+  /** How many reads a minute are promised to the wallets being watched now. A paused wallet is promised none. */
+  readsPromised(): number {
+    const reads = this.opts.reads;
+    if (!reads) return 0;
+    let sum = 0;
+    for (const o of Object.values(this.data.owners)) if (!o.paused) sum += reads.cost[this.profile(o.profile)?.tier ?? "watch"];
+    return sum;
+  }
+
+  /** How many wallets are in the service, and how many it takes: from anyone, and in all. The same for reads a minute, when those are counted. */
+  places(): { taken: number; open: number | null; inAll: number | null; reads: { promised: number; open: number; inAll: number } | null } {
+    const max = this.opts.maxWallets, reads = this.opts.reads;
+    return {
+      taken: Object.keys(this.data.owners).length, open: max === undefined ? null : max - (this.opts.reservedForPro ?? 0), inAll: max ?? null,
+      reads: reads ? { promised: this.readsPromised(), open: reads.perMinute - reads.reservedForPro, inAll: reads.perMinute } : null,
+    };
   }
 
   private get data() { return this.store.accounts; }

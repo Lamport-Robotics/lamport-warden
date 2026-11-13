@@ -124,7 +124,7 @@ describe("when Sentinel cannot read a wallet", () => {
     const round = watchRound({ watcher, store, notifier: { notify: async (w, level, sentence) => { sent.push([w, level, sentence]); } }, pace: pacer(() => "watch", { watch: 60, pro: 20 }), blindness: new Blindness(), state, log: (l) => log.push(l) });
 
     await round(T0);
-    expect(state).toEqual({ lastPassAt: T0, blind: 0 });
+    expect(state).toEqual({ lastPassAt: T0, blind: 0, late: 0 });
     down.add(A);
     for (let t = 60; t < 900; t += 60) await round(T0 + t);
     expect(state.blind).toBe(1);
