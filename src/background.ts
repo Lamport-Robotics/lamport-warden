@@ -112,3 +112,10 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, sendRespons
 });
 
 chrome.action?.onClicked.addListener(() => { void chrome.runtime.openOptionsPage(); });
+
+// A new install opens Warden's own settings page, once, with a few words on what it now does and a link to
+// the practice page. The page is part of the extension: opening it asks nothing of the network. An update
+// opens nothing.
+chrome.runtime.onInstalled?.addListener((details) => {
+  if (details.reason === "install") void chrome.tabs.create({ url: chrome.runtime.getURL("options.html?welcome=1") }).catch(() => undefined);
+});

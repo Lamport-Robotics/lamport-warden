@@ -35,6 +35,33 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     expect(owner.publicKey.toBase58()).toBe("GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB");
   });
 
+  it("a new install opens Warden's own settings page with a welcome, and asks nothing of the network", async () => {
+    const url = `chrome-extension://${browser.extensionId}/options.html?welcome=1`;
+    await expect.poll(() => browser.ctx.pages().some((p) => p.url() === url), { timeout: 10_000 }).toBe(true);
+    const welcome = browser.ctx.pages().find((p) => p.url() === url)!;
+    expect(browser.ctx.pages().filter((p) => p.url() === url)).toHaveLength(1); // once
+    await expect.poll(() => welcome.locator("#welcome").isVisible(), { timeout: 5000 }).toBe(true);
+    expect(await welcome.locator("#welcome h2").innerText()).toBe("Warden is on.");
+    const practice = welcome.getByRole("link", { name: "See it work with a practice wallet" });
+    expect(await practice.getAttribute("href")).toBe("https://warden.lamportrobotics.com/try/");
+    expect(await welcome.locator("#practiceLine").isVisible()).toBe(false); // the same link is not shown twice
+    // WELCOME_SHOT=/some/file.png keeps a picture of what a new install sees
+    if (process.env.WELCOME_SHOT) await welcome.screenshot({ path: process.env.WELCOME_SHOT });
+    // nothing has been chosen yet, and the page shows what is in force: the public RPC, not "my own"
+    expect(await welcome.locator('input[name="rpc"]:checked').getAttribute("value")).toBe("public");
+    expect(await welcome.locator("#rpcUrl").inputValue()).toBe("");
+    // everything the page loaded is the extension's own: no request left the browser by opening it
+    const loaded = await welcome.evaluate(() => [location.href, ...performance.getEntriesByType("resource").map((e) => e.name)]);
+    for (const resource of loaded) expect(resource).toMatch(/^chrome-extension:\/\//);
+    // opened as settings, later, there is no welcome: one line with the link instead
+    const settings = await browser.ctx.newPage();
+    await settings.goto(`chrome-extension://${browser.extensionId}/options.html`);
+    await expect.poll(() => settings.locator("#practiceLink").innerText(), { timeout: 5000 }).toBe("warden.lamportrobotics.com/try/");
+    expect(await settings.locator("#welcome").isVisible()).toBe(false);
+    await settings.close();
+    await welcome.close();
+  });
+
   it("puts nothing on a page that has no wallet", async () => {
     const { page } = await open("?none=1");
     await page.waitForTimeout(400);
