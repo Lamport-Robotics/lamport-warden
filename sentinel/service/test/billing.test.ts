@@ -90,13 +90,13 @@ class FakeStripe {
   changed(id: string, status: string) { const s = this.subscriptions.get(id); s.status = status; return { type: status === "canceled" ? "customer.subscription.deleted" : "customer.subscription.updated", data: { object: { ...s } } }; }
 }
 
-function setup(checkoutOpen = true) {
+function setup(checkoutOpen = true, checkoutTesters?: string[]) {
   const store = new MemoryStore();
   const accounts = new Accounts(store, Buffer.alloc(32, 9));
   const chain = new Chain(), stripe = new FakeStripe();
   /** What the owner was told about the plan, and the channels in use at that moment. */
   const said: { profile: string; sentence: string; channels: string[] }[] = [];
-  const billing = new Billing({ ...cfg, checkoutOpen }, accounts, chain, new Stripe(cfg.secretKey, stripe.fetch), { now: () => T0, notice: async (profile, sentence) => { said.push({ profile, sentence, channels: accounts.channelsOfProfile(profile).map((c) => c.kind) }); } });
+  const billing = new Billing({ ...cfg, checkoutOpen, ...(checkoutTesters ? { checkoutTesters } : {}) }, accounts, chain, new Stripe(cfg.secretKey, stripe.fetch), { now: () => T0, notice: async (profile, sentence) => { said.push({ profile, sentence, channels: accounts.channelsOfProfile(profile).map((c) => c.kind) }); } });
   const admitted = accounts.admit(A, null, T0);
   if (!admitted.ok) throw new Error("setup");
   return { store, accounts, chain, stripe, billing, said, profile: admitted.profile };
@@ -139,6 +139,26 @@ describe("the holder price", () => {
     expect(await billing.checkout(profile)).toEqual({ ok: false, status: 403, why: "the paid plan is not on sale yet." });
     expect(stripe.calls).toEqual([]);
     expect(await billing.quote(profile)).toMatchObject({ checkoutOpen: false });
+  });
+
+  it("sells, while closed, to a profile that a tester's wallet is in, and to no other", async () => {
+    const { accounts, stripe, billing, profile } = setup(false, [B]);
+    // A's profile does not have the tester's wallet in it: closed, as for anyone
+    expect(await billing.quote(profile)).toMatchObject({ checkoutOpen: false });
+    expect(await billing.checkout(profile)).toEqual({ ok: false, status: 403, why: "the paid plan is not on sale yet." });
+    expect(stripe.calls).toEqual([]);
+    // the tester's own profile: the page shows the button, and the button works
+    const tester = accounts.admit(B, null, T0);
+    if (!tester.ok) throw new Error("setup");
+    expect(await billing.quote(tester.profile)).toMatchObject({ checkoutOpen: true, cents: 1500 });
+    const bought = await billing.checkout(tester.profile);
+    expect(bought).toMatchObject({ ok: true });
+    expect(stripe.calls.at(-1)!.params).toMatchObject({ mode: "subscription", "line_items[0][price]": "price_full", client_reference_id: tester.profile });
+    // and still nobody else
+    expect(await billing.checkout(profile)).toMatchObject({ ok: false, status: 403 });
+    // an empty list is no list
+    const none = setup(false, []);
+    expect(await none.billing.quote(none.profile)).toMatchObject({ checkoutOpen: false });
   });
 });
 
@@ -662,5 +682,14 @@ describe("the paid plan's settings", () => {
     expect(configFrom({ ...base, ...stripe, SENTINEL_STRIPE_PRICE_HOLDER: "price_1" })).toMatchObject({ ok: false });
     expect(configFrom({ ...base, ...stripe, SENTINEL_STRIPE_PRICE_FULL: "prod_1" })).toMatchObject({ ok: false });
     expect(configFrom({ ...base, ...stripe, SENTINEL_PRICE_CENTS: "-5" })).toMatchObject({ ok: false });
+  });
+
+  it("take a short list of wallets that may buy while it is closed, and refuse one that is not an address", () => {
+    expect((configFrom({ ...base, ...stripe }) as any).config.billing.checkoutTesters).toBeUndefined();
+    expect(configFrom({ ...base, ...stripe, SENTINEL_CHECKOUT_TESTERS: ` ${A}, ${B} ,` })).toMatchObject({ ok: true, config: { billing: { checkoutOpen: false, checkoutTesters: [A, B] } } });
+    expect(configFrom({ ...base, ...stripe, SENTINEL_CHECKOUT_TESTERS: `${A},not-an-address` })).toEqual({ ok: false, why: "SENTINEL_CHECKOUT_TESTERS has to be wallet addresses separated by commas, twenty at most." });
+    expect(configFrom({ ...base, ...stripe, SENTINEL_CHECKOUT_TESTERS: Array(21).fill(A).join(",") })).toMatchObject({ ok: false });
+    // without the paid plan set up there is nothing to test, and the list is not read
+    expect(configFrom({ ...base, SENTINEL_CHECKOUT_TESTERS: "not-an-address" })).toMatchObject({ ok: true, config: { billing: null } });
   });
 });
