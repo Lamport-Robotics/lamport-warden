@@ -58,6 +58,8 @@ jobs:
         working-directory: sentinel/program
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: true
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10, toolchain: stable
         with:
           toolchain: stable
@@ -84,3 +86,14 @@ jobs:
       - run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - run: cargo build-sbf --manifest-path programs/lamport-sentinel/Cargo.toml
       - run: cargo test -p sentinel-program-tests
+      # a rescue for real: a local validator running the program just built, and the service's rescuer moving
+      # tokens into a vault through it (sentinel/service/test/rescue.validator.test.ts)
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4 (version from packageManager)
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+        working-directory: .
+      - run: pnpm test:rescue
+        working-directory: .

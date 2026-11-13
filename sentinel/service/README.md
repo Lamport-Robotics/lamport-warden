@@ -139,6 +139,12 @@ of the customer and the subscription.
 a Stripe account, and can be run again safely. `test/stripe.real.test.ts` runs the whole path against Stripe
 in test mode when `SENTINEL_STRIPE_TEST_KEY` is set (it refuses a live key).
 
+`sentinel/billing-setup.sh [ssh-host]` does the whole setup for the deployed service in the live Stripe
+account: it runs that script on the server with the key the server already holds, writes the Stripe settings
+into the service's root-only env file, restarts it, and checks that the service accepts a webhook signed with
+the new secret and refuses one signed with another. It leaves checkout closed. It makes things in a real
+Stripe account, so it is run by a person.
+
 ### What each plan gives
 
 `src/plans.ts` is the one definition. The service enforces it, the Sentinel page and the extension's settings
@@ -207,13 +213,28 @@ running each instruction through the compiled program. It also plans a rescue: o
 Sentinel's delegate for the owner's vault, hold something and are not frozen, biggest first, a few to a
 transaction with a priority fee.
 
-That is all of rescue there is. Nothing signs or sends one, the page cannot arm a wallet, and the program is
-not on devnet: the devnet faucet no longer answers the command line, so the deploy key
+`src/rescuer.ts` is the rescuer. Before it sends anything it reads the chain: is the wallet armed, for which
+vault, and is its key one that may act for this wallet (the owner, the owner's own rescuer key, or one of
+Lamport's set). A key that may not is told so there, instead of paying fees to be refused by the program.
+Then it sends every planned transaction at once, each simulated first, and answers with one step per
+transaction and its signature.
+
+`pnpm test:rescue` runs it for real: a local validator running the compiled program, a vault account laid
+out as the Lamport Vault program lays one out, a wallet with tokens, and the rescuer moving them. It checks
+that everything armed lands in the vault's own token accounts and nothing else moves; that a stranger's key
+and a wallet that is not armed are refused before anything is sent; that an owner who chose a key of their
+own is rescued by it and no longer by Lamport's; and that a proposed change of vault redirects nothing. Only
+the vault program is stood in for, and the rescue program never calls it. CI runs it in the job that builds
+the program.
+
+What rescue still lacks: a process and a key (nothing runs the rescuer yet), a way to arm a wallet on the
+page, SOL (the rescue program moves tokens only), and a chain to run on. The program is not on devnet: the
+devnet faucet no longer answers the command line, so the deploy key
 (`BgWwL1UVqA8NNMwB68G8t7BuG9a7yR9WApfZrCgy3wBT`) needs about 4 test SOL from https://faucet.solana.com.
 
 ## Not here yet
 
-The rescuer that signs and sends, arming on the page, the Pincer1 webhook, a subscription in place of the poll,
+A process that runs the rescuer, arming on the page, the Pincer1 webhook, a subscription in place of the poll,
 more channels than ntfy, and payment in SOL or USDC. Replaying real wallets' public history to count
 false alerts needs an RPC that allows it (the public one refuses most `getTransaction` calls); a free Helius
 key is enough.

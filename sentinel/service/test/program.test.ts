@@ -12,6 +12,8 @@ import { PublicKey, type TransactionInstruction } from "@solana/web3.js";
 import { configAddress as wardenConfig, delegateAddress as wardenDelegate } from "../../../src/sentinel.js";
 import { ASSOCIATED_TOKEN, PROGRAM, TOKEN, TOKEN_2022, acceptVault, approveForRescue, cancelProposal, closeConfig, configAddress, delegateAddress, initConfig, planRescue, proposeVault, rescueInstructions, rescueToken, rescuerSetAddress, setRescuers, vaultTokenAddress, type Holding } from "../src/program.js";
 
+import { readConfig, readRescuerSet } from "../src/rescuer.js";
+
 const v = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "vectors", "instructions.json"), "utf8"));
 const pk = (s: string) => new PublicKey(s);
 const owner = pk(v.owner), vault = pk(v.vault), vault2 = pk(v.vault2), mint = pk(v.mint), source = pk(v.source);
@@ -57,6 +59,37 @@ describe("the rescue program's instructions", () => {
     // no account in a rescue is a destination anyone chose: the signer, the config and delegate, the vault and its own token account
     expect(theirs.accounts[7]!.pubkey).toBe(vaultTokenAddress(vault, mint).toBase58());
     expect(theirs.accounts.map((a) => a.pubkey)).toContain(ASSOCIATED_TOKEN.toBase58());
+  });
+});
+
+describe("reading what the program stored", () => {
+  const i64 = (n: bigint) => { const b = Buffer.alloc(8); b.writeBigInt64LE(n); return b; };
+  /** A configuration account's bytes, in the program's layout. */
+  const config = (o: { pending?: PublicKey; own?: PublicKey }) => Buffer.concat([
+    Buffer.alloc(8, 9), Buffer.from([1, 254]), owner.toBuffer(), vault.toBuffer(),
+    o.pending ? Buffer.concat([Buffer.from([1]), o.pending.toBuffer()]) : Buffer.from([0]),
+    i64(o.pending ? 1_800_000_000n : 0n), i64(259_200n),
+    o.own ? Buffer.concat([Buffer.from([1]), o.own.toBuffer()]) : Buffer.from([0]),
+    i64(1_794_000_000n),
+  ]);
+
+  it("a wallet's configuration: the vault, a vault that is proposed, and who may rescue", () => {
+    expect(readConfig(config({}))).toEqual({ owner: v.owner, vault: v.vault, pendingVault: null, rescuers: { kind: "lamport" } });
+    expect(readConfig(config({ pending: vault2 }))).toEqual({ owner: v.owner, vault: v.vault, pendingVault: v.vault2, rescuers: { kind: "lamport" } });
+    expect(readConfig(config({ own: pk(v.ownRescuer) }))).toEqual({ owner: v.owner, vault: v.vault, pendingVault: null, rescuers: { kind: "own", key: v.ownRescuer } });
+    expect(readConfig(config({ pending: vault2, own: pk(v.ownRescuer) }))).toEqual({ owner: v.owner, vault: v.vault, pendingVault: v.vault2, rescuers: { kind: "own", key: v.ownRescuer } });
+    // bytes that are not one read as nothing, never as a configuration with a made-up vault
+    const good = config({});
+    for (const bad of [Buffer.alloc(0), good.subarray(0, 60), good.subarray(0, good.length - 9), Buffer.concat([good.subarray(0, 74), Buffer.from([7]), good.subarray(75)]), Buffer.concat([good.subarray(0, 91), Buffer.from([2]), good.subarray(92)]), config({ own: pk(v.ownRescuer) }).subarray(0, 100)]) expect(readConfig(bad)).toBeNull();
+  });
+
+  it("the shared rescuer set: its keys, and nothing from bytes that are not one", () => {
+    const set = (keys: PublicKey[], claimed = keys.length) => { const n = Buffer.alloc(4); n.writeUInt32LE(claimed); return Buffer.concat([Buffer.alloc(8, 9), Buffer.from([1, 255]), owner.toBuffer(), n, ...keys.map((k) => k.toBuffer())]); };
+    expect(readRescuerSet(set([]))).toEqual([]);
+    expect(readRescuerSet(set([vault, vault2]))).toEqual([v.vault, v.vault2]);
+    expect(readRescuerSet(set([vault], 2))).toBeNull();   // claims a key it does not hold
+    expect(readRescuerSet(set([vault], 5))).toBeNull();   // more than the program allows
+    expect(readRescuerSet(Buffer.alloc(20))).toBeNull();
   });
 });
 
