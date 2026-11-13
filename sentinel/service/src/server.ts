@@ -57,6 +57,8 @@ export interface ApiDeps {
   notice?: (profile: string, sentence: string, opts?: { quiet?: boolean }) => Promise<void>;
   /** How many new profiles one network may start in a day (default 5). */
   newProfilesPerDay?: number;
+  /** Told when a webhook that Stripe signed could not be applied: Stripe will send it again, and someone should know. */
+  webhookFailed?: (why: string) => void;
 }
 
 /**
@@ -164,7 +166,7 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       let event: unknown;
       try { event = JSON.parse(req.raw ?? ""); } catch { return no(400, "the request is not JSON."); }
       // a failure here is answered with an error so that Stripe sends it again
-      await deps.billing.api.onEvent(event);
+      try { await deps.billing.api.onEvent(event); } catch (e) { deps.webhookFailed?.(String((e as Error).message ?? e)); throw e; }
       return ok({ received: true });
     }
 
