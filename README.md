@@ -1,6 +1,6 @@
 # Lamport Warden
 
-Browser extension, v0.2. Not released: it is not in the Chrome Web Store, and nobody outside Lamport has
+Browser extension, v0.3. Not released: it is not in the Chrome Web Store, and nobody outside Lamport has
 reviewed it. Load it unpacked to try it.
 
 Warden sits in front of whatever Solana wallet you already use. Before a signing request reaches the wallet,
@@ -41,16 +41,22 @@ It does not matter which extension you installed first. Wallets are guarded by c
 object in place, so the page gets the object it would have got, and Warden puts no name on the window that a
 wallet did not put there.
 
-## The one network call
+## What leaves your browser
 
-Most swaps are version 0 transactions that name their accounts by position in a table stored on chain. To say
-where the money goes, Warden reads that table from a Solana RPC. The RPC learns which table was asked for and
-your IP address; it does not learn your wallet address, the transaction or the site. The default is the
-public Solana RPC. On the settings page you can point it at your own RPC, or turn it off, in which case every
-transaction that uses a table is shown as partly unread.
+By default, one kind of call. Most swaps are version 0 transactions that name their accounts by position in a
+table stored on chain. To say where the money goes, Warden reads that table from a Solana RPC. The RPC learns
+which table was asked for and your IP address; it does not learn your wallet address, the transaction or the
+site. The default is the public Solana RPC. On the settings page you can point it at your own RPC, or turn it
+off, in which case every transaction that uses a table is shown as partly unread.
 
-Warden does not simulate transactions yet. For a program it does not decode, it says the program is unknown
-and that it cannot show the amount; it does not guess.
+Simulation is a second kind, and it is off until you turn it on. Warden reads payments and token transfers
+exactly; a call to any other program it can only name. With simulation on, such a transaction is sent,
+unsigned, to your RPC, which runs it against the chain as it is now. Warden then says what would leave your
+wallet and what would arrive, and it sees three things no instruction list shows: a token account handed to
+someone else, a delegate given the right to spend, and your wallet's own account reassigned. The RPC sees the
+transaction, and the transaction names your wallet. A simulation is a reading of one moment: a program can
+behave differently a block later, so it is worded as what a simulation showed, and it can only make a verdict
+stricter. A transaction made only of instructions Warden reads in full is never sent.
 
 ## How it is put together
 
@@ -63,7 +69,8 @@ and that it cannot show the amount; it does not guess.
 | `src/background.ts` | the extension's worker | The engine, the history, the lookup-table call. Keeps nothing between messages it could not lose. |
 | `src/judge.ts` | worker | Request in, verdict out; records a signed send. Pure, tested in Node. |
 | `src/rpc.ts` | worker | Reads lookup tables, and only accounts the lookup table program owns. |
-| `src/options.ts` | settings page | The RPC, the sites allowed to ask for Privacy Rings keys, and what Warden remembers. |
+| `src/simulate.ts` | worker | Asks the RPC what a transaction would do, and reads the wallet's accounts before and after. |
+| `src/options.ts` | settings page | The RPC, simulation, the sites allowed to ask for Privacy Rings keys, and what Warden remembers. |
 | `src/channel.ts` | page and isolated | How the two halves on a page find each other without the page listening in. |
 
 The only permission is `storage`.
@@ -100,7 +107,8 @@ Warden is advice in front of your wallet, not a lock on it. A page can still rea
 never sees, and turning the extension off removes it. On Pincer1 the same rules are enforced by the robot's
 controller, where a compromised computer cannot talk them away.
 
-Not built yet: simulation, sign-in requests (`solana:signIn`) are passed to the wallet unread, Firefox, mobile,
+Not built yet: sign-in requests (`solana:signIn`) are passed to the wallet unread, token names beyond a
+handful of well-known ones (others show as a shortened mint address), Firefox, mobile,
 agent policy, and telling you on the page when a wallet's door is not guarded. The icons are the Pincer1 ones
 for now. It has been run against the real wallets only as far as the prompt: no test has a funded wallet sign
 a real transaction through it.

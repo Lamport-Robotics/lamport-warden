@@ -15,12 +15,23 @@ export const WARDEN = join(here, "..", "..", "dist");
 export const WALLETS = join(here, "dist", "wallet-ext");
 const PAGE = join(here, "dist", "page");
 
-export interface Site { server: Server; origin: string; rpcCalls: string[][]; setTable(key: string, base64: string | null): void }
+export interface Site {
+  server: Server; origin: string;
+  /** The keys of each lookup-table read. */
+  rpcCalls: string[][];
+  setTable(key: string, base64: string | null): void;
+  /** The transactions sent for simulation, base64. */
+  simulated: string[];
+  /** What the chain holds before, and what a simulated run leaves, by address (jsonParsed account objects). */
+  setChain(before: Record<string, unknown>, after: Record<string, unknown>): void;
+}
 
 /** The dapp page, and an RPC that knows whatever lookup tables a test gives it. */
 export async function serve(): Promise<Site> {
   const tables = new Map<string, string>();
   const rpcCalls: string[][] = [];
+  const simulated: string[] = [];
+  let chain: { before: Record<string, unknown>; after: Record<string, unknown> } = { before: {}, after: {} };
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname === "/rpc") {
@@ -31,10 +42,18 @@ export async function serve(): Promise<Site> {
       let body = "";
       req.on("data", (c) => { body += c; });
       req.on("end", () => {
-        const keys: string[] = JSON.parse(body).params[0];
-        rpcCalls.push(keys);
+        const { method, params } = JSON.parse(body);
         res.setHeader("content-type", "application/json");
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { value: keys.map((k) => (tables.has(k) ? { data: [tables.get(k), "base64"], owner: "AddressLookupTab1e1111111111111111111111111" } : null)) } }));
+        const answer = (result: unknown) => res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+        if (method === "simulateTransaction") {
+          simulated.push(params[0]);
+          return answer({ value: { err: null, logs: [], accounts: (params[1].accounts.addresses as string[]).map((a) => chain.after[a] ?? null) } });
+        }
+        const keys: string[] = params[0];
+        // the accounts before a simulation are asked for parsed; a lookup table is asked for as bytes
+        if (params[1]?.encoding === "jsonParsed") return answer({ value: keys.map((k) => chain.before[k] ?? null) });
+        rpcCalls.push(keys);
+        answer({ value: keys.map((k) => (tables.has(k) ? { data: [tables.get(k), "base64"], owner: "AddressLookupTab1e1111111111111111111111111" } : null)) });
       });
       return;
     }
@@ -44,7 +63,7 @@ export async function serve(): Promise<Site> {
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as { port: number }).port;
-  return { server, origin: `http://localhost:${port}`, rpcCalls, setTable: (k, v) => { if (v === null) tables.delete(k); else tables.set(k, v); } };
+  return { server, origin: `http://localhost:${port}`, rpcCalls, simulated, setTable: (k, v) => { if (v === null) tables.delete(k); else tables.set(k, v); }, setChain: (before, after) => { chain = { before, after }; } };
 }
 
 export interface Browser { ctx: BrowserContext; extensionId: string; close(): Promise<void> }

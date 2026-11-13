@@ -1,6 +1,6 @@
 /** The settings page. Everything is built with textContent: stored addresses and labels are never parsed as HTML. */
 import { DEFAULT_RPC } from "./defaults.js";
-import { cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
+import { KEYS, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
 import type { MemoryState } from "../pincer1/daemon/src/warden/index.js";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -18,6 +18,10 @@ async function load() {
   const mode = s.rpcUrl === "" ? "off" : s.rpcUrl === DEFAULT_RPC ? "public" : "own";
   for (const r of document.querySelectorAll<HTMLInputElement>('input[name="rpc"]')) r.checked = r.value === mode;
   $<HTMLInputElement>("rpcUrl").value = mode === "own" ? s.rpcUrl : "";
+
+  // simulation
+  $<HTMLInputElement>("simulate").checked = s.simulate;
+  if (s.simulate && s.rpcUrl === "") note("simNote", "Simulation needs an RPC, and the RPC is turned off above. Nothing is simulated.", true);
 
   // Privacy Rings sites
   const sites = $("sites");
@@ -78,10 +82,17 @@ $("saveRpc").addEventListener("click", async () => {
 });
 $("rpcUrl").addEventListener("input", () => { const own = document.querySelector<HTMLInputElement>('input[name="rpc"][value="own"]'); if (own) own.checked = true; });
 
+$("simulate").addEventListener("change", async () => {
+  const on = $<HTMLInputElement>("simulate").checked;
+  await chrome.storage.local.set({ simulate: on });
+  note("simNote", on ? "On. The RPC above will see each transaction Warden simulates." : "Off. No transaction leaves this browser.");
+  await load();
+});
+
 $("addSite").addEventListener("click", async () => {
   const origin = cleanOrigin($<HTMLInputElement>("site").value);
   if (!origin) return note("siteNote", "Type the site's address, like app.example.com", true);
-  const s = settingsFrom(await chrome.storage.local.get(["rpcUrl", "ringSites"]));
+  const s = settingsFrom(await chrome.storage.local.get([...KEYS]));
   if (!s.ringSites.includes(origin)) await chrome.storage.local.set({ ringSites: [...s.ringSites, origin] });
   $<HTMLInputElement>("site").value = "";
   note("siteNote", `${origin} may now ask. You will still be asked to confirm each time.`);

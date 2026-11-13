@@ -115,7 +115,7 @@
           <a class="btn solid" href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">Get the developer preview</a>
           <a class="btn" href="#doors">Which wallets it covers</a>
         </div>
-        <p class="status">Version 0.2. Open source. Not in the Chrome Web Store yet.</p>
+        <p class="status">Version 0.3. Open source. Not in the Chrome Web Store yet.</p>
       </div>
       <div class="stage" aria-label="What Warden shows when it blocks a request">
         <div class="card">
@@ -178,7 +178,8 @@
       <div>
         <h2>What leaves your browser.</h2>
         <p>There is no account, no Lamport server and no model. Your history stays in the extension's storage on your machine.</p>
-        <p>Warden makes one kind of network call. Most swaps name their accounts by position in a table stored on chain, and to say where the money goes Warden reads that table from a Solana RPC. The RPC learns which table was asked for and your IP address. It does not learn your wallet, the transaction or the site. You can point it at your own RPC, or turn it off.</p>
+        <p>By default Warden makes one kind of network call. Most swaps name their accounts by position in a table stored on chain, and to say where the money goes Warden reads that table from a Solana RPC. The RPC learns which table was asked for and your IP address, not your wallet, the transaction or the site. You can point it at your own RPC, or turn it off.</p>
+        <p>You can also turn on simulation. Warden then sends a swap, unsigned, to your RPC and tells you what would leave your wallet and what would arrive. The RPC sees that transaction, so it stays off until you choose it.</p>
       </div>
       <div>
         <h2>Advice, not a lock.</h2>

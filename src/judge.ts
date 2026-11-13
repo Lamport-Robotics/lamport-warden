@@ -8,6 +8,7 @@ import { PublicKey } from "@solana/web3.js";
 import { OwnerMemory, checkMessage, checkTransaction, recordConfirmed, type MemoryState, type WardenVerdict } from "../pincer1/daemon/src/warden/index.js";
 import { splitTransaction } from "../pincer1/daemon/src/tx/parse.js";
 import { tablesNeeded, type Tables } from "./rpc.js";
+import { READ_IN_FULL, wordsFor, type Simulated } from "./simulate.js";
 
 export interface Store {
   /** The stored history of one wallet address, or undefined. */
@@ -21,10 +22,17 @@ export interface JudgeRequest { kind: "tx" | "msg" | "opaque"; bytes: Uint8Array
 export interface Judged { verdict: WardenVerdict; owner: string; kind: JudgeRequest["kind"] }
 /** Reads the lookup tables a message needs. Absent: every request is judged without them. */
 export type TableSource = (messageBytes: Uint8Array) => Promise<Tables>;
+/**
+ * Runs the transaction against the chain as it is now. Null means the owner has simulation off: nothing was
+ * asked, and nothing is said about it. A failure to get an answer is different, and the owner is told.
+ */
+export type SimulationSource = (txBytes: Uint8Array, messageBytes: Uint8Array, owner: string, tables: Tables) => Promise<Simulated | null>;
+export interface Sources { tables?: TableSource; simulate?: SimulationSource }
 
 const ACK = { kind: "acknowledge", expect: "I understand" } as const;
 
-export async function judge(req: JudgeRequest, origin: string, store: Store, tables?: TableSource): Promise<Judged> {
+export async function judge(req: JudgeRequest, origin: string, store: Store, sources: Sources = {}): Promise<Judged> {
+  const { tables, simulate } = sources;
   if (req.kind === "opaque") {
     return { verdict: { level: "confirm", sentence: "This site asked your wallet to sign something in a form I can't read, so I can't tell you what it does.", reasons: ["the signing request is not in a form I know."], confirm: ACK }, owner: req.owner, kind: "opaque" };
   }
@@ -42,7 +50,24 @@ export async function judge(req: JudgeRequest, origin: string, store: Store, tab
   }
   const memory = OwnerMemory.from(await store.load(req.owner));
   const lookupTables: Tables = tables ? await tables(messageBytes).catch((): Tables => ({})) : {};
-  const verdict = checkTransaction({ bytes: messageBytes, owner: req.owner, memory, origin, privacyRings: "explain", lookupTables });
+  let verdict = checkTransaction({ bytes: messageBytes, owner: req.owner, memory, origin, privacyRings: "explain", lookupTables });
+  // A program the decoder does not read in full is where the rest of the story is: ask what the whole thing would do.
+  // Not for a request already blocked, and not for one made only of instructions that are read exactly.
+  if (simulate && verdict.level !== "block" && verdict.parsed && verdict.parsed.programs.some((p) => !READ_IN_FULL.has(p))) {
+    const sim = await simulate(req.bytes, messageBytes, req.owner, lookupTables).catch((): Simulated => ({ ok: false, why: "unavailable" }));
+    if (sim) {
+      const w = wordsFor(sim, { feeLamports: verdict.parsed.feeLamports, decodedLamportsOut: verdict.parsed.lamportsOut });
+      const rank = { allow: 0, explain: 1, confirm: 2, block: 3 } as const;
+      const level = rank[w.atLeast] > rank[verdict.level] ? w.atLeast : verdict.level;
+      verdict = {
+        ...verdict, level,
+        sentence: `${verdict.sentence} ${w.sentence}`,
+        reasons: [...w.reasons, ...verdict.reasons.filter((r) => r !== "nothing unusual." || w.reasons.length === 0)],
+        // a verdict raised to "confirm" here has nothing to retype but the acknowledgement
+        confirm: level === "confirm" ? verdict.confirm ?? ACK : verdict.confirm,
+      };
+    }
+  }
   // Accounts named through a table nobody could read are accounts nobody read: say so, and never wave it through.
   const unread = [...tablesNeeded(messageBytes).keys()].filter((k) => !lookupTables[k]);
   if (unread.length && verdict.level !== "block") {

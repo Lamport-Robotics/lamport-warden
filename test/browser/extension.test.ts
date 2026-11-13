@@ -6,7 +6,7 @@
  *   pnpm test:browser      (CHROMIUM_PATH=... to use a browser Playwright did not install)
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { AddressLookupTableAccount, Keypair, PublicKey, SystemProgram, Transaction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
+import { AddressLookupTableAccount, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import type { Page } from "playwright";
 import { Prompt, WALLETS, WARDEN, calls, launch, result, serve, settled, type Browser, type Site } from "./harness.js";
 
@@ -216,6 +216,50 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     expect(site.rpcCalls.length).toBe(calledBefore);
     await prompt.click("Cancel");
     await settled(page, "off");
+    await page.close();
+    await options.close();
+  });
+
+  it("simulates a call to a program it does not read, only once the owner turns that on", async () => {
+    const options = await browser.ctx.newPage();
+    await options.goto(`chrome-extension://${browser.extensionId}/options.html`);
+    await options.fill("#rpcUrl", `${site.origin}/rpc`);
+    await options.click("#saveRpc");
+    await expect.poll(() => options.textContent("#rpcNote")).toBe("Saved.");
+
+    // a swap on a program the decoder has no reading of: 1 SOL goes, 150 USDC arrive in a new account
+    const DEX = person(170), pool = person(171), usdcAccount = person(172 + order.indexOf(WARDEN));
+    const swap = [...new Transaction({ feePayer: owner.publicKey, recentBlockhash: BLOCKHASH }).add(new TransactionInstruction({ programId: DEX, keys: [{ pubkey: owner.publicKey, isSigner: true, isWritable: true }, { pubkey: pool, isSigner: false, isWritable: true }, { pubkey: usdcAccount, isSigner: false, isWritable: true }], data: Buffer.from([1, 2, 3]) })).serialize({ requireAllSignatures: false, verifySignatures: false })];
+    const SYSTEM = "11111111111111111111111111111111";
+    const me = owner.publicKey.toBase58();
+    site.setChain(
+      { [me]: { lamports: 3_000_000_000, owner: SYSTEM, data: ["", "base64"] } },
+      { [me]: { lamports: 1_997_955_720, owner: SYSTEM, data: ["", "base64"] }, [usdcAccount.toBase58()]: { lamports: 2_039_280, owner: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", data: { program: "spl-token", space: 165, parsed: { type: "account", info: { isNative: false, mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", owner: me, state: "initialized", tokenAmount: { amount: "150000000", decimals: 6 } } } } } },
+    );
+
+    const { page, prompt } = await open();
+    const sent = site.simulated.length;
+    await start(page, "off", "standard:FixturePhantom", "tx", swap);
+    const plain = await prompt.text(8000);
+    expect(plain?.sentence).not.toMatch(/simulat/i);
+    expect(site.simulated.length).toBe(sent); // off: the transaction went nowhere
+    await prompt.click("Cancel");
+    await settled(page, "off");
+
+    await options.check("#simulate");
+    await expect.poll(() => options.textContent("#simNote")).toMatch(/^On\./);
+    await start(page, "on", "standard:FixturePhantom", "tx", swap);
+    const shown = await prompt.text(8000);
+    expect(shown?.sentence).toMatch(/In a simulation just now, your wallet lost 1\.002 SOL \(fee included\) and gained 150 USDC\.$/);
+    expect(site.simulated.length).toBe(sent + 1);
+    expect(Buffer.from(site.simulated.at(-1)!, "base64")).toEqual(Buffer.from(swap));
+    await prompt.click("Continue to wallet");
+    expect(await settled(page, "on")).toBe("signed");
+    await page.waitForTimeout(300);
+    expect(site.simulated.length).toBe(sent + 1); // recording the signed send does not run it again
+
+    await options.uncheck("#simulate");
+    await expect.poll(() => options.textContent("#simNote")).toMatch(/^Off\./);
     await page.close();
     await options.close();
   });

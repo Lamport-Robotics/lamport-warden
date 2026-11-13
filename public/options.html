@@ -48,6 +48,11 @@
   <div class="row"><button class="go" id="saveRpc">Save</button></div>
   <p class="note" id="rpcNote" role="status"></p>
 
+  <h2>Simulating transactions</h2>
+  <p>Warden reads payments and token transfers exactly. A call to any other program, a swap for example, it can only name. With simulation on, Warden sends such a transaction, unsigned, to the RPC chosen above and asks what it would do, so it can tell you what would leave your wallet and what would arrive. The RPC sees the transaction, and the transaction names your wallet. That is why this is off until you turn it on.</p>
+  <label class="choice"><input type="checkbox" id="simulate"> <span>Simulate transactions that call programs Warden does not read</span></label>
+  <p class="note" id="simNote" role="status"></p>
+
   <h2>Sites allowed to ask for your Privacy Rings keys</h2>
   <p>A Privacy Rings wallet derives its keys from one signature. Whoever gets that signature can read your private balance and history for good. Warden blocks the request from every site that is not on this list, and asks you to confirm it on the ones that are.</p>
   <ul class="plain" id="sites"></ul>

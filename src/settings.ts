@@ -6,9 +6,14 @@ export interface Settings {
   rpcUrl: string;
   /** Origins allowed to ask for the Privacy Rings key signature. */
   ringSites: string[];
+  /** Simulate transactions that call programs the decoder does not read. Off unless turned on: it shows the RPC the transaction. */
+  simulate: boolean;
 }
 
-export const DEFAULTS: Settings = { rpcUrl: DEFAULT_RPC, ringSites: [] };
+/** The stored keys settingsFrom() reads. */
+export const KEYS = ["rpcUrl", "ringSites", "simulate"] as const;
+
+export const DEFAULTS: Settings = { rpcUrl: DEFAULT_RPC, ringSites: [], simulate: false };
 
 /** Only https, or http on this machine: the RPC's answer decides what Warden says a transaction does. */
 export function cleanRpcUrl(input: string): string | null {
@@ -34,5 +39,6 @@ export function settingsFrom(stored: Record<string, unknown>): Settings {
   return {
     rpcUrl: rpc ?? DEFAULTS.rpcUrl,
     ringSites: Array.isArray(stored.ringSites) ? stored.ringSites.filter((x): x is string => typeof x === "string") : [],
+    simulate: stored.simulate === true,
   };
 }

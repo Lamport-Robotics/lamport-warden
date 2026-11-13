@@ -69,13 +69,13 @@ describe("lookup tables", () => {
     const { fetchImpl, calls } = rpc([...filler, friend]);
     const reader = new TableReader(fetchImpl);
     const tables = (m: Uint8Array) => reader.forMessage(m, RPC);
-    const first = await judge({ kind: "tx", bytes: payThroughTable(friend, 0.5, [...filler, friend]), owner: OWNER }, "https://shop.example", store, tables);
+    const first = await judge({ kind: "tx", bytes: payThroughTable(friend, 0.5, [...filler, friend]), owner: OWNER }, "https://shop.example", store, { tables });
     expect(first.verdict.sentence).toMatch(/Sends 0\.5 SOL to /);
     expect(first.verdict.sentence).toMatch(/You've never paid /);
     expect(first.verdict.sentence).not.toMatch(/could not read/);
     await recordSigned(first, store, 1_794_000_000);
     expect(saved.get(OWNER)!.counterparties[friend.toBase58()]!.timesPaid).toBe(1);
-    await judge({ kind: "tx", bytes: payThroughTable(friend, 0.2, [...filler, friend]), owner: OWNER }, "https://shop.example", store, tables);
+    await judge({ kind: "tx", bytes: payThroughTable(friend, 0.2, [...filler, friend]), owner: OWNER }, "https://shop.example", store, { tables });
     expect(calls).toEqual([{ url: RPC, keys: [TABLE.toBase58()] }]); // the second time, from what it already read
   });
 
@@ -83,9 +83,9 @@ describe("lookup tables", () => {
     const { store } = memoryStore();
     const fake = lookalike(friend);
     const good = new TableReader(rpc([...filler, friend]).fetchImpl);
-    await recordSigned(await judge({ kind: "tx", bytes: payThroughTable(friend, 0.5, [...filler, friend]), owner: OWNER }, "https://shop.example", store, (m) => good.forMessage(m, RPC)), store, 1_794_000_000);
+    await recordSigned(await judge({ kind: "tx", bytes: payThroughTable(friend, 0.5, [...filler, friend]), owner: OWNER }, "https://shop.example", store, { tables: (m) => good.forMessage(m, RPC) }), store, 1_794_000_000);
     const bad = new TableReader(rpc([...filler, fake]).fetchImpl);
-    const v = await judge({ kind: "tx", bytes: payThroughTable(fake, 0.5, [...filler, fake]), owner: OWNER }, "https://evil.example", store, (m) => bad.forMessage(m, RPC));
+    const v = await judge({ kind: "tx", bytes: payThroughTable(fake, 0.5, [...filler, fake]), owner: OWNER }, "https://evil.example", store, { tables: (m) => bad.forMessage(m, RPC) });
     expect(v.verdict.level).toBe("block");
     expect(v.verdict.reasons.join(" ")).toMatch(/address poisoning/);
   });
@@ -98,7 +98,7 @@ describe("lookup tables", () => {
   ])("never waves a transaction through when %s", async (_why, makeFetch, url) => {
     const { store, saved } = memoryStore();
     const reader = new TableReader(makeFetch());
-    const v = await judge({ kind: "tx", bytes: payThroughTable(friend, 0.5, [...filler, friend]), owner: OWNER }, "https://shop.example", store, (m) => reader.forMessage(m, url));
+    const v = await judge({ kind: "tx", bytes: payThroughTable(friend, 0.5, [...filler, friend]), owner: OWNER }, "https://shop.example", store, { tables: (m) => reader.forMessage(m, url) });
     expect(v.verdict.level).not.toBe("allow");
     expect(v.verdict.sentence).toMatch(/I could not read all of the accounts it uses\.$/);
     expect(v.verdict.reasons.join(" ")).toMatch(/lookup table I could not read/);
@@ -144,7 +144,9 @@ describe("settings", () => {
   });
   it("reads stored settings, with defaults for what is missing or malformed", () => {
     expect(settingsFrom({})).toEqual(DEFAULTS);
-    expect(settingsFrom({ rpcUrl: "", ringSites: ["https://a.example", 5] })).toEqual({ rpcUrl: "", ringSites: ["https://a.example"] });
+    expect(settingsFrom({ rpcUrl: "", ringSites: ["https://a.example", 5] })).toEqual({ rpcUrl: "", ringSites: ["https://a.example"], simulate: false });
+    expect(settingsFrom({ simulate: true }).simulate).toBe(true);
+    expect(settingsFrom({ simulate: "yes" }).simulate).toBe(false); // on only when it was turned on
     expect(settingsFrom({ rpcUrl: "ftp://x" }).rpcUrl).toBe(DEFAULTS.rpcUrl);
   });
   it("turns what a person types into an origin", () => {

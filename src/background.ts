@@ -7,19 +7,34 @@
  */
 import "./polyfill.js";
 import { fromBase64 } from "./channel.js";
-import { judge, recordSigned, type Store } from "./judge.js";
+import { judge, recordSigned, type Sources, type Store } from "./judge.js";
 import { TableReader } from "./rpc.js";
-import { settingsFrom } from "./settings.js";
+import { KEYS, settingsFrom } from "./settings.js";
+import { Simulator } from "./simulate.js";
 import type { JudgeReply, ToBackground, WireRequest } from "./messages.js";
 import type { MemoryState } from "../pincer1/daemon/src/warden/index.js";
 
 const store: Store = {
   async load(owner) { const k = `memory:${owner}`; return (await chrome.storage.local.get(k))[k]; },
   async save(owner, state: MemoryState) { await chrome.storage.local.set({ [`memory:${owner}`]: state }); },
-  async ringSites() { return settingsFrom(await chrome.storage.local.get(["rpcUrl", "ringSites"])).ringSites; },
+  async ringSites() { return (await settings()).ringSites; },
 };
-const reader = new TableReader((url, init) => fetch(url, { ...init, credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer" }));
-const tables = async (messageBytes: Uint8Array) => reader.forMessage(messageBytes, settingsFrom(await chrome.storage.local.get(["rpcUrl", "ringSites"])).rpcUrl);
+const settings = async () => settingsFrom(await chrome.storage.local.get([...KEYS]));
+// no cookies, no cache, no referrer: the RPC gets the question and nothing about where it came from
+const plainFetch: ConstructorParameters<typeof TableReader>[0] = (url, init) => fetch(url, { ...init, credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer" });
+const reader = new TableReader(plainFetch);
+const simulator = new Simulator(plainFetch);
+const sources: Sources = {
+  tables: async (messageBytes) => reader.forMessage(messageBytes, (await settings()).rpcUrl),
+  simulate: async (txBytes, messageBytes, owner, tables) => {
+    const s = await settings();
+    // off, or no RPC to ask: nothing is sent, and nothing is said about it
+    if (!s.simulate || !s.rpcUrl) return null;
+    return simulator.run(txBytes, messageBytes, owner, tables, s.rpcUrl);
+  },
+};
+/** For recording a signed send: the same reading of the request, without asking the RPC to run it again. */
+const withoutSimulation: Sources = { tables: sources.tables };
 
 const valid = (r: any): r is WireRequest => !!r && (r.kind === "tx" || r.kind === "msg" || r.kind === "opaque") && typeof r.bytes === "string" && r.bytes.length < 200_000 && typeof r.owner === "string" && r.owner.length <= 64;
 const decode = (r: WireRequest) => ({ kind: r.kind, bytes: fromBase64(r.bytes), owner: r.owner });
@@ -30,14 +45,14 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, sendRespons
   const origin = sender.origin ?? (sender.url ? new URL(sender.url).origin : "");
   if (!message || !valid(message.req)) return false;
   if (message.type === "judge") {
-    judge(decode(message.req), origin, store, tables)
+    judge(decode(message.req), origin, store, sources)
       .then(({ verdict }) => sendResponse({ ok: true, verdict: { level: verdict.level, sentence: verdict.sentence, reasons: verdict.reasons, confirm: verdict.confirm } }))
       .catch((err) => { console.warn("Lamport Warden could not check a request", err); sendResponse({ ok: false }); });
     return true; // the answer comes later
   }
   if (message.type === "signed") {
     // judged again from the bytes: the verdict that let it through may have been made by a worker that is gone
-    judge(decode(message.req), origin, store, tables)
+    judge(decode(message.req), origin, store, withoutSimulation)
       .then((judged) => recordSigned(judged, store, Math.floor(Date.now() / 1000)))
       .catch((err) => console.warn("Lamport Warden could not save your history", err));
   }
