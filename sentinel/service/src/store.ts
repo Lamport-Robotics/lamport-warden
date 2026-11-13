@@ -10,6 +10,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { BaselineState } from "./baseline.js";
+import type { ChannelKind, Tier } from "./plans.js";
 import type { Level, SignalKind, TokenAccountState } from "./signals.js";
 
 export interface WatchedWallet {
@@ -61,8 +62,8 @@ const fresh = (): WalletRecord => ({ cursor: null, baseline: null, tokenAccounts
 /** One owner. No name and no email: an owner is whoever can sign with one of the profile's wallets. */
 export interface Profile {
   id: string;
-  /** Watch is free and only tells. Rescue may also act, once a wallet is armed. */
-  tier: "watch" | "rescue";
+  /** Watch is free. Pro is paid (plans.ts says what each gives). */
+  tier: Tier;
   createdAt: number;
   autoRescue: boolean;
   /** The subscription behind the paid tier, when there is one. Stripe holds the card and the email; this holds only its ids. */
@@ -75,7 +76,7 @@ export interface WalletOwner {
   paused?: boolean;
 }
 /** A way to reach an owner. The target is sealed (crypto.ts): the stored file alone does not say where alerts go. */
-export interface Channel { id: string; profile: string; kind: "ntfy"; target: string; hint: string; addedAt: number }
+export interface Channel { id: string; profile: string; kind: ChannelKind; target: string; hint: string; addedAt: number }
 export interface Session { tokenHash: string; profile: string; expiresAt: number }
 
 /** The service's own tables (accounts.ts reads and writes them). */

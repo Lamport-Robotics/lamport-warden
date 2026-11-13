@@ -7,7 +7,8 @@
  *   SENTINEL_DATA_DIR     where the one data file lives (default ./sentinel-data)
  *   SENTINEL_ORIGIN       the Sentinel page's origin (default https://warden.lamportrobotics.com)
  *   SENTINEL_PORT         the API's port on 127.0.0.1 (default 8791); a web server in front adds TLS
- *   SENTINEL_POLL_SECONDS how often every wallet is read (default 30)
+ *   SENTINEL_POLL_SECONDS how often a wallet on the free plan is read (default 60, as the plan says)
+ *   SENTINEL_PRO_POLL_SECONDS  how often a wallet on the paid plan is read (default 20, as the plan says)
  *   SENTINEL_NTFY_HOSTS   ntfy hosts alerts may go to, comma-separated (default ntfy.sh)
  *   SENTINEL_TRUST_PROXY  "1" when a proxy this process trusts sets X-Forwarded-For
  *   SENTINEL_MAX_WALLETS  how many wallets it watches in all (default 100): each costs RPC calls every round
@@ -27,13 +28,14 @@ import { Accounts } from "./accounts.js";
 import { Billing, Stripe, type BillingConfig } from "./billing.js";
 import { dataKeyFrom } from "./crypto.js";
 import { ChannelNotifier } from "./notify.js";
+import { PLANS } from "./plans.js";
 import { HttpRpc } from "./rpc.js";
 import { listen } from "./server.js";
 import { NonceBook } from "./signin.js";
 import { FileStore } from "./store.js";
 import { Watcher } from "./watcher.js";
 
-export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; maxWallets: number; ntfyHosts: Set<string>; trustProxy: boolean; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; ntfyHosts: Set<string>; trustProxy: boolean; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -65,15 +67,19 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   let origin: string;
   try { origin = new URL(env.SENTINEL_ORIGIN ?? "https://warden.lamportrobotics.com").origin; } catch { return { ok: false, why: "SENTINEL_ORIGIN has to be the Sentinel page's address." }; }
   const port = Number(env.SENTINEL_PORT ?? 8791);
-  const pollSeconds = Number(env.SENTINEL_POLL_SECONDS ?? 30);
+  const pollSeconds = Number(env.SENTINEL_POLL_SECONDS ?? PLANS.watch.pollSeconds);
+  // unless set, the paid plan's pace is the plan's own, or the free one's when that is already faster
+  const proPollSeconds = Number(env.SENTINEL_PRO_POLL_SECONDS ?? Math.min(PLANS.pro.pollSeconds, Number.isFinite(pollSeconds) ? pollSeconds : PLANS.pro.pollSeconds));
   if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, why: "SENTINEL_PORT has to be a port number." };
   if (!Number.isFinite(pollSeconds) || pollSeconds < 5) return { ok: false, why: "SENTINEL_POLL_SECONDS has to be 5 or more." };
+  // the paid plan is sold as the faster one: a setting that made it slower would make the page a lie
+  if (!Number.isFinite(proPollSeconds) || proPollSeconds < 5 || proPollSeconds > pollSeconds) return { ok: false, why: "SENTINEL_PRO_POLL_SECONDS has to be 5 or more, and no more than SENTINEL_POLL_SECONDS." };
   const maxWallets = Number(env.SENTINEL_MAX_WALLETS ?? 100);
   if (!Number.isInteger(maxWallets) || maxWallets < 1) return { ok: false, why: "SENTINEL_MAX_WALLETS has to be a whole number above zero." };
   const ntfyHosts = new Set((env.SENTINEL_NTFY_HOSTS ?? "ntfy.sh").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean));
   const billing = billingFrom(env, origin, rpcUrl);
   if (!billing.ok) return billing;
-  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, maxWallets, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", billing: billing.billing } };
+  return { ok: true, config: { rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", billing: billing.billing } };
 }
 
 /**
@@ -91,6 +97,26 @@ export function startRounds(round: () => Promise<void>, everySeconds: number, lo
   return () => { stopped = true; if (timer) clearTimeout(timer); };
 }
 
+/**
+ * Which wallets are due for a read, each at its plan's pace. `pick` answers for one wallet and remembers that
+ * it was tried; `tried` hands back the ones picked since it was last asked.
+ */
+export function pacer(tierOf: (wallet: string) => "watch" | "pro", seconds: { watch: number; pro: number }) {
+  const last = new Map<string, number>();
+  let picked: string[] = [];
+  return {
+    pick(wallet: string, now: number): boolean {
+      // a second of slack: a round that starts a moment early still counts
+      if (now - (last.get(wallet) ?? -Infinity) < seconds[tierOf(wallet)] - 1) return false;
+      last.set(wallet, now);
+      picked.push(wallet);
+      return true;
+    },
+    tried(): string[] { const t = picked; picked = []; return t; },
+    forget(keep: (wallet: string) => boolean): void { for (const w of last.keys()) if (!keep(w)) last.delete(w); },
+  };
+}
+
 export async function run(env: Record<string, string | undefined>): Promise<() => Promise<void>> {
   const read = configFrom(env);
   if (!read.ok) throw new Error(read.why);
@@ -101,13 +127,22 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const watcher = new Watcher(new HttpRpc(cfg.rpcUrl), store, notifier);
   const state = { lastPassAt: null as number | null, blind: 0 };
 
+  // each wallet at its plan's pace: the paid plan's more often
+  const pace = pacer((w) => accounts.profile(accounts.profileOf(w) ?? "")?.tier ?? "watch", { watch: cfg.pollSeconds, pro: cfg.proPollSeconds });
+  const blindNow = new Set<string>();
   const stopRounds = startRounds(async () => {
-    const { blind } = await watcher.passAll();
+    const now = Math.floor(Date.now() / 1000);
+    const { blind } = await watcher.passAll((w) => pace.pick(w, now));
+    for (const w of pace.tried()) blindNow.delete(w);
+    for (const b of blind) blindNow.add(b.wallet);
+    const watched = new Set(store.wallets().map((w) => w.address));
+    for (const w of blindNow) if (!watched.has(w)) blindNow.delete(w);
+    pace.forget((w) => watched.has(w));
     state.lastPassAt = Math.floor(Date.now() / 1000);
-    state.blind = blind.length;
+    state.blind = blindNow.size;
     // which wallet, and why, goes to the log and nowhere else
     for (const b of blind) console.error(`sentinel: could not read ${b.wallet.slice(0, 4)}..${b.wallet.slice(-4)}: ${b.why}`);
-  }, cfg.pollSeconds);
+  }, Math.min(cfg.pollSeconds, cfg.proPollSeconds));
 
   const billing = cfg.billing ? new Billing(cfg.billing, accounts, new HttpRpc(cfg.billing.holderRpcUrl), new Stripe(cfg.billing.secretKey)) : null;
   // once a day: whoever stopped holding the token moves to the full price from their next bill, and the other way round

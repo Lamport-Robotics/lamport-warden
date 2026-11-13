@@ -49,10 +49,11 @@
 
     <section>
       <h2>Where alerts go</h2>
-      <p class="plain">Alerts arrive as a push through <b>ntfy</b>, a free notification app that needs no account. Install it on your phone, subscribe to a topic with a long name nobody could guess, and give Sentinel that topic's address. Whoever knows the topic can read what is sent to it, so treat it like a password.</p>
+      <p class="plain">Alerts arrive as a push through <b>ntfy</b>, a free notification app that needs no account. Install it on your phone, subscribe to a topic with a long name nobody could guess, and give Sentinel that topic's address. Whoever knows the topic can read what is sent to it, so treat it like a password. On Pro, alerts can also go to a Discord or Slack channel through a webhook address that service gives you.</p>
       <ul class="rows" id="channels"></ul>
+      <p class="soft" id="channelLimit"></p>
       <div class="field">
-        <input type="url" id="ntfyTarget" placeholder="https://ntfy.sh/a-long-topic-name" spellcheck="false" autocomplete="off" aria-label="ntfy topic address">
+        <input type="url" id="ntfyTarget" placeholder="https://ntfy.sh/a-long-topic-name" spellcheck="false" autocomplete="off" aria-label="Where to send alerts">
         <button id="makeTopic">Make me a topic</button>
         <button class="solid" id="addChannel">Add</button>
       </div>

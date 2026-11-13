@@ -75,6 +75,10 @@
   .two h2 { font-size: clamp(28px, 2.8vw, 44px); }
   .two p { color: var(--dim); margin-bottom: 14px; max-width: 32em; }
   .two a { color: var(--bone); border-bottom: 1px solid var(--mute); }
+  .plans { margin-top: clamp(32px, 5vw, 64px); }
+  .plans ul { list-style: none; color: var(--dim); margin-bottom: 14px; max-width: 32em; }
+  .plans li { padding: 10px 0; border-top: 1px solid var(--line); }
+  .plans li.not { color: var(--care); }
   .foot { display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: center; padding: 28px var(--pad) 40px; border-top: 1px solid var(--line); font-size: 14px; color: var(--mute); }
   .foot nav { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-left: auto; }
   .foot a:hover { color: var(--bone); }
@@ -185,7 +189,28 @@
       <div>
         <h2>What it can and cannot do.</h2>
         <p>It tells you when a token account is handed to someone else, a payment goes to a look-alike address, or a spending permission appears that you did not give. An alert is a plain sentence with no link in it.</p>
-        <p>It cannot stop a thief who empties a wallet in a single transaction, and nobody watching can. Moving your tokens to safety for you is planned, and is not available yet.</p>
+        <p>It cannot stop a thief who empties a wallet in a single transaction, and nobody watching can.</p>
+      </div>
+    </div>
+    <div class="inner two plans">
+      <div>
+        <h2>Watch <span>is free.</span></h2>
+        <ul>
+          <li>3 wallets watched around the clock, each read every minute</li>
+          <li>Alerts in plain sentences, pushed to your phone through ntfy</li>
+          <li>"This was me", so it learns who you pay</li>
+        </ul>
+      </div>
+      <div>
+        <h2>Pro <span>is $15 a month.</span></h2>
+        <ul>
+          <li>10 wallets watched instead of 3</li>
+          <li>Each wallet read every 20 seconds instead of every minute</li>
+          <li>Up to 5 alert channels, including Discord and Slack, so a team sees an alert together</li>
+          <li>$10 a month, not $15, while a wallet in your profile holds 250,000 $LAMPORT</li>
+          <li class="not">Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs the vault and the rescue program on mainnet, and both are waiting on their audits. It joins Pro when they are, at the same price.</li>
+        </ul>
+        <p>A plan is started and cancelled on the Sentinel page, which says whether Pro is on sale yet. It is paid by card through Stripe.</p>
       </div>
     </div>
   </section>

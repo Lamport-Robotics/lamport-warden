@@ -11,7 +11,8 @@
  * behind Node's HTTP server and does the transport's part: size limits, JSON, CORS.
  */
 import { createServer, type IncomingMessage, type Server } from "node:http";
-import { Accounts, CHANNEL_LIMIT, WALLET_LIMIT, type Refusal } from "./accounts.js";
+import { Accounts, type Refusal } from "./accounts.js";
+import { PLANS } from "./plans.js";
 import { verifyStripeSignature, type Billing } from "./billing.js";
 import { addressBytes, looksLikeSignature } from "./crypto.js";
 import { NonceBook, verifySignIn } from "./signin.js";
@@ -96,8 +97,9 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
         // null until the first read: the page says "not watched yet" rather than nothing
         lastReadAt: store.record(address).lastSeenAt,
       })),
-      channels: accounts.channelsOf(profile).map((c) => ({ id: c.id, kind: c.kind, hint: c.hint })),
-      limits: { wallets: WALLET_LIMIT[p.tier], channels: CHANNEL_LIMIT },
+      // `active`: alerts go there now. A channel the plan does not cover stays listed, and unused.
+      channels: accounts.channelViews(profile),
+      limits: { wallets: PLANS[p.tier].wallets, channels: PLANS[p.tier].channels, kinds: PLANS[p.tier].kinds, pollSeconds: PLANS[p.tier].pollSeconds },
     };
   };
 
@@ -185,8 +187,8 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
     }
 
     if (route === "POST /channels") {
-      if (field(req.body, "kind") !== "ntfy") return no(400, "the only channel so far is ntfy.");
-      const r = accounts.addNtfy(session, field(req.body, "target"), t);
+      // what kind of channel it is, is read from the address itself, never taken from the caller
+      const r = accounts.addChannel(session, field(req.body, "target"), t);
       return r.ok ? ok(r.channel, 201) : refused(r);
     }
     if (req.method === "DELETE" && parts[1] === "channels" && parts[2] && parts.length === 3) {

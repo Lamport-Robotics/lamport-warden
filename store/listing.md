@@ -61,6 +61,23 @@ you in one sentence when something looks wrong. If you use it, you can let Warde
 signatures were yours, so it does not alert you about your own payments. That is off until you turn it on,
 and it sends only the wallet's address and the transaction's signature.
 
+Warden is free and stays free. Sentinel has two plans.
+
+Watch is free:
+• 3 wallets watched around the clock, each read every minute
+• Alerts in plain sentences, pushed to your phone through ntfy
+• "This was me", so it learns who you pay
+
+Pro is $15 a month, or $10 while a wallet in your Sentinel profile holds 250,000 $LAMPORT. It adds:
+• 10 wallets watched instead of 3
+• Each wallet read every 20 seconds instead of every minute
+• Up to 5 alert channels, including Discord and Slack, so a team sees an alert together
+
+Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs the vault and the rescue program on mainnet, and both are waiting on their audits. It joins Pro when they are, at the same price.
+
+A plan is started and cancelled on the Sentinel page (warden.lamportrobotics.com/sentinel), which says
+whether Pro is on sale. It is paid by card through Stripe; nothing is bought inside the extension.
+
 Warden is advice in front of your wallet, not a lock on it. A page can still reach a wallet in ways an
 extension never sees. It is open source: https://github.com/Lamport-Robotics/lamport-warden
 

@@ -51,7 +51,7 @@ describe.skipIf(!usable)("the paid plan against Stripe in test mode", () => {
       const sub = await call("POST", "/subscriptions", [["customer", customer.id], ["items[0][price]", made.priceHolder], ["metadata[profile]", profile]]);
       expect(sub.status).toBe("active");
       await billing.onEvent({ type: "customer.subscription.created", data: { object: { id: sub.id } } });
-      expect(accounts.profile(profile)).toMatchObject({ tier: "rescue", billing: { customer: customer.id, subscription: sub.id, price: "holder", status: "active" } });
+      expect(accounts.profile(profile)).toMatchObject({ tier: "pro", billing: { customer: customer.id, subscription: sub.id, price: "holder", status: "active" } });
       expect(await billing.quote(profile)).toMatchObject({ subscribed: true, price: "holder", cents: 1000 });
 
       // the tokens are sold: the next bill is at the full price, and Stripe says so itself

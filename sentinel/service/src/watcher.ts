@@ -209,11 +209,15 @@ export class Watcher {
     return { address, mint: String(info.mint), owner: String(info.owner), delegate: typeof info.delegate === "string" ? info.delegate : null, closeAuthority: typeof info.closeAuthority === "string" ? info.closeAuthority : null };
   }
 
-  /** One pass over every wallet. A wallet that could not be read is reported, and the others are still read. */
-  async passAll(): Promise<{ raised: StoredEvent[]; blind: { wallet: string; why: string }[] }> {
+  /**
+   * One pass over every wallet, or over the ones `only` picks. A wallet that could not be read is reported,
+   * and the others are still read.
+   */
+  async passAll(only?: (address: string) => boolean): Promise<{ raised: StoredEvent[]; blind: { wallet: string; why: string }[] }> {
     const raised: StoredEvent[] = [];
     const blind: { wallet: string; why: string }[] = [];
     for (const w of this.store.wallets()) {
+      if (only && !only(w.address)) continue;
       try { raised.push(...(await this.pass(w))); } catch (e) { blind.push({ wallet: w.address, why: String((e as Error).message ?? e) }); }
     }
     return { raised, blind };
