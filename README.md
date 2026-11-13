@@ -110,7 +110,17 @@ policy, also served at https://warden.lamportrobotics.com/privacy/. Run `pnpm te
 
 `sentinel/program` is the first piece of Warden Sentinel: the on-chain program that lets a rescue service move
 an owner's tokens into that owner's own Lamport Vault and nowhere else. Devnet only, not deployed. It has its
-own README, toolchain (Rust and Agave) and CI job; nothing in the extension uses it yet.
+own README, toolchain (Rust and Agave) and CI job.
+
+Arming Sentinel asks for exactly what Warden blocks: an unlimited approval to an address that is not a
+program, and transfers signed now to be sent later. `src/sentinel.ts` recognises Sentinel's own transactions
+by their exact shape and explains them, and only on the Sentinel page. From any other site, every call to the
+Sentinel program is blocked: the real program pointed at someone else's vault is a way to drain a wallet.
+Setting it up, or changing the vault, asks you to retype the end of the vault's address, because whoever holds
+that vault's 24 words receives a rescue.
+
+`sentinel/vectors/instructions.json` holds the program's instructions as bytes. The program's test suite
+writes that file and runs each instruction through the compiled program; Warden's tests read the same file.
 
 ## The engine is pinned
 

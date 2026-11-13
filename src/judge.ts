@@ -6,7 +6,8 @@
  */
 import { PublicKey } from "@solana/web3.js";
 import { OwnerMemory, checkMessage, checkTransaction, recordConfirmed, type MemoryState, type WardenVerdict } from "../pincer1/daemon/src/warden/index.js";
-import { splitTransaction } from "../pincer1/daemon/src/tx/parse.js";
+import { parseAnyMessage, splitTransaction, type ParsedTx } from "../pincer1/daemon/src/tx/parse.js";
+import { readSentinel, sentinelStateFrom, type SentinelState } from "./sentinel.js";
 import { tablesNeeded, type Tables } from "./rpc.js";
 import { READ_IN_FULL, wordsFor, type Simulated } from "./simulate.js";
 
@@ -16,10 +17,20 @@ export interface Store {
   save(owner: string, state: MemoryState): Promise<void>;
   /** Sites the owner allowed to ask for the Privacy Rings key signature. */
   ringSites(): Promise<string[]>;
+  /** What this browser saw of one wallet's Sentinel setup (sentinel.ts), or undefined. */
+  sentinel?(owner: string): Promise<unknown>;
+  /** Remembers it, or forgets it when `state` is null. */
+  saveSentinel?(owner: string, state: SentinelState | null): Promise<void>;
 }
 
 export interface JudgeRequest { kind: "tx" | "msg" | "signin" | "opaque"; bytes: Uint8Array; owner: string }
-export interface Judged { verdict: WardenVerdict; owner: string; kind: JudgeRequest["kind"] }
+export interface Judged {
+  verdict: WardenVerdict;
+  owner: string;
+  kind: JudgeRequest["kind"];
+  /** For a Sentinel transaction: what to remember of the owner's setup once it is signed (null: forget it). */
+  sentinelAfter?: SentinelState | null;
+}
 /** Reads the lookup tables a message needs. Absent: every request is judged without them. */
 export type TableSource = (messageBytes: Uint8Array) => Promise<Tables>;
 /**
@@ -51,6 +62,14 @@ export async function judge(req: JudgeRequest, origin: string, store: Store, sou
   }
   const memory = OwnerMemory.from(await store.load(req.owner));
   const lookupTables: Tables = tables ? await tables(messageBytes).catch((): Tables => ({})) : {};
+  // Sentinel's own transactions are the two things the engine exists to block, so they are read first, by
+  // their exact shape, and only then is anything else left to the engine (sentinel.ts).
+  let decoded: ParsedTx | null = null;
+  try { decoded = parseAnyMessage(messageBytes, { owner: req.owner, lookupTables }); } catch { decoded = null; }
+  if (decoded && decoded.signers.includes(req.owner)) {
+    const sentinel = readSentinel(decoded, req.owner, origin, sentinelStateFrom(await store.sentinel?.(req.owner)));
+    if (sentinel.kind === "verdict") return { verdict: sentinel.verdict, owner: req.owner, kind: "tx", sentinelAfter: sentinel.after };
+  }
   let verdict = checkTransaction({ bytes: messageBytes, owner: req.owner, memory, origin, privacyRings: "explain", lookupTables });
   // A program the decoder does not read in full is where the rest of the story is: ask what the whole thing would do.
   // Not for a request already blocked, and not for one made only of instructions that are read exactly.
@@ -110,6 +129,7 @@ export function checkSignIn(bytes: Uint8Array, origin: string): WardenVerdict {
  */
 export async function recordSigned(judged: Judged, store: Store, atUnix: number): Promise<void> {
   if (judged.kind !== "tx" || !judged.owner || !judged.verdict.parsed || judged.verdict.level === "block") return;
+  if (judged.sentinelAfter !== undefined) await store.saveSentinel?.(judged.owner, judged.sentinelAfter);
   const memory = OwnerMemory.from(await store.load(judged.owner));
   recordConfirmed(memory, judged.verdict.parsed, atUnix);
   await store.save(judged.owner, memory.toJSON());
