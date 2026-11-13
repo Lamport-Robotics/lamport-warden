@@ -3,7 +3,11 @@
 // run on a schedule from somewhere that is not the server (.github/workflows/sentinel-watch.yml), and a
 // failure there is the notice.
 //
-//   node scripts/check-live.mjs [health address]      exit 0: watching; exit 1: not, with one sentence why
+//   node scripts/check-live.mjs [health address] [--once]
+//
+// Exit 0: watching. Exit 1: it does not answer, or its watcher has stopped (starting it again may help).
+// Exit 3: it answers and cannot read any wallet (the RPC's trouble: starting it again will not help).
+// Either way, one sentence says why. --once asks a single time instead of three.
 const DEFAULT = 'https://warden.lamportrobotics.com/sentinel/api/v1/health';
 
 /** A round runs at least once a minute. Ten minutes without one is not a slow round. */
@@ -40,10 +44,17 @@ export async function ask(url, { tries = 3, waitMs = 20_000, fetchImpl = fetch, 
   return { ok: false, why: `the service did not answer in ${tries} tries (${last}).` };
 }
 
+/** True when what is wrong is that no wallet can be read, by a service that is otherwise doing its rounds. */
+export function isBlind(health, now) {
+  return !!health && health.ok === true && typeof health.lastPassAt === 'number' && now - health.lastPassAt <= STALE_AFTER_SECONDS && (Number(health.watching) || 0) > 0 && (Number(health.blind) || 0) >= (Number(health.watching) || 0);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const url = process.argv[2] || DEFAULT;
-  const answer = await ask(url);
-  const why = answer.ok ? wrongWith(answer.health, Math.floor(Date.now() / 1000)) : answer.why;
-  if (why) { console.error(`Sentinel is not watching: ${why}`); process.exit(1); }
+  const args = process.argv.slice(2);
+  const url = args.find((a) => !a.startsWith('--')) || DEFAULT;
+  const answer = await ask(url, args.includes('--once') ? { tries: 1 } : {});
+  const now = Math.floor(Date.now() / 1000);
+  const why = answer.ok ? wrongWith(answer.health, now) : answer.why;
+  if (why) { console.error(`Sentinel is not watching: ${why}`); process.exit(answer.ok && isBlind(answer.health, now) ? 3 : 1); }
   console.log(`Sentinel is watching: ${answer.health.watching} wallet(s), last round ${Math.floor(Date.now() / 1000) - answer.health.lastPassAt} s ago, ${answer.health.blind} unread, ${answer.health.late ?? 0} read later than promised, push ${answer.health.push ?? "off"}.`);
 }
