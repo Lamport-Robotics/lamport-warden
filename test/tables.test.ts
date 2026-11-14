@@ -144,7 +144,7 @@ describe("settings", () => {
   });
   it("reads stored settings, with defaults for what is missing or malformed", () => {
     expect(settingsFrom({})).toEqual(DEFAULTS);
-    expect(settingsFrom({ rpcUrl: "", ringSites: ["https://a.example", 5] })).toEqual({ rpcUrl: "", ringSites: ["https://a.example"], simulate: false, reportSigned: false });
+    expect(settingsFrom({ rpcUrl: "", ringSites: ["https://a.example", 5] })).toEqual({ rpcUrl: "", ringSites: ["https://a.example"], simulate: false, reportSigned: false, decoyFirst: false, decoyAddress: "" });
     expect(settingsFrom({ simulate: true }).simulate).toBe(true);
     expect(settingsFrom({ simulate: "yes" }).simulate).toBe(false); // on only when it was turned on
     expect(settingsFrom({ rpcUrl: "ftp://x" }).rpcUrl).toBe(DEFAULTS.rpcUrl);

@@ -2,7 +2,7 @@
 import { DEFAULT_RPC, PRACTICE_PAGE, SENTINEL_PAGE } from "./defaults.js";
 import { LINK_PREFIX, linkFrom } from "./sentinel-link.js";
 import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../sentinel/service/src/plans.js";
-import { KEYS, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
+import { KEYS, cleanAddress, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
 import type { MemoryState } from "../pincer1/daemon/src/warden/index.js";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -31,6 +31,12 @@ async function load() {
   const mode = s.rpcUrl === "" ? "off" : cleanRpcUrl(s.rpcUrl) === cleanRpcUrl(DEFAULT_RPC) ? "public" : "own";
   for (const r of document.querySelectorAll<HTMLInputElement>('input[name="rpc"]')) r.checked = r.value === mode;
   $<HTMLInputElement>("rpcUrl").value = mode === "own" ? s.rpcUrl : "";
+
+  // a decoy first
+  $<HTMLInputElement>("decoyFirst").checked = s.decoyFirst;
+  $<HTMLInputElement>("decoyAddress").value = s.decoyAddress;
+  if (s.decoyFirst && !s.decoyAddress) note("decoyNote", "On, and there is no decoy to show: give its address below. Until then every site is connected as always.", true);
+  else if (s.decoyFirst && s.rpcUrl === "") note("decoyNote", "On. The RPC is turned off above, so Warden cannot ask what the decoy holds: a thief is then caught by what it asks for, and not by how much.", true);
 
   // simulation
   $<HTMLInputElement>("simulate").checked = s.simulate;
@@ -148,6 +154,25 @@ $("simulate").addEventListener("change", async () => {
   const on = $<HTMLInputElement>("simulate").checked;
   await chrome.storage.local.set({ simulate: on });
   note("simNote", on ? "On. The RPC above will see each transaction Warden simulates." : "Off. No transaction leaves this browser.");
+  await load();
+});
+
+$("decoyFirst").addEventListener("change", async () => {
+  const on = $<HTMLInputElement>("decoyFirst").checked;
+  await chrome.storage.local.set({ decoyFirst: on });
+  // off, the record of which sites passed has no use: it is removed
+  if (!on) await chrome.storage.local.remove("decoyPassed");
+  note("decoyNote", on ? "On. A site you have not used is shown the decoy before your wallet." : "Off. Every site is connected to your wallet as always, and the record of which sites passed is removed.");
+  await load();
+});
+$("saveDecoy").addEventListener("click", async () => {
+  const typed = $<HTMLInputElement>("decoyAddress").value.trim();
+  const address = cleanAddress(typed);
+  if (typed !== "" && !address) return note("decoyNote", "That is not an address.", true);
+  // the sites that passed were judged against the old decoy: they are shown the new one once
+  await chrome.storage.local.set({ decoyAddress: address });
+  await chrome.storage.local.remove("decoyPassed");
+  note("decoyNote", address ? "Saved." : "Removed. There is no decoy to show.");
   await load();
 });
 

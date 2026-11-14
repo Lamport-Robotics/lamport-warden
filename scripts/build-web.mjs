@@ -54,4 +54,25 @@ await build({
 });
 await cp(join(tryPage, 'index.html'), join(tryDist, 'index.html'));
 await cp(join(tryPage, 'try.css'), join(tryDist, 'try.css'));
+
+// The pretend thief (site/try/thief): a page of its own, because a page that was caught gets nothing more.
+await mkdir(join(tryDist, 'thief'), { recursive: true });
+await build({
+  root,
+  configFile: false,
+  mode: 'production',
+  logLevel: 'warn',
+  publicDir: false,
+  define: { 'process.env.NODE_ENV': JSON.stringify('production') },
+  build: {
+    outDir: join(tryDist, 'thief'),
+    emptyOutDir: false,
+    target: 'es2022',
+    sourcemap: false,
+    minify: false,
+    modulePreload: false,
+    rollupOptions: { input: { thief: join(tryPage, 'src', 'thief.ts') }, output: { format: 'iife', name: 'warden_try_thief', entryFileNames: '[name].js', inlineDynamicImports: true } },
+  },
+});
+await cp(join(tryPage, 'thief', 'index.html'), join(tryDist, 'thief', 'index.html'));
 console.log('site/try/dist is ready');

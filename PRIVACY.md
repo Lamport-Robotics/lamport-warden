@@ -17,15 +17,20 @@ In the browser's extension storage on your machine, and nowhere else:
 - If you use Sentinel: for each wallet, the vault you chose for rescues, as this browser saw you set it up;
   and for each wallet you linked on the Sentinel page, the token that wallet reports with.
 - The names of wallet objects it could not guard, with the day each was last seen.
+- If you turn on the decoy experiment: the decoy's address, and a mark for each site that passed it (the
+  newest five hundred, with the day), so that a site you already use is not shown a decoy again. The mark is
+  worked out from the site's address and a number made up for this browser; it is not the address itself,
+  though someone who had this browser's storage could test whether a given site is on the list. Turning the
+  experiment off removes the list.
 
 The settings page shows all of it and can forget a wallet's history. Removing the extension removes it all.
 
-Warden does not keep the sites you visit or the requests it read.
+Warden does not keep the sites you visit or the requests it read, with the one exception above, which is yours to turn on.
 
 ## What leaves your browser
 
-Three kinds of request go to the Solana RPC chosen on the settings page. By default that is the public RPC at
-`api.mainnet-beta.solana.com`; it can be your own, or turned off. A fourth goes to Lamport, and only if you
+Four kinds of request go to the Solana RPC chosen on the settings page. By default that is the public RPC at
+`api.mainnet-beta.solana.com`; it can be your own, or turned off. A fifth goes to Lamport, and only if you
 turn it on.
 
 1. **Reading lookup tables.** When a transaction names its accounts through a table stored on chain, Warden
@@ -38,8 +43,11 @@ turn it on.
    tokens for rescue and this browser has no memory of that wallet's setup, Warden asks the RPC for the
    setup's account, to see which vault it names. The RPC receives that account's address, which is worked
    out from your wallet's address, and your IP address.
+4. **Reading what a decoy holds, only if you turn the decoy experiment on.** Warden asks the RPC what the
+   decoy you named holds, so that it can tell a site that asks the decoy for everything from one that asks
+   for a little. The RPC receives the decoy's address and your IP address, and nothing about your wallet.
 
-4. **Telling Sentinel a signature was yours, only if you turn it on.** Sentinel is Lamport's watching
+5. **Telling Sentinel a signature was yours, only if you turn it on.** Sentinel is Lamport's watching
    service. It sees only the chain, so it cannot tell a payment you made from one a thief made with your key.
    With "Tell Sentinel which signatures were mine" on, when a wallet you linked on the Sentinel page signs a
    transaction you let through, Warden sends the Sentinel service at `warden.lamportrobotics.com` that

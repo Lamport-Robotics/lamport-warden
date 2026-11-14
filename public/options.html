@@ -66,6 +66,14 @@
   <label class="choice"><input type="checkbox" id="simulate"> <span>Simulate transactions that call programs Warden does not read</span></label>
   <p class="note" id="simNote" role="status"></p>
 
+  <h2>A decoy first <span class="soft">(an experiment)</span></h2>
+  <p>Connecting a wallet to a site hands the site an address and nothing else. With this on, a site Warden has not seen before is handed a decoy's address first: one that holds something and that nobody here has a key to, so nothing it is asked to sign can be signed. A site that asks the decoy to give everything away is a thief, caught before it has seen your address. A site that does not is then connected to your own wallet, and asks again. It costs one more press the first time you use a site, and it only works with wallets that connect the newer way.</p>
+  <label class="choice"><input type="checkbox" id="decoyFirst"> <span>Show a decoy first to sites I have not used</span></label>
+  <div class="row"><input type="text" id="decoyAddress" spellcheck="false" autocomplete="off" placeholder="The decoy's address" aria-label="The decoy's address"><button id="saveDecoy">Save</button></div>
+  <p class="note">The decoy has to be an address that really holds something, or a thief that looks it up will see an empty wallet and leave it alone. Warden asks your RPC what it holds; the RPC learns the decoy's address, not yours. Never use an address you have the key to.</p>
+  <p class="note">So that a site you already use is not shown a decoy again, Warden keeps a mark for each site that passed, up to five hundred, in this browser and nowhere else. It is the one record Warden keeps of sites you used. Turning this off removes it.</p>
+  <p class="note" id="decoyNote" role="status"></p>
+
   <h2>Sites allowed to ask for your Privacy Rings keys</h2>
   <p>A Privacy Rings wallet derives its keys from one signature. Whoever gets that signature can read your private balance and history for good. Warden blocks the request from every site that is not on this list, and asks you to confirm it on the ones that are.</p>
   <ul class="plain" id="sites"></ul>

@@ -72,6 +72,45 @@ transaction, and the transaction names your wallet. A simulation is a reading of
 behave differently a block later, so it is worded as what a simulation showed, and it can only make a verdict
 stricter. A transaction made only of instructions Warden reads in full is never sent.
 
+## A decoy first (an experiment, off unless turned on)
+
+Connecting a wallet to a site hands the site an address and nothing else: nothing is signed. So the first
+address a site is handed does not have to be the owner's. With this on, a site Warden has not seen is handed
+a decoy's: an address that holds something and that nobody here has a key to, so that nothing it is asked to
+sign can be signed.
+
+A site that robs wallets looks up what the connected address holds and asks it to sign that away. A site
+that does not, waits for its visitor. So what a site asks the decoy for says what the site is, before it has
+seen the owner's address (`src/decoy.ts`):
+
+- it asks the decoy to let somebody spend its tokens, or to hand over an account: caught;
+- it asks the decoy to send out two or more different things at once, and nothing else: caught (a sweep);
+- it asks the decoy to send out nine tenths or more of what it holds of something: caught;
+- anything else: it passes. The owner's own wallet is connected in the decoy's place, the site is told the
+  accounts changed and to ask again, and Warden reads that request like any other.
+
+Try it with nothing at stake: `site/try/thief/` is a practice page that plays a thief (and, with `?honest`,
+a site that only wants to be paid) against a practice wallet that holds nothing. Warden always shows that
+one page the practice decoy. It is built by `pnpm build:web` and run in Chromium by
+`test/browser/decoy.test.ts`; it is not on the live site.
+
+What it is not, yet:
+
+- **It only adds a way of being caught.** A thief that recognises a decoy asks it for nothing, passes, and
+  then faces what every site faces: Warden reading each request made of the real wallet. A site that behaves
+  first and robs later is in the same place.
+- **The decoy has to be a real address that really holds something**, or a thief that looks it up sees an
+  empty wallet. There is no default: the owner names one in the settings, and it must be an address they
+  have no key to. Which addresses to offer, and whether to rotate them so that they cannot be listed, is
+  not decided.
+- **Wallet Standard only.** A site that reaches a wallet through its older injected object
+  (`window.solana`) is connected as always.
+- **One more press the first time a site is used**, because what the site built was built for the decoy.
+  Whether real sites take the change of account gracefully has been tried on the practice page and in
+  tests, not on real sites.
+- **It keeps a record it otherwise would not**: a mark for each site that passed, so that a site already in
+  use is not shown a decoy again (see the privacy policy). Off, nothing is kept and no wallet is touched.
+
 ## How it is put together
 
 | File | Where it runs | Job |
@@ -86,6 +125,7 @@ stricter. A transaction made only of instructions Warden reads in full is never 
 | `src/simulate.ts` | worker | Asks the RPC what a transaction would do, and reads the wallet's accounts before and after. |
 | `src/options.ts` | settings page | The RPC, simulation, the sites allowed to ask for Privacy Rings keys, and what Warden remembers. |
 | `src/channel.ts` | page and isolated | How the two halves on a page find each other without the page listening in. |
+| `src/decoy.ts` | worker | The decoy experiment: what a site asked a decoy for, and whether that is a robbery. Pure, tested in Node. |
 
 The only permission is `storage`.
 
