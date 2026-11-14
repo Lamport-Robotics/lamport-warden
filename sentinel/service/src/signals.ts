@@ -24,6 +24,8 @@ export type SignalKind =
   | "taken_by_permission" | "unexplained_loss"
   // more names the wallet than can be read (watcher.ts)
   | "watch_behind"
+  // Sentinel moved the wallet's armed tokens into its owner's vault (rescue.ts)
+  | "rescued"
   | "inbound_from_drainer" | "inbound_from_lookalike"
   // not about the wallet but about the watching of it (blindness.ts)
   | "watch_stopped" | "watch_resumed";

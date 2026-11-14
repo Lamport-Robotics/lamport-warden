@@ -18,12 +18,14 @@ export interface Plan {
   pollSeconds: number;
   /** Whether a wallet is also read at once when the network reports a transaction in it, ahead of its turn. */
   push: boolean;
+  /** Whether the plan has rescue. It is offered only where the service is set up to do one (rescue.ts). */
+  rescue: boolean;
 }
 
 export const PLANS: Record<Tier, Plan> = {
   // "telegram" is in both, and is offered only where the service has a Telegram bot to send through (telegram.ts)
-  watch: { name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy", "telegram"], pollSeconds: 60, push: false },
-  pro: { name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack", "telegram"], pollSeconds: 20, push: true },
+  watch: { name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy", "telegram"], pollSeconds: 60, push: false, rescue: false },
+  pro: { name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack", "telegram"], pollSeconds: 20, push: true, rescue: true },
 };
 
 /** The monthly prices, in cents, as the page shows them when the service has not said otherwise. */

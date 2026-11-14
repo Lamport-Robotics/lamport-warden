@@ -194,6 +194,17 @@ export class MemoryStore implements Store {
     this.data.wallets.push(wallet);
     this.persist();
   }
+  /**
+   * Notes which address, if any, the wallet has approved for Sentinel's rescue (rescue.ts reads it from the
+   * chain). The watcher takes what that address moves for a rescue and not for a theft. True when it changed.
+   */
+  setDelegate(address: string, delegate: string | null): boolean {
+    const w = this.data.wallets.find((x) => x.address === address);
+    if (!w || (w.sentinelDelegate ?? null) === delegate) return false;
+    if (delegate) w.sentinelDelegate = delegate; else delete w.sentinelDelegate;
+    this.persist();
+    return true;
+  }
   /** Stops reading a wallet without forgetting it: its record and alerts stay for when it is watched again. */
   unwatch(address: string): void {
     if (!this.data.wallets.some((w) => w.address === address)) return;
