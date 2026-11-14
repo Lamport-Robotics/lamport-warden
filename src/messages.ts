@@ -17,6 +17,13 @@ export type ToBackground =
   /** From the Sentinel page, and only from it: link or unlink a wallet for reporting, or ask what is linked. */
   | { type: "sentinel"; ask: PageAsk }
   /** Wallet doors on the page that could not be guarded, by the name they have on the window. */
-  | { type: "doors"; unguarded: string[] };
+  | { type: "doors"; unguarded: string[] }
+  /** Decoy first: may this page be shown a decoy before the owner's wallet, and which? */
+  | { type: "decoy-first" }
+  /** Decoy first: the page asked the decoy (`req.owner`) to sign this. Was that a robbery? */
+  | { type: "decoy-asked"; req: WireRequest };
 
 export type JudgeReply = { ok: true; verdict: WireVerdict } | { ok: false };
+export type DecoyFirstReply = { address: string | null };
+/** `caught`: the site asked the decoy for what only a thief asks. The verdict is what the owner is shown either way. */
+export type DecoyAskedReply = { ok: true; caught: boolean; verdict: WireVerdict } | { ok: false };

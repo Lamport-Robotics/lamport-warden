@@ -6,7 +6,7 @@ import { HANDSHAKE, HELLO, channelFor, newSecret, type DoneMessage, type DoorsMe
 import { ARMING_ORIGIN } from "./defaults.js";
 import { prompt } from "./overlay.js";
 import { PAGE_ASKS, WARDEN_ANSWERS, readPageAsk, type PageAnswer } from "./sentinel-link.js";
-import type { JudgeReply, ToBackground, WireRequest, WireVerdict } from "./messages.js";
+import type { DecoyAskedReply, DecoyFirstReply, JudgeReply, ToBackground, WireRequest, WireVerdict } from "./messages.js";
 
 const secret = newSecret();
 const channel = channelFor(secret);
@@ -39,6 +39,26 @@ window.addEventListener(channel.request, (e) => {
   try { m = JSON.parse(String((e as CustomEvent).detail)); } catch { return; }
   if (!m || typeof m.id !== "string" || !["tx", "msg", "signin", "opaque"].includes(m.kind) || typeof m.bytes !== "string") return;
   const req: WireRequest = { kind: m.kind, bytes: m.bytes, owner: String(m.owner ?? "") };
+  // Decoy first (decoy.ts). Whether this page is shown a decoy is the worker's to say; the top frame only.
+  if (m.decoy === "first") {
+    const none = () => reply({ id: m.id, ok: false });
+    if (window.top !== window) { none(); return; }
+    chrome.runtime.sendMessage({ type: "decoy-first" } satisfies ToBackground).then((r: DecoyFirstReply | undefined) => { if (r && typeof r.address === "string") reply({ id: m.id, ok: true, address: r.address }); else none(); }, none);
+    return;
+  }
+  // The page asked the decoy to sign something. The worker says whether that was a robbery; the owner is
+  // shown which, and for a site that passed chooses whether to go on with their own wallet.
+  if (m.decoy === "asked") {
+    queue = queue.then(async () => {
+      try {
+        const r = (await chrome.runtime.sendMessage({ type: "decoy-asked", req } satisfies ToBackground)) as DecoyAskedReply | undefined;
+        if (!r || !r.ok) { reply({ id: m.id, ok: false }); return; }
+        const go = await prompt(r.verdict, location.origin);
+        reply(r.caught ? { id: m.id, ok: true, caught: true } : { id: m.id, ok: go, caught: false });
+      } catch { reply({ id: m.id, ok: false }); }
+    });
+    return;
+  }
   // one prompt at a time, in the order the wallet was asked
   queue = queue.then(async () => {
     let ok = false;

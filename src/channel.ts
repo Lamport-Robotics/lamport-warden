@@ -45,8 +45,18 @@ export function newSecret(): string {
 export const toBase64 = (b: Uint8Array): string => { let s = ""; for (const x of b) s += String.fromCharCode(x); return btoa(s); };
 export const fromBase64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
-export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string }
+/**
+ * `decoy`: a question about the decoy instead of a request to sign (intercept.ts, DecoyGate). "first": may
+ * this page be shown a decoy, and which (kind, bytes and owner are empty). "asked": the site asked the decoy
+ * to sign this (owner is the decoy's address).
+ */
+export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string; decoy?: "first" | "asked" }
 export interface DoorsMessage { unguarded: string[] }
-export interface ReplyMessage { id: string; ok: boolean }
+/**
+ * For a signing request: `ok` lets it through. For "first": `address` is the decoy to show, when there is
+ * one. For "asked": `ok` false means the owner chose to stay as they are; otherwise `caught` says whether
+ * the site was caught.
+ */
+export interface ReplyMessage { id: string; ok: boolean; address?: string; caught?: boolean }
 /** `sigs`: for a signed transaction, the signatures in the wallet's answer, base64, first one first. */
 export interface DoneMessage { id: string; signed: boolean; sigs?: string[] }

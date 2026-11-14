@@ -3,7 +3,7 @@
  * reach, and asks the isolated-world half before a signing call goes through. No engine and no history here.
  */
 import { HANDSHAKE, HELLO, channelFor, toBase64, type Channel, type ReplyMessage } from "./channel.js";
-import { WardenRejected, installLegacyHook, installStandardHook, type Guard } from "./intercept.js";
+import { WardenRejected, installLegacyHook, installStandardHook, type DecoyGate, type Guard } from "./intercept.js";
 
 // our own references, taken before the page can replace them
 const add = window.addEventListener.bind(window);
@@ -12,7 +12,7 @@ const CE = window.CustomEvent;
 const randomId = () => { const b = new Uint8Array(16); crypto.getRandomValues(b); return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join(""); };
 
 let channel: Channel | null = null;
-const waiting = new Map<string, (ok: boolean) => void>();
+const waiting = new Map<string, (reply: ReplyMessage) => void>();
 
 add(HANDSHAKE, (e) => {
   // this listener was added before any page script ran, so it is first in line: no page listener ever sees a handshake
@@ -28,7 +28,7 @@ add(HANDSHAKE, (e) => {
     const resolve = m && typeof m.id === "string" ? waiting.get(m.id) : undefined;
     if (!resolve) return;
     waiting.delete(m.id);
-    resolve(m.ok === true);
+    resolve(m);
   });
 }, true);
 dispatch(new CE(HELLO));
@@ -38,15 +38,30 @@ const guard: Guard = async (req) => {
   if (!channel) return { done() {} };
   const ch = channel;
   const id = randomId();
-  const ok = await new Promise<boolean>((resolve) => {
+  const answer = await new Promise<ReplyMessage>((resolve) => {
     waiting.set(id, resolve);
     dispatch(new CE(ch.request, { detail: JSON.stringify({ id, kind: req.kind, bytes: toBase64(req.bytes), owner: req.owner }) }));
   });
-  if (!ok) throw new WardenRejected();
+  if (answer.ok !== true) throw new WardenRejected();
   return { done: (signed, signatures) => { dispatch(new CE(ch.done, { detail: JSON.stringify({ id, signed, ...(signed && signatures?.length ? { sigs: signatures.slice(0, 12).map(toBase64) } : {}) }) })); } };
 };
 
-installStandardHook(window, guard);
+/** Decoy first (decoy.ts): the two questions go to the other half the way a signing request does. Without it, there is no decoy. */
+const askDecoy = (what: "first" | "asked", kind: string, bytes: Uint8Array, owner: string): Promise<ReplyMessage> => {
+  if (!channel) return Promise.resolve({ id: "", ok: false });
+  const ch = channel;
+  const id = randomId();
+  return new Promise<ReplyMessage>((resolve) => {
+    waiting.set(id, resolve);
+    dispatch(new CE(ch.request, { detail: JSON.stringify({ id, kind, bytes: toBase64(bytes), owner, decoy: what }) }));
+  });
+};
+const decoyGate: DecoyGate = {
+  first: async () => { const a = await askDecoy("first", "opaque", new Uint8Array(0), ""); return a.ok === true && typeof a.address === "string" ? a.address : null; },
+  asked: async (req) => { const a = await askDecoy("asked", req.kind, req.bytes, req.owner); if (a.ok !== true) throw new WardenRejected(); return a.caught === true; },
+};
+
+installStandardHook(window, guard, decoyGate);
 
 // Injected providers arrive whenever the wallet's own script runs: at document_start beside this one, or later
 // from a script tag. There is no event for it, so the window is looked at again at every moment a page script

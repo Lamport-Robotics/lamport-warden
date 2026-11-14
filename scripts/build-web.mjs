@@ -54,4 +54,5 @@ await build({
 });
 await cp(join(tryPage, 'index.html'), join(tryDist, 'index.html'));
 await cp(join(tryPage, 'try.css'), join(tryDist, 'try.css'));
+
 console.log('site/try/dist is ready');

@@ -19,8 +19,17 @@ const txObject = (a: number[], versioned: boolean) => (versioned ? { version: 0,
 const results: Record<string, string> = {};
 w.__results = results;
 
+const standard = (door: string, feature = "standard:connect"): any => wallets.get().find((x) => x.name === door.slice(9) && feature in x.features);
+
 w.__app = {
   names: () => wallets.get().map((x) => x.name),
+  /** Connects the way a site does, and files the address it was handed under `tag` (or the error's name). */
+  connect(tag: string, door: string) {
+    results[tag] = "pending";
+    standard(door).features["standard:connect"].connect().then((r: any) => { results[tag] = String(r?.accounts?.[0]?.address ?? "none"); }, (e: any) => { results[tag] = String(e?.name ?? e); });
+  },
+  /** The addresses the wallet lists as its accounts now. */
+  accounts: (door: string): string[] => [...(standard(door)?.accounts ?? [])].map((a: any) => String(a.address)),
   count: (name: string) => wallets.get().filter((x) => x.name === name).length,
   /** Starts a signing call and files how it ended under `tag`: "signed", or the error's name. */
   start(tag: string, door: string, kind: "tx" | "msg" | "send" | "all" | "request" | "signin", payload: any, versioned = false) {
