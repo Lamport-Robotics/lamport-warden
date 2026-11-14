@@ -176,6 +176,50 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
       }
     });
 
+    it("does the same at the wallet's older door, the object on the window, and leaves the wallet's own picture of itself alone", async (ctx) => {
+      const olderDoors = wallet.guarded.filter((d) => !d.startsWith("standard:"));
+      if (olderDoors.length === 0) { ctx.skip(); return; } // Solflare: nothing can be put in front of window.solflare (the known gap below)
+      let worker = browser.ctx.serviceWorkers()[0]!;
+      for (const w of browser.ctx.serviceWorkers()) { if (await w.evaluate(() => chrome.runtime.getManifest().name).then((n) => /Warden/.test(n), () => false)) worker = w; }
+      site.setHoldings(DECOY.toBase58(), 12_000_000_000, [{ account: ata(DECOY).toBase58(), mint: USDC.toBase58(), amount: "900000000", decimals: 6 }]);
+      await worker.evaluate(([rpcUrl, decoyAddress]) => chrome.storage.local.set({ decoyFirst: true, decoyAddress, rpcUrl }), [`${site.origin}/rpc`, DECOY.toBase58()] as const);
+      try {
+        for (const door of olderDoors) {
+          const fresh = await browser.ctx.newPage();
+          try {
+            await fresh.goto(`${site.origin}/`);
+            await fresh.waitForFunction(() => !!(window as any).__app);
+            await fresh.waitForTimeout(3000); // wallets that load their script from a tag
+            const pagesBefore = browser.ctx.pages().length;
+            await fresh.evaluate((d) => (window as any).__app.listen(d), door);
+            await fresh.evaluate((d) => (window as any).__app.connectOlder("c", d), door);
+            // the decoy, by connect, by what the provider says its account is, and by the event a site listens for
+            expect(await settled(fresh, "c", 10_000)).toBe(DECOY.toBase58());
+            expect(await fresh.evaluate((d) => (window as any).__app.older(d), door)).toEqual({ key: DECOY.toBase58(), connected: true });
+            expect(await fresh.evaluate(() => (window as any).__heard)).toEqual([`connect:${DECOY.toBase58()}`]);
+            // the wallet's Wallet Standard wallet listens to this same provider: it was told nothing, and still lists nobody
+            expect(await fresh.evaluate((d) => (window as any).__app.accounts(d), wallet.guarded[0]!)).toEqual([]);
+            expect(browser.ctx.pages().length).toBe(pagesBefore);
+            await fresh.evaluate(([d, t]) => (window as any).__app.start("rob", d, "tx", t), [door, everything] as const);
+            const warden = await Prompt.on(fresh);
+            const caught = await warden.text(10_000);
+            expect(caught?.tag).toBe("Lamport Warden · Blocked");
+            expect(caught?.sentence).toContain("it asked the decoy to send out 11.99 SOL, of the 12 SOL it holds and 900 USDC, all it holds.");
+            await warden.click("Close");
+            expect(await settled(fresh, "rob")).toBe("WardenRejected");
+            // caught at this door, the page gets nothing through the wallet's other one either
+            await fresh.evaluate((d) => (window as any).__app.connect("c2", d), wallet.guarded[0]!);
+            expect(await settled(fresh, "c2", 10_000)).toBe("WardenRejected");
+            expect(browser.ctx.pages().length).toBe(pagesBefore); // the wallet's own window never opened
+            expect(await fresh.evaluate(() => (window as any).__errors)).toEqual([]);
+            console.log(`${wallet.name} ${version}: decoy shown and robbery caught at window.${door}`);
+          } finally { await fresh.close(); }
+        }
+      } finally {
+        await worker.evaluate(() => chrome.storage.local.remove(["decoyFirst", "decoyAddress", "decoyPassed"]));
+      }
+    });
+
     it.each(wallet.gap)("known gap: %s goes to the wallet without Warden", async (door) => {
       await page.evaluate(([d, t]) => (window as any).__app.start(d, d, "msg", t), [door, text] as const);
       expect(await prompt.text(2000)).toBeNull(); // when this fails the gap has closed: move the door to `guarded`

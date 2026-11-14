@@ -68,7 +68,7 @@ installStandardHook(window, guard, decoyGate);
 // could be about to run or a person could be about to click: while the document is parsed (the observer's
 // callback runs before the next parser-inserted script does), on the load events, on every pointer and key
 // press before the page's own handlers, and on a slow timer.
-const legacy = installLegacyHook(window as unknown as Record<string, any>, guard);
+const legacy = installLegacyHook(window as unknown as Record<string, any>, guard, undefined, undefined, decoyGate);
 let told = "";
 const sweep = () => {
   try { legacy.sweep(); } catch { /* a page that booby-traps its globals only loses the guard on them */ }

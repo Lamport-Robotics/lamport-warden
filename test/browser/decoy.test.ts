@@ -34,7 +34,7 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
   const forget = () => browser.ctx.serviceWorkers().find((w) => w.url().endsWith("/background.js"))!.evaluate(() => chrome.storage.local.remove("decoyPassed"));
   const open = async (only: string): Promise<{ page: Page; prompt: Prompt }> => {
     const page = await browser.ctx.newPage();
-    await page.goto(`${site.origin}/?only=${only}`);
+    await page.goto(`${site.origin}/?only=${only}&fresh=1`);
     await page.waitForFunction(() => !!(window as any).__app);
     return { page, prompt: await Prompt.on(page) };
   };
@@ -122,6 +122,84 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     expect(await calls(next.page)).toEqual([`${door}.connect`]);
     await next.page.close();
   });
+
+  // ---- the older door: the object the wallet puts on the window, which a site (or a thief's script) can call directly
+  const OLDER: [string, string, string][] = [["phantom", "solana", "solana"], ["phantom", "phantom.solana", "solana"], ["backpack", "backpack.solana", "backpack"], ["backpack", "backpack", "backpack"]];
+  const connectOlder = async (page: Page, door: string, tag: string) => { await page.evaluate(([t, d]) => (window as any).__app.connectOlder(t, d), [tag, door] as const); return settled(page, tag, 10_000); };
+  const older = (page: Page, door: string): Promise<{ key: string | null; connected: unknown }> => page.evaluate((d) => (window as any).__app.older(d), door);
+  const heard = (page: Page): Promise<string[]> => page.evaluate(() => (window as any).__heard ?? []);
+
+  it.each(OLDER)("catches a site that robs the decoy through %s's older door (window.%s), and shuts every door of the page", async (only, door, recorded) => {
+    await forget();
+    const { page, prompt } = await open(only);
+    await page.evaluate((d) => (window as any).__app.listen(d), door);
+    // connect answers with the decoy, the provider says the decoy is its account, and the site's listener is told so
+    expect(await connectOlder(page, door, "c")).toBe(DECOY.toBase58());
+    expect(await older(page, door)).toEqual({ key: DECOY.toBase58(), connected: true });
+    expect(await heard(page)).toEqual([`connect:${DECOY.toBase58()}`]);
+    expect(await calls(page)).toEqual([]); // the wallet itself was never asked to connect
+    // and its Wallet Standard wallet, which follows the provider, was told nothing of a decoy
+    const standard = `standard:Fixture${only[0]!.toUpperCase()}${only.slice(1)}`;
+    expect(await accounts(page, standard)).toEqual([]);
+
+    await start(page, "rob", door, "tx", everything);
+    const caught = await prompt.text(10_000);
+    expect(caught?.tag).toBe("Lamport Warden · Blocked");
+    expect(caught?.sentence).toBe("This site tried to rob a wallet that is not yours. I showed it a decoy before your own wallet, and it asked the decoy to send out 11.99 SOL, of the 12 SOL it holds and 900 USDC, all it holds.");
+    await prompt.click("Close");
+    expect(await settled(page, "rob")).toBe("WardenRejected");
+    // nothing more, through this door or the wallet's other one
+    await start(page, "more", door, "msg", [1, 2, 3]);
+    expect(await settled(page, "more")).toBe("WardenRejected");
+    expect(await connectOlder(page, door, "c2")).toBe("WardenRejected");
+    expect(await connect(page, standard, "c3")).toBe("WardenRejected");
+    expect(await prompt.shown()).toBe(false);
+    expect(await calls(page)).toEqual([]);
+    expect(await page.evaluate(() => (window as any).__errors)).toEqual([]);
+    expect(recorded).toBeTruthy();
+    await page.close();
+  });
+
+  it.each(OLDER)("gets out of an ordinary site's way at %s's older door (window.%s): the wallet takes the decoy's place and the site hears its account changed", async (only, door, recorded) => {
+    await forget();
+    const SHOP = person(70 + OLDER.findIndex((o) => o[1] === door) + (order[0] === WARDEN ? 0 : 20));
+    const { page, prompt } = await open(only);
+    await page.evaluate((d) => (window as any).__app.listen(d), door);
+    expect(await connectOlder(page, door, "c")).toBe(DECOY.toBase58());
+    await start(page, "pay", door, "tx", pay(DECOY, SHOP, 500_000_000n));
+    const passed = await prompt.text(10_000);
+    expect(passed?.tag).toBe("Lamport Warden · Before you sign");
+    expect(passed?.sentence).toContain("what it asked the decoy to sign is not a robbery");
+    expect(await calls(page)).toEqual([]);
+    await prompt.click("Continue to wallet");
+    // the wallet is connected now, and the site is told to ask again: what it built was built for the decoy
+    expect(await settled(page, "pay")).toBe("WardenRejected");
+    expect(await calls(page)).toEqual([`${recorded}.connect`]);
+    expect(await older(page, door)).toEqual({ key: OWNER.toBase58(), connected: true });
+    expect(await heard(page)).toEqual([`connect:${DECOY.toBase58()}`, `connect:${OWNER.toBase58()}`, `accountChanged:${OWNER.toBase58()}`]);
+    await start(page, "again", door, "tx", pay(OWNER, SHOP, 500_000_000n));
+    const asked = await prompt.text(10_000);
+    expect(asked?.sentence).toContain("0.5 SOL");
+    expect(asked?.sentence).not.toContain("decoy");
+    await prompt.click("Continue to wallet");
+    expect(await settled(page, "again")).toBe("signed");
+    expect(await calls(page)).toEqual([`${recorded}.connect`, `${recorded}.signTransaction`]);
+    expect(await page.evaluate(() => (window as any).__errors)).toEqual([]);
+    await page.close();
+  });
+
+  it.each(["FixturePhantom", "FixtureSolflare", "FixtureBackpack"])("shows no decoy to a site %s already trusts: that site has its address already", async (name) => {
+    await forget();
+    const door = `standard:${name}`;
+    // (without fresh=1 the stand-in wallets are connected from the start, as a wallet is on a site it trusts)
+    const page = await browser.ctx.newPage();
+    await page.goto(`${site.origin}/?only=${name.slice(7).toLowerCase()}`);
+    await page.waitForFunction(() => !!(window as any).__app);
+    expect(await accounts(page, door)).toEqual([OWNER.toBase58()]);
+    expect(await connect(page, door, "c")).toBe(OWNER.toBase58());
+    expect(await accounts(page, door)).toEqual([OWNER.toBase58()]);
+    await page.close();
+  });
 });
 
 describe("off unless turned on", () => {
@@ -131,7 +209,7 @@ describe("off unless turned on", () => {
 
   it("shows no site a decoy in a new install: the wallet is connected as always, and nothing about the site is kept", async () => {
     const page = await browser.ctx.newPage();
-    await page.goto(`${site.origin}/?only=phantom`);
+    await page.goto(`${site.origin}/?only=phantom&fresh=1`);
     await page.waitForFunction(() => !!(window as any).__app);
     const door = "standard:FixturePhantom";
     await page.evaluate((d) => (window as any).__app.connect("c", d), door);
