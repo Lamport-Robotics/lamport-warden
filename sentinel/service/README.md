@@ -693,8 +693,19 @@ own is rescued by it and no longer by Lamport's; and that a proposed change of v
 the vault program is stood in for, and the rescue program never calls it. CI runs it in the job that builds
 the program.
 
+`rescue.realvault.test.ts` goes one step further than a stand-in can: both compiled programs on a local
+validator, the vault program being the one that is deployed on devnet, fetched byte for byte as the
+validator starts (`LAMPORT_VAULT_FROM=devnet`), and the vault made and spent from with the vault's own SDK
+and hash-based key. It shows that the rescue program accepts a vault the vault program made; that what is
+rescued lands in it and the vault's owner signs it out again to a wallet of their choosing, for a Token and
+for a Token-2022 token; that a vault whose key was rotated is still the same vault to a rescue; and that a
+closed vault is sent nothing. It needs the Lamport Vault repository beside this one, so CI does not run it;
+it was run by hand on 2026-11-13 against the devnet program and all five passed.
+
 What rescue still lacks: a process and a key (nothing runs the rescuer yet), a way to arm a wallet on the
-page, SOL (the rescue program moves tokens only), and a chain to run on. The program is not on devnet: the
+page, SOL (the rescue program moves tokens only), and a chain to run on. Neither program is on mainnet: the
+vault is on devnet only, and its own README says not to put real money in it. Rescue cannot be offered
+before both are there, whatever else is ready. The program is not on devnet: the
 devnet faucet no longer answers the command line, so the deploy key
 (`BgWwL1UVqA8NNMwB68G8t7BuG9a7yR9WApfZrCgy3wBT`) needs about 4 test SOL from https://faucet.solana.com.
 
