@@ -112,6 +112,10 @@ export interface WatchContext {
   tokenAccounts?: Readonly<Record<string, TokenAccountState>>;
   /** Holders of a permission whose takings the owner has said were theirs (a marketplace selling what they listed). */
   trustedTakers?: ReadonlySet<string>;
+  /** True while the owner is taking the rescue setup away through the Sentinel page: the permissions going is then their doing. */
+  disarming?: boolean;
+  /** The rescues this service sent itself, by signature: those it has already told the owner of. */
+  ownRescues?: { has(signature: string): boolean };
 
 }
 
@@ -138,7 +142,8 @@ function finish(signals: Signal[], oddHour: boolean, ownerSigned: boolean): Asse
     level: out.length ? out[0]!.level : null,
     signals: out,
     sentence: out[0]?.sentence ?? "",
-    rescueWorthy: out.some((s) => s.level === "urgent" && s.byTable && !s.soft),
+    // a rescue that has happened is not a reason for another
+    rescueWorthy: out.some((s) => s.level === "urgent" && s.byTable && !s.soft && s.kind !== "rescued"),
   };
 }
 
@@ -167,6 +172,8 @@ export function assessTransaction(tx: ObservedTx, ctx: WatchContext): Assessment
     // and its tokens can be taken by one: a transaction that could not be read is not said to be unsigned
     const taken = parsed ? takenSignal(tx, parsed.signers, ctx) : null;
     if (taken) out.push(taken);
+    const rescued = rescuedSignal(tx, ctx);
+    if (rescued) out.push(rescued);
     return finish(out, false, false);
   }
 
@@ -250,7 +257,9 @@ export function assessTokenAccount(before: TokenAccountState | null, after: Toke
     if (ctx.sentinelDelegate && before.delegate === ctx.sentinelDelegate && after.delegate !== ctx.sentinelDelegate && after.owner === ctx.wallet) {
       const to = after.delegate;
       const reviewed = !!to && !!ctx.reviewedPrograms?.has(to);
-      out.push(signal(
+      // the owner is taking the setup away on the Sentinel page: it is noted, and is no alarm
+      if (!to && ctx.disarming) out.push(signal("delegate_replaced", "info", false, `Sentinel's permission on your ${tokenName(after.mint)} account was removed, as asked for on the Sentinel page.`));
+      else out.push(signal(
         "delegate_replaced",
         reviewed ? "alert" : "urgent",
         false,
@@ -304,17 +313,32 @@ function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, 
 }
 
 /**
+ * Tokens left the wallet under the permission it gave for rescue, in a transaction this service did not send.
+ * Only the rescue program can use that permission, and it moves an account to one place: the vault the
+ * wallet's setup names. So this is a rescue, started by someone else who may start one (another of Lamport's
+ * rescuer keys, or the key the setup names). The owner hears of it all the same: nothing leaves a watched
+ * wallet unsaid, and a setup the owner did not make would look exactly like this.
+ */
+function rescuedSignal(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts" | "ownRescues">): Signal | null {
+  if (!ctx.sentinelDelegate || ctx.ownRescues?.has(tx.signature)) return null;
+  const moved = tokenLossesOf(tx, ctx.wallet).filter((l) => ctx.tokenAccounts?.[l.account]?.delegate === ctx.sentinelDelegate);
+  if (moved.length === 0) return null;
+  const what = listed(moved.slice(0, 3).map((l) => fmtToken(l.lost, l.mint, { decimals: l.decimals })), Math.max(0, moved.length - 3));
+  return signal("rescued", "urgent", false, `${what} left your wallet in a rescue that Sentinel did not start from here. A rescue can only go into the Lamport Vault this wallet is set up for, and only that vault's key can move it on. If you did not set this wallet up for rescue, or that vault is not yours, treat the wallet as compromised.`);
+}
+
+/**
  * A transaction found on one of the wallet's token accounts, which the wallet did not sign: what it took, if
  * it took anything. One that does not name the wallet is certainly not the wallet's. One that names it is
  * judged by who signed, and when that cannot be read nothing is said. (Such a transaction is also in the
  * wallet's own list and `assessTransaction` says the same of it there; the watcher tells of it once.)
  */
-export function assessTaken(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts" | "trustedTakers">): Assessment {
+export function assessTaken(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts" | "trustedTakers" | "ownRescues">): Assessment {
   if (tx.failed) return finish([], false, false);
   const signers = signersOf(tx);
   if (accountKeys(tx).includes(ctx.wallet) && (signers.length === 0 || signers.includes(ctx.wallet))) return finish([], false, false);
-  const taken = takenSignal(tx, signers, ctx);
-  return finish(taken ? [taken] : [], false, false);
+  const taken = takenSignal(tx, signers, ctx), rescued = rescuedSignal(tx, ctx);
+  return finish([...(taken ? [taken] : []), ...(rescued ? [rescued] : [])], false, false);
 }
 
 /** The same assessment without one kind of signal: for something the owner was already told. */

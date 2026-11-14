@@ -135,6 +135,15 @@ export class Accounts {
     this.enforce(profile);
   }
 
+  /** Whether a rescue may be started without the owner asking (rescue.ts). True when it changed. */
+  setAutoRescue(profile: string, on: boolean): boolean {
+    const p = this.profile(profile);
+    if (!p || p.autoRescue === on) return false;
+    p.autoRescue = on;
+    this.store.flush();
+    return true;
+  }
+
   setBilling(profile: string, billing: Profile["billing"] | null): void {
     const p = this.profile(profile);
     if (!p) return;

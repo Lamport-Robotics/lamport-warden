@@ -127,14 +127,14 @@ class Chain implements Rpc {
 }
 
 /** A wallet that has been read and looked at once, with the token accounts a test gives it. */
-async function watched(build: (chain: Chain) => void, opts: { sentinelDelegate?: string; drainers?: string[]; ownListPagesInAll?: number } = {}) {
+async function watched(build: (chain: Chain) => void, opts: { sentinelDelegate?: string; drainers?: string[]; ownListPagesInAll?: number; ownRescues?: Set<string> } = {}) {
   const chain = new Chain();
   build(chain);
   const store = new MemoryStore([{ address: W, ...(opts.sentinelDelegate ? { sentinelDelegate: opts.sentinelDelegate } : {}) }]);
   let now = T0;
   const told: { level: string; sentence: string }[] = [];
   const notifier: Notifier = { notify: async (_w, level, sentence) => { told.push({ level, sentence }); } };
-  const make = () => new Watcher(chain, store, notifier, { now: () => now, ...(opts.drainers ? { drainers: new Set(opts.drainers) } : {}), ...(opts.ownListPagesInAll ? { ownListPagesInAll: opts.ownListPagesInAll } : {}) });
+  const make = () => new Watcher(chain, store, notifier, { now: () => now, ...(opts.drainers ? { drainers: new Set(opts.drainers) } : {}), ...(opts.ownListPagesInAll ? { ownListPagesInAll: opts.ownListPagesInAll } : {}), ...(opts.ownRescues ? { ownRescues: opts.ownRescues } : {}) });
   let watcher = make();
   await watcher.passAll(); await watcher.passAll();
   chain.took();
@@ -387,15 +387,31 @@ describe("tokens taken through a permission the wallet gave earlier", () => {
     expect(await s.round()).toEqual({ raised: [], calls: ["look"] });
   });
 
-  it("does not call Sentinel's own rescue a taking", async () => {
+  it("does not call a rescue this service sent a taking, and says nothing more of it: the owner was told when it was sent", async () => {
     let mine = "", vault = "";
-    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: SD }); vault = c.account(key(91), 0); }, { sentinelDelegate: SD });
-    s.chain.transfer(rescuer, [[mine, vault, usdc(100)]], { authority: new PublicKey(SD) });
+    const ours = new Set<string>();
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: SD }); vault = c.account(key(91), 0); }, { sentinelDelegate: SD, ownRescues: ours });
+    ours.add(s.chain.transfer(rescuer, [[mine, vault, usdc(100)]], { authority: new PublicKey(SD) }));
     const r = await s.round();
     expect(r.raised).toEqual([]);
     expect(r.calls).toEqual(["look", "list:wallet", "list:account", "tx"]);
     expect(s.amountOnRecord(mine)).toBe("0");
     expect(await s.round()).toEqual({ raised: [], calls: ["look"] });
+  });
+
+  it("a rescue somebody else started is said as one, once, and is no reason for another", async () => {
+    // Another of the keys that may start a rescue did: nothing leaves a watched wallet unsaid, and a setup
+    // the owner did not make would look exactly like this.
+    let mine = "", vault = "";
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: SD }); vault = c.account(key(91), 0); }, { sentinelDelegate: SD, ownRescues: new Set() });
+    const signature = s.chain.transfer(rescuer, [[mine, vault, usdc(100)]], { authority: new PublicKey(SD) });
+    const r = await s.round();
+    expect(r.raised.map((e) => [e.signals, e.level, e.signature, e.rescueWorthy])).toEqual([[["rescued"], "urgent", signature, false]]);
+    expect(r.raised[0]!.sentence).toBe("100 USDC left your wallet in a rescue that Sentinel did not start from here. A rescue can only go into the Lamport Vault this wallet is set up for, and only that vault's key can move it on. If you did not set this wallet up for rescue, or that vault is not yours, treat the wallet as compromised.");
+    expect(s.told).toHaveLength(1);
+    expect(await s.round()).toEqual({ raised: [], calls: ["look"] });
+    s.restart();
+    expect((await s.round()).raised).toEqual([]);
   });
 
   it("waits for an RPC that is behind, and tells the owner when the transaction shows", async () => {
@@ -866,11 +882,17 @@ describe("the sentence", () => {
     expect(assessTransaction(t.tx, { wallet: W, baseline: Baseline.empty(), drainers: new Set(), tokenAccounts: t.onRecord, ownerSigned: true }).level).toBe("urgent");
   });
 
-  it("says nothing of what Sentinel's own delegate moved, and still tells of the rest", () => {
+  it("tells what the rescue permission moved apart from what was taken, and nothing of a rescue this service sent", () => {
     const t = taking(2, { delegates: [SD, thief.toBase58()] });
-    expect(assessTaken(t.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: t.onRecord }).sentence.split(" left ")[0]).toBe("2 USDC");
+    const mixed = assessTaken(t.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: t.onRecord });
+    expect(mixed.signals.map((s) => [s.kind, s.sentence.split(" left ")[0]])).toEqual([["taken_by_permission", "2 USDC"], ["rescued", "1 USDC"]]);
+    // the taking is reason for a rescue; the rescue beside it is not what makes it one
+    expect(mixed.rescueWorthy).toBe(true);
     const all = taking(2, { delegates: [SD, SD] });
-    expect(assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: all.onRecord }).level).toBeNull();
+    const elsewhere = assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: all.onRecord });
+    expect([elsewhere.level, elsewhere.signals.map((s) => s.kind), elsewhere.rescueWorthy]).toEqual(["urgent", ["rescued"], false]);
+    expect(assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: all.onRecord, ownRescues: new Set([all.tx.signature]) }).level).toBeNull();
+    expect(assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: all.onRecord, ownRescues: new Set(["another"]) }).level).toBe("urgent");
     // someone else's delegate that happens to be on an unarmed wallet is not excused
     expect(assessTaken(all.tx, { wallet: W, tokenAccounts: all.onRecord }).level).toBe("urgent");
   });

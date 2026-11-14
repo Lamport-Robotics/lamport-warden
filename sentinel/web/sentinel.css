@@ -92,3 +92,15 @@ a.ref:hover { border-bottom-color: var(--bone); color: var(--bone); }
 .plan .ahead input { width: 100%; margin-top: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 .plan .ahead .quote { margin-top: 10px; }
 .plan .ahead code.addr { overflow-wrap: anywhere; font-size: 13px; }
+
+/* rescue: its terms and the vault, shown before anything can be signed */
+.setup { border: 1px solid var(--line); border-radius: 16px; padding: 20px; margin-top: 16px; background: var(--raise); }
+.setup p:first-child { margin-top: 0; }
+.setup ul.terms { list-style: none; margin: 10px 0 14px; padding: 0; font-size: 13.5px; line-height: 1.5; color: var(--bone); }
+.setup ul.terms li { padding: 5px 0; border-top: 1px solid var(--line); }
+.setup ul.terms li:first-child { border-top: 0; }
+.setup label { display: block; }
+.setup label a { border-bottom: 1px solid var(--mute); }
+.setup code.addr { overflow-wrap: anywhere; font-size: 13px; }
+.setup > button.small { margin-top: 14px; }
+input[type="checkbox"] { accent-color: var(--bone); margin-right: 6px; }

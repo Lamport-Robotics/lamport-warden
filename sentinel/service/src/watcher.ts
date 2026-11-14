@@ -12,7 +12,7 @@ import { Baseline } from "./baseline.js";
 import { fromRpc, signersOf, tokenDeltasOf, type ObservedTx } from "./observed.js";
 import type { Rpc } from "./rpc.js";
 import { BurstWindow, assessBehind, assessTaken, assessTokenAccount, assessTransaction, assessUnexplainedLoss, assessWalletAccount, without, type Assessment, type Level, type TokenAccountState, type WatchContext } from "./signals.js";
-import type { Store, StoredEvent, WalletRecord, WatchedWallet } from "./store.js";
+import { disarmingNow, rescueDelegateOf, type Store, type StoredEvent, type WalletRecord, type WatchedWallet } from "./store.js";
 
 /** How many of a wallet's token accounts are kept and compared. */
 export const MAX_TOKEN_ACCOUNTS = 1000;
@@ -96,6 +96,10 @@ export interface WatcherOptions {
   ownListPagesInAll?: number;
   /** How many wallets are read at the same time (default 1). The RPC client keeps the pace; this keeps a slow answer from holding up the rest. */
   readers?: number;
+  /** The rescues this service sent itself (rescue.ts), which it tells the owner of when it sends them. */
+  ownRescues?: { has(signature: string): boolean };
+  /** Called with each alert as it is raised, after the owner was told: what acts on one (a rescue, unasked) hangs here. */
+  onRaised?: (event: StoredEvent) => void;
   now?: () => number;
 }
 
@@ -247,8 +251,8 @@ export class Watcher {
   }
 
   /** Whether the owner was already told of a taking in this transaction. It can be come upon twice: in the wallet's list and in a token account's. */
-  private told(wallet: string, signature: string): boolean {
-    return this.store.events(wallet).some((e) => e.signature === signature && e.signals.includes("taken_by_permission"));
+  private told(wallet: string, signature: string, kind: "taken_by_permission" | "rescued" | null = null): boolean {
+    return this.store.events(wallet).some((e) => e.signature === signature && (kind ? e.signals.includes(kind) : e.signals.includes("taken_by_permission") || e.signals.includes("rescued")));
   }
 
   /** `background`: part of a new wallet's history, which waits for anything that is about a wallet already watched. */
@@ -299,6 +303,8 @@ export class Watcher {
       // nobody was told: the alert says so on the page, which is now the only place it is
       if (sent && sent.delivered === 0 && event.id) this.store.markUndelivered?.(event.id);
     }
+    // whatever hangs here must not stop the watching either
+    try { this.opts.onRaised?.(event); } catch { /* its own affair */ }
     return event;
   }
 
@@ -414,7 +420,7 @@ export class Watcher {
         if (!tx.failed && !signersOf(tx).includes(wallet)) others = true;
         if (this.told(wallet, tx.signature)) continue;
         // whoever it names: one the wallet signed is the wallet's own, and the rule says nothing of it
-        const event = await this.raise(wallet, assessTaken(tx, { wallet, sentinelDelegate: w.sentinelDelegate, tokenAccounts: before, trustedTakers: trusted }), tx);
+        const event = await this.raise(wallet, assessTaken(tx, { wallet, sentinelDelegate: rescueDelegateOf(w, this.now()), tokenAccounts: before, trustedTakers: trusted, ownRescues: this.opts.ownRescues }), tx);
         if (event) raised.push(event);
       }
       if (explained()) { adopt(); continue; }
@@ -507,7 +513,7 @@ export class Watcher {
     }
     const baseline = Baseline.from(record.baseline);
     const raised: StoredEvent[] = [];
-    const ctxBase: Omit<WatchContext, "ownerSigned"> = { wallet, baseline, sentinelDelegate: w.sentinelDelegate, drainers: this.opts.drainers ?? new Set(), reviewedPrograms: this.opts.reviewedPrograms, window: this.windows.get(wallet) ?? this.windows.set(wallet, new BurstWindow()).get(wallet)!, tokenAccounts: before, trustedTakers: new Set(record.trustedTakers ?? []) };
+    const ctxBase: Omit<WatchContext, "ownerSigned"> = { wallet, baseline, sentinelDelegate: rescueDelegateOf(w, this.now()), disarming: disarmingNow(w, this.now()), ownRescues: this.opts.ownRescues, drainers: this.opts.drainers ?? new Set(), reviewedPrograms: this.opts.reviewedPrograms, window: this.windows.get(wallet) ?? this.windows.set(wallet, new BurstWindow()).get(wallet)!, tokenAccounts: before, trustedTakers: new Set(record.trustedTakers ?? []) };
 
     let somethingNew = false, listUnread = false, accountsRead = false;
     if (record.cursor === null && record.baseline === null) {
@@ -533,7 +539,8 @@ export class Watcher {
         this.note(wallet, tx, before);
         let a = assessTransaction(tx, { ...ctxBase, ownerSigned: signature in record.ownerSignatures || !!this.reported.get(wallet)?.has(signature) });
         // a taking that was come upon first in the token account's own list has been told of
-        if (a.signals.some((s) => s.kind === "taken_by_permission") && this.told(wallet, signature)) a = without(a, "taken_by_permission");
+        if (a.signals.some((s) => s.kind === "taken_by_permission") && this.told(wallet, signature, "taken_by_permission")) a = without(a, "taken_by_permission");
+        if (a.signals.some((s) => s.kind === "rescued") && this.told(wallet, signature, "rescued")) a = without(a, "rescued");
         const event = await this.raise(wallet, a, tx);
         if (event) raised.push(event);
         // what raised an alert is not taken as normal: a thief's first transfer must not make the second one familiar

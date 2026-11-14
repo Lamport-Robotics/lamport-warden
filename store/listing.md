@@ -80,7 +80,7 @@ Pro is $15 a month, or $10 while a wallet in your Sentinel profile holds 250,000
 • Each wallet read every 20 seconds instead of every minute
 • Up to 5 alert channels, including Discord and Slack, so a team sees an alert together
 
-Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs the vault and the rescue program on mainnet, and both are waiting on their audits. It joins Pro when they are, at the same price.
+Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs Lamport Vault and the rescue program on Solana mainnet, and neither is there yet. It joins Pro when they are, at the same price.
 
 A plan is started and cancelled on the Sentinel page (warden.lamportrobotics.com/sentinel), which says
 whether Pro is on sale. It is paid by card through Stripe; nothing is bought inside the extension.

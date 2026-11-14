@@ -1,7 +1,9 @@
 /**
  * Rescue as the service offers it, for real: a local validator running the compiled rescue program, a vault
  * account laid out as the vault program lays one out, and the service's own code showing how a wallet
- * stands, building the setup for the owner to sign, and carrying a rescue out.
+ * stands, building the setup for the owner to sign, and carrying a rescue out. The real watcher reads the
+ * same wallet all the while, so that what it says of each step is tested too: nothing of the owner's own
+ * setup, nothing of a rescue this service sent, and a rescue of its own accord when a thief takes something.
  *
  * (That a vault made by the real vault program is accepted, and that what is rescued can be taken out of it
  * again, is rescue.realvault.test.ts, which needs the vault's repository.)
@@ -19,10 +21,11 @@ import { fileURLToPath } from "node:url";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { Accounts } from "../src/accounts.js";
 import { PROGRAM, TOKEN, TOKEN_2022, delegateAddress, initRescuerSet, vaultTokenAddress } from "../src/program.js";
-import { LAMPORT_VAULT_PROGRAM, RESCUE_AGAIN_SECONDS, Rescue, checkVault, rescuedSentence } from "../src/rescue.js";
+import { LAMPORT_VAULT_PROGRAM, NOT_ON_CHAIN, RESCUE_AGAIN_SECONDS, Rescue, checkVault, rescuedSentence } from "../src/rescue.js";
 import { Rescuer } from "../src/rescuer.js";
 import { HttpRpc } from "../src/rpc.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore, type StoredEvent } from "../src/store.js";
+import { Watcher } from "../src/watcher.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SO = join(here, "..", "..", "program", "target", "deploy", "lamport_sentinel.so");
@@ -61,9 +64,27 @@ describe("what counts as a vault", () => {
 describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a local validator", () => {
   let validator: ChildProcess;
   let rpc: HttpRpc;
-  let store: MemoryStore, accounts: Accounts, rescue: Rescue, profile = "";
+  let store: MemoryStore, accounts: Accounts, rescue: Rescue, rescuer: Rescuer, watcher: Watcher, profile = "";
   let now = Math.floor(Date.now() / 1000);
-  const told: string[] = [], noticed: string[] = [];
+  const told: string[] = [], noticed: string[] = [], heard: string[] = [];
+  /** Rescues the watcher's alerts set off, to be waited for. */
+  const unasked: Promise<boolean>[] = [];
+  let lastUnasked: boolean[] = [];
+  /** The wallet's turns with the watcher: all that it raised in them, stopping early once `enough` says so. */
+  const watch = async (enough: (all: StoredEvent[]) => boolean = () => false, most = 6): Promise<StoredEvent[]> => {
+    const all: StoredEvent[] = [];
+    lastUnasked = [];
+    for (let i = 0; i < most; i++) {
+      const { raised, blind } = await watcher.passAll();
+      expect(blind).toEqual([]);
+      all.push(...raised);
+      lastUnasked.push(...(await Promise.all(unasked.splice(0))));
+      if (enough(all)) break;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    return all;
+  };
+  const kinds = (events: StoredEvent[]) => events.flatMap((e) => e.signals);
   const held: Record<string, { mint: PublicKey; account: PublicKey; program: PublicKey }> = {};
 
   const sendRaw = async (raw: Buffer | Uint8Array): Promise<string> => {
@@ -120,6 +141,10 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
       "--reset", "--quiet", "--ledger", join(dir, "ledger"), "--bind-address", "127.0.0.1", "--rpc-port", String(port), "--faucet-port", String(port + 3),
       "--gossip-port", String(port + 5), "--dynamic-port-range", `${port + 10}-${port + 69}`, "--mint", authority.publicKey.toBase58(),
       "--upgradeable-program", PROGRAM.toBase58(), SO, authority.publicKey.toBase58(),
+      // Something that runs has to be at the vault program's address for rescue to count as there at all. Nothing
+      // in a rescue calls it (the rescue program reads a vault's account, it does not ask the vault program), so
+      // the same file serves; rescue.realvault.test.ts is where the vault program itself is run.
+      "--bpf-program", LAMPORT_VAULT_PROGRAM, SO,
       "--account", vaultA.address.toBase58(), file("vault-a.json", vaultA), "--account", vaultB.address.toBase58(), file("vault-b.json", vaultB), "--account", closedVault.address.toBase58(), file("vault-closed.json", closedVault),
     ], { stdio: "ignore" });
     validator.once("exit", (code) => { exited = code ?? -1; });
@@ -142,9 +167,21 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     const admitted = accounts.admit(W, null, now);
     if (!admitted.ok) throw new Error("setup");
     profile = admitted.profile;
-    rescue = new Rescue(rpc, new Rescuer(rpc, lamportRescuer, { confirmSeconds: 30 }), accounts, store, { now: () => now, notify: async (_w, sentence) => { told.push(sentence); return { delivered: 1, failed: 0 }; }, notice: async (_p, sentence) => { noticed.push(sentence); } });
+    rescuer = new Rescuer(rpc, lamportRescuer, { confirmSeconds: 30 });
+    rescue = new Rescue(rpc, rescuer, accounts, store, { now: () => now, notify: async (_w, sentence) => { told.push(sentence); return { delivered: 1, failed: 0 }; }, notice: async (_p, sentence) => { noticed.push(sentence); } });
+    // the watcher as the service runs it: told which rescues are the service's own, and handing each alert to rescue
+    watcher = new Watcher(rpc, store, { notify: async (_w, _level, sentence) => { heard.push(sentence); } }, { ownRescues: rescuer.sent, onRaised: (event) => { unasked.push(rescue.after(event)); } });
+    await watcher.passAll(); await watcher.passAll();
   }, 120_000);
   afterAll(() => { validator?.kill("SIGKILL"); });
+
+  it("knows where it is: the programs are on this chain, which is no public network, and its key is one of Lamport's rescuers with something to pay with", async () => {
+    expect(await rescue.available()).toBe(true);
+    expect(await rescue.network()).toBe("solana:localnet");
+    expect(await rescue.keyStanding()).toMatchObject({ amongRescuers: true, lamports: 5_000_000_000 });
+    expect(await new Rescue(rpc, new Rescuer(rpc, stranger), accounts, store).keyStanding()).toMatchObject({ amongRescuers: false });
+    expect(await new Rescue(rpc, null, accounts, store).keyStanding()).toBeNull();
+  }, 60_000);
 
   it("comes with Pro, and only for a wallet of the profile's own", async () => {
     expect(await rescue.arm(profile, W, vaultA.address.toBase58())).toEqual({ ok: false, status: 403, why: "rescue comes with Pro." });
@@ -181,6 +218,19 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     await signAll(built.transactions);
     expect(await balance(held.usdc!.account)).toBe(250_000_000n);
 
+    // The watcher reads the setup before the service has looked at the chain again. It is the owner's own, asked
+    // for on the page a moment ago: an unlimited permission given to anyone else is an alert, and this is not one.
+    expect(store.wallets()[0]!.sentinelDelegate).toBeUndefined();
+    const seen = await watch();
+    expect(kinds(seen)).not.toContain("unlimited_approval");
+    expect(seen.filter((e) => e.level !== "info")).toEqual([]);
+    expect(store.record(W).tokenAccounts[held.usdc!.account.toBase58()]).toMatchObject({ delegate: built.delegate });
+
+    // the round that keeps the record in step with the chain finds the setup, and the owner's channels hear of it once
+    await rescue.sync([W]);
+    expect(store.wallets()[0]!.sentinelDelegate).toBe(built.delegate);
+    expect(noticed).toHaveLength(1);
+
     const s = await rescue.status(W);
     expect(s).toMatchObject({ armed: true, vault: vaultA.address.toBase58(), rescuers: "lamport", uncovered: [] });
     expect(s.covered.map((c) => c.account).sort()).toEqual([held.usdc!.account.toBase58(), held.t22!.account.toBase58()].sort());
@@ -209,6 +259,12 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     now += RESCUE_AGAIN_SECONDS;
     expect(await rescue.rescue(profile, W)).toMatchObject({ ok: true, moved: 0, failed: 0 });
     expect(told).toHaveLength(1);
+    // The watcher sees the tokens gone, in transactions the wallet did not sign, and reads them. They are the
+    // service's own rescue, which the owner was told of when it was sent: it is not called a taking, and not said twice.
+    expect(await watch()).toEqual([]);
+    expect(heard).toEqual([]);
+    expect(store.record(W).tokenAccounts[held.usdc!.account.toBase58()]).toMatchObject({ amount: "0" });
+    expect(store.record(W).unsettled).toBeUndefined();
   }, 180_000);
 
   it("a token that arrives later is not covered until the owner sets it up, and then it is", async () => {
@@ -219,28 +275,65 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     expect(built.accounts).toBe(1);
     await signAll(built.transactions);
     expect((await rescue.status(W)).covered.map((c) => c.account)).toEqual([held.late!.account.toBase58()]);
+    expect((await watch()).filter((e) => e.level !== "info")).toEqual([]);
   }, 120_000);
 
-  it("after an alert that is reason enough, rescues unasked only when the owner switched that on", async () => {
-    const alert = { wallet: W, signature: "s", slot: 1, at: now, level: "urgent" as const, signals: ["taken_by_permission" as const], sentence: "x", rescueWorthy: true };
+  it("a thief takes tokens under a permission: the watcher says so, and Sentinel rescues what is set up without being asked, once the owner has switched that on", async () => {
+    // A token the wallet did not set up, and a permission on it that the owner was talked into giving a stranger.
+    await tokenFor("prey", 1_000_000_000n);
+    const theirs = Keypair.generate();
+    await send([authority, theirs],
+      SystemProgram.createAccount({ fromPubkey: authority.publicKey, newAccountPubkey: theirs.publicKey, lamports: await rent(165), space: 165, programId: TOKEN }),
+      new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: theirs.publicKey, isSigner: false, isWritable: true }, { pubkey: held.prey!.mint, isSigner: false, isWritable: false }], data: Buffer.concat([Buffer.from([18]), stranger.publicKey.toBuffer()]) }));
+    await send([owner], new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: held.prey!.account, isSigner: false, isWritable: true }, { pubkey: stranger.publicKey, isSigner: false, isWritable: false }, { pubkey: owner.publicKey, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([4]), u64(0xffff_ffff_ffff_ffffn)]) }));
+    // that one the watcher does speak of: only the rescue program's own address is excused
+    const approved = await watch((all) => kinds(all).includes("unlimited_approval"));
+    expect(kinds(approved)).toContain("unlimited_approval");
+    expect(lastUnasked.every((r) => r === false)).toBe(true); // an alert, and not reason enough for a rescue
+    const take = (amount: bigint) => send([stranger], new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: held.prey!.account, isSigner: false, isWritable: true }, { pubkey: theirs.publicKey, isSigner: false, isWritable: true }, { pubkey: stranger.publicKey, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([3]), u64(amount)]) }));
+
+    // Rescue without asking is off: the taking is told, it is reason enough, and nothing is moved.
     now += RESCUE_AGAIN_SECONDS;
-    expect(await rescue.after(alert)).toBe(false);
+    const first = await take(400_000_000n);
+    const alarm = await watch((all) => kinds(all).includes("taken_by_permission"));
+    expect(alarm.map((e) => [e.signature, e.signals, e.level, e.rescueWorthy])).toEqual([[first, ["taken_by_permission"], "urgent", true]]);
+    expect(lastUnasked).toEqual([false]);
     expect(await balance(held.late!.account)).toBe(42n);
-    expect(await rescue.after({ ...alert, rescueWorthy: false })).toBe(false);
-    accounts.profile(profile)!.autoRescue = true;
-    expect(await rescue.after({ ...alert, rescueWorthy: false })).toBe(false); // an alert that is not reason enough moves nothing
-    expect(await rescue.after(alert)).toBe(true);
+
+    // The owner switches it on. The thief comes back for more: what is set up is in the vault before they can turn to it.
+    expect(accounts.setAutoRescue(profile, true)).toBe(true);
+    const second = await take(100_000_000n);
+    const again = await watch((all) => kinds(all).includes("taken_by_permission"));
+    expect(again.map((e) => [e.signature, e.signals])).toEqual([[second, ["taken_by_permission"]]]);
+    expect(lastUnasked).toEqual([true]);
     expect(await balance(held.late!.account)).toBe(0n);
     expect(await balance(vaultTokenAddress(vaultA.address, held.late!.mint))).toBe(42n);
     expect(told.at(-1)).toBe(`After the alert before this one, ${rescuedSentence(1, 0, vaultA.address.toBase58())}`);
-  }, 180_000);
+    // and the watcher, reading that rescue in its turn, adds nothing to it
+    expect(await watch()).toEqual([]);
+    // an alert that is not reason enough moves nothing, switched on or not
+    now += RESCUE_AGAIN_SECONDS;
+    expect(await rescue.after({ ...alarm[0]!, rescueWorthy: false })).toBe(false);
+    // what was not set up is where the thief left it, and the page says so
+    expect((await rescue.status(W)).uncovered.map((u) => [u.account, u.amount, u.why])).toEqual([[held.prey!.account.toBase58(), "500000000", "not set up"]]);
+  }, 240_000);
 
   it("the setup is taken away by the owner signing it away: approvals revoked, the config closed, and the channels told", async () => {
     await tokenFor("kept", 5n);
     await signAll(((await rescue.arm(profile, W, vaultA.address.toBase58())) as { transactions: string[] }).transactions);
+    await watch();
+    const before = store.events(W).length;
     const built = await rescue.disarm(profile, W);
     if (!built.ok) throw new Error(built.why);
     await signAll(built.transactions);
+    // The watcher sees Sentinel's permission gone from each account. From a thief that is the first move, and
+    // Urgent; asked for on the page a moment ago it is the owner's doing, noted and no alarm.
+    const gone = await watch((all) => kinds(all).includes("delegate_replaced"));
+    expect(kinds(gone)).toContain("delegate_replaced");
+    expect(gone.filter((e) => e.level !== "info")).toEqual([]);
+    expect(gone.find((e) => e.signals.includes("delegate_replaced"))!.sentence).toMatch(/^Sentinel's permission on your .* account was removed, as asked for on the Sentinel page\.$/);
+    expect(lastUnasked.every((r) => r === false)).toBe(true);
+    expect(store.events(W).length).toBeGreaterThan(before);
     const s = await rescue.status(W);
     expect(s).toMatchObject({ armed: false, covered: [] });
     expect((await rpc.call("getAccountInfo", [held.kept!.account.toBase58(), { encoding: "jsonParsed", commitment: "confirmed" }])).value.data.parsed.info.delegate).toBeUndefined();
@@ -254,5 +347,6 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     expect(keyless.on).toBe(false);
     expect(await keyless.rescue(profile, W)).toEqual({ ok: false, status: 501, why: "rescue is not switched on here." });
     expect((await keyless.status(W)).armed).toBe(false);
+    expect(NOT_ON_CHAIN).toContain("not available yet");
   }, 180_000);
 });

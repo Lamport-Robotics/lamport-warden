@@ -61,6 +61,14 @@ export type RescueResult = { ok: true; vault: string; steps: RescueStep[] } | { 
 const bytesOf = (value: any): Uint8Array | null => (Array.isArray(value?.data) && typeof value.data[0] === "string" ? Uint8Array.from(Buffer.from(value.data[0], "base64")) : null);
 
 export class Rescuer {
+  /**
+   * The signature of every rescue this key sent, known from the moment it is sent: the watcher reads a
+   * rescue within seconds, and has to know it for the service's own before the service has finished waiting
+   * for it to confirm.
+   */
+  readonly sent = new Set<string>();
+  /** The address of the key this rescues with: what pays for a rescue, and what has to be among the rescuers. */
+  get address(): string { return this.signer.publicKey.toBase58(); }
   constructor(private rpc: Rpc, private signer: Keypair, private opts: { microLamportsPerUnit?: number; confirmSeconds?: number; sleep?: (ms: number) => Promise<void> } = {}) {}
 
   private async account(address: PublicKey): Promise<{ owner: string; data: Uint8Array } | null> {
@@ -123,6 +131,8 @@ export class Rescuer {
       const accounts = instructions.slice(2).map((ix) => ix.keys[6]!.pubkey.toBase58());
       try {
         const signature = await this.send(instructions, blockhash);
+        if (this.sent.size >= 2000) this.sent.clear();
+        this.sent.add(signature);
         return { accounts, signature, ...(await this.confirmed(signature)) };
       } catch (e) {
         return { accounts, signature: null, ok: false, why: String((e as Error).message ?? e).slice(0, 200) };

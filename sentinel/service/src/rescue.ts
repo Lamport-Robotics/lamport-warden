@@ -16,8 +16,8 @@
 import { PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import type { Accounts } from "./accounts.js";
 import { PLANS } from "./plans.js";
-import { PROGRAM, approveForRescue, closeConfig, configAddress, delegateAddress, initConfig, planRescue, type Holding } from "./program.js";
-import { holdingsOf, readConfig, type Config, type Rescuer } from "./rescuer.js";
+import { PROGRAM, approveForRescue, closeConfig, configAddress, delegateAddress, initConfig, planRescue, rescuerSetAddress, type Holding } from "./program.js";
+import { holdingsOf, readConfig, readRescuerSet, type Config, type Rescuer } from "./rescuer.js";
 import type { Rpc } from "./rpc.js";
 import type { MemoryStore, StoredEvent } from "./store.js";
 
@@ -30,6 +30,10 @@ export const MOST_ARMED_AT_ONCE = 40;
 const APPROVALS_PER_TRANSACTION = 6;
 /** How soon after one rescue of a wallet another may be asked for. */
 export const RESCUE_AGAIN_SECONDS = 60;
+/** How long what the owner asked for on the page is taken for theirs by the watcher, while the chain catches up. */
+export const CHANGE_SECONDS = 30 * 60;
+/** What the page is told while rescue cannot work on the chain the service reads. */
+export const NOT_ON_CHAIN = "rescue is not available yet: Lamport Vault and the rescue program are not on this network.";
 
 export type Refusal = { ok: false; status: number; why: string };
 const no = (status: number, why: string): Refusal => ({ ok: false, status, why });
@@ -73,14 +77,82 @@ export const rescuedSentence = (moved: number, failed: number, vault: string): s
 
 export class Rescue {
   private last = new Map<string, number>();
+  private there: { ok: boolean; at: number } | null = null;
+  private net: string | null = null;
   constructor(
-    private rpc: Rpc, private rescuer: Pick<Rescuer, "rescue"> | null, private accounts: Accounts, private store: MemoryStore,
+    private rpc: Rpc, private rescuer: (Pick<Rescuer, "rescue"> & { address?: string }) | null, private accounts: Accounts, private store: MemoryStore,
     private opts: { now?: () => number; notify?: (wallet: string, sentence: string) => Promise<unknown>; notice?: (profile: string, sentence: string) => Promise<void> } = {},
   ) {}
 
   private now(): number { return this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000); }
   /** True when the service holds a key to rescue with: without one it can show how a wallet stands and nothing more. */
   get on(): boolean { return this.rescuer !== null; }
+
+  /**
+   * Whether rescue can work on the chain this reads: the rescue program and the vault program are both
+   * there. Looked up again every ten minutes while they are not, and every hour once they are.
+   */
+  async available(): Promise<boolean> {
+    const now = this.now();
+    if (this.there && now - this.there.at < (this.there.ok ? 3600 : 600)) return this.there.ok;
+    try {
+      const res = await this.rpc.call("getMultipleAccounts", [[PROGRAM.toBase58(), LAMPORT_VAULT_PROGRAM], { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 0, length: 0 } }]);
+      this.there = { ok: Array.isArray(res?.value) && res.value.length === 2 && res.value.every((a: any) => a?.executable === true), at: now };
+    } catch { return this.there?.ok ?? false; }
+    return this.there.ok;
+  }
+
+  /** The network this reads, as a wallet is told it when it is handed a transaction: asked of the chain once. */
+  async network(): Promise<string> {
+    if (this.net) return this.net;
+    const genesis = String(await this.rpc.call("getGenesisHash", []).catch(() => ""));
+    const known: Record<string, string> = { "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d": "solana:mainnet", EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG: "solana:devnet", "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY": "solana:testnet" };
+    if (genesis === "") return "solana:mainnet";
+    return (this.net = known[genesis] ?? "solana:localnet");
+  }
+
+  /** How the key this rescues with stands: what it holds, and whether it is among Lamport's rescuers. Null without a key. */
+  async keyStanding(): Promise<{ lamports: number; amongRescuers: boolean } | null> {
+    const address = this.rescuer?.address;
+    if (!address) return null;
+    const lamports = Number((await this.rpc.call("getBalance", [address, { commitment: "confirmed" }], { background: true }))?.value ?? 0);
+    const set = await this.account(rescuerSetAddress().toBase58());
+    return { lamports, amongRescuers: !!set && set.owner === PROGRAM.toBase58() && (readRescuerSet(set.data) ?? []).includes(address) };
+  }
+
+  /**
+   * Notes how a wallet stands: the watcher is told which address, if any, this wallet has approved for
+   * rescue, so that it takes a rescue for a rescue; and the profile's channels are told when that changes,
+   * because setting a wallet up, or taking the setup away, is not something that should happen unnoticed.
+   */
+  private note(wallet: string, config: Config | null): void {
+    const delegate = config ? delegateAddress(new PublicKey(wallet), new PublicKey(config.vault)).toBase58() : null;
+    if (!this.store.setDelegate(wallet, delegate)) return;
+    const profile = this.accounts.profileOf(wallet);
+    if (profile) void this.opts.notice?.(profile, config
+      ? `The wallet ${wallet.slice(0, 4)}..${wallet.slice(-4)} is set up for rescue into the Lamport Vault ${config.vault.slice(0, 4)}..${config.vault.slice(-4)}. If that was not you, or that is not your vault, someone else has the key to that wallet.`
+      : `The wallet ${wallet.slice(0, 4)}..${wallet.slice(-4)} is no longer set up for rescue. If that was not you, someone else has the key to that wallet.`).catch(() => undefined);
+  }
+
+  /**
+   * Brings what is on record in step with the chain for these wallets, a hundred to a call: which of them
+   * are set up for rescue, and for which vault. Run now and then for every watched wallet, so that a setup
+   * made or taken away anywhere (not only on the Sentinel page) is noticed and its owner told.
+   */
+  async sync(wallets: string[]): Promise<void> {
+    for (let i = 0; i < wallets.length; i += 100) {
+      const some = wallets.slice(i, i + 100);
+      const res = await this.rpc.call("getMultipleAccounts", [some.map((w) => configAddress(new PublicKey(w)).toBase58()), { encoding: "base64", commitment: "confirmed" }], { background: true });
+      // an answer that is not one account for each address says nothing about any of them
+      if (!Array.isArray(res?.value) || res.value.length !== some.length) continue;
+      some.forEach((wallet, j) => {
+        const a = res.value[j];
+        const raw = a?.data?.[0];
+        const config = a && typeof raw === "string" && String(a.owner) === PROGRAM.toBase58() ? readConfig(Uint8Array.from(Buffer.from(raw, "base64"))) : null;
+        this.note(wallet, config && config.owner === wallet ? config : null);
+      });
+    }
+  }
 
   private async account(address: string): Promise<{ owner: string; data: Uint8Array } | null> {
     const res = await this.rpc.call("getAccountInfo", [address, { encoding: "base64", commitment: "confirmed" }]);
@@ -103,24 +175,13 @@ export class Rescue {
     return { ok: true, wallet };
   }
 
-  /**
-   * How the wallet stands on the chain. As a side effect the watcher is told which address, if any, this
-   * wallet has approved for rescue, so that it takes a rescue for a rescue; and the profile's channels are
-   * told when that changes, because setting a wallet up, or taking the setup away, is not something that
-   * should happen unnoticed.
-   */
+  /** How the wallet stands on the chain, now. What it finds is noted (see `note`). */
   async status(wallet: string): Promise<WalletRescue> {
     const config = await this.config(wallet);
     const holdings = await holdingsOf(this.rpc, wallet);
     const owner = new PublicKey(wallet);
-    const delegate = config ? delegateAddress(owner, new PublicKey(config.vault)).toBase58() : null;
     const planned = config ? new Set(planRescue(holdings, owner, new PublicKey(config.vault)).map((h) => h.address)) : new Set<string>();
-    if (this.store.setDelegate(wallet, delegate)) {
-      const profile = this.accounts.profileOf(wallet);
-      if (profile) void this.opts.notice?.(profile, config
-        ? `The wallet ${wallet.slice(0, 4)}..${wallet.slice(-4)} is set up for rescue into the Lamport Vault ${config.vault.slice(0, 4)}..${config.vault.slice(-4)}. If that was not you, or that is not your vault, someone else has the key to that wallet.`
-        : `The wallet ${wallet.slice(0, 4)}..${wallet.slice(-4)} is no longer set up for rescue. If that was not you, someone else has the key to that wallet.`).catch(() => undefined);
-    }
+    this.note(wallet, config);
     return {
       armed: !!config, vault: config?.vault ?? null, rescuers: config ? config.rescuers.kind : null,
       covered: holdings.filter((h) => planned.has(h.address)).map(view),
@@ -143,10 +204,11 @@ export class Rescue {
    * the config naming the vault when there is none yet, and an approval for each token account that holds
    * something and is not set up, the biggest first. Nothing in them moves anything.
    */
-  async arm(profile: string, wallet: unknown, vault: unknown): Promise<{ ok: true; transactions: string[]; accounts: number; vault: string } | Refusal> {
+  async arm(profile: string, wallet: unknown, vault: unknown): Promise<{ ok: true; transactions: string[]; accounts: number; vault: string; delegate: string } | Refusal> {
     const may = this.may(profile, wallet);
     if (!may.ok) return may;
     if (typeof vault !== "string" || !ADDRESS.test(vault)) return no(400, "that is not an address.");
+    if (!(await this.available())) return no(501, NOT_ON_CHAIN);
     if (vault === may.wallet) return no(400, "that is the wallet itself. A rescue goes into a Lamport Vault, which has its own address.");
     try {
       const checked = checkVault(vault, await this.account(vault));
@@ -159,7 +221,9 @@ export class Rescue {
         .filter((h) => h.amount > 0n && !h.frozen && !(h.delegate === delegate && h.delegatedAmount > 0n))
         .sort((a, b) => Number(b.amount) / 10 ** b.decimals - Number(a.amount) / 10 ** a.decimals).slice(0, MOST_ARMED_AT_ONCE);
       const approvals = todo.map((h) => approveForRescue({ owner, source: new PublicKey(h.address), mint: new PublicKey(h.mint), decimals: h.decimals, vault: to, tokenProgram: new PublicKey(h.tokenProgram) }));
-      return { ok: true, transactions: await this.transactions(owner, approvals, config ? [] : [initConfig(owner, to)]), accounts: todo.length, vault };
+      // for the next half hour the watcher takes approvals to this address for the setup asked for here
+      if (!config || approvals.length > 0) this.store.expectRescueChange(may.wallet, delegate, this.now() + CHANGE_SECONDS);
+      return { ok: true, transactions: await this.transactions(owner, approvals, config ? [] : [initConfig(owner, to)]), accounts: todo.length, vault, delegate };
     } catch { return no(502, "the chain could not be read just now. Try again in a minute."); }
   }
 
@@ -176,6 +240,8 @@ export class Rescue {
       const delegate = delegateAddress(owner, new PublicKey(config.vault)).toBase58();
       const revokes = (await holdingsOf(this.rpc, wallet)).filter((h) => h.delegate === delegate).map((h) => revoke(new PublicKey(h.address), owner, new PublicKey(h.tokenProgram)));
       const txs = await this.transactions(owner, [...revokes, closeConfig(owner)]);
+      // and the permissions going, for the next half hour, for the owner's own doing
+      this.store.expectRescueChange(wallet, null, this.now() + CHANGE_SECONDS);
       return { ok: true, transactions: txs };
     } catch { return no(502, "the chain could not be read just now. Try again in a minute."); }
   }
@@ -188,6 +254,7 @@ export class Rescue {
     const may = this.may(profile, wallet);
     if (!may.ok) return may;
     if (!this.rescuer) return no(501, "rescue is not switched on here.");
+    if (!(await this.available())) return no(501, NOT_ON_CHAIN);
     const now = this.now();
     if (now - (this.last.get(may.wallet) ?? -Infinity) < RESCUE_AGAIN_SECONDS) return no(429, "a rescue of this wallet was asked for a moment ago. Give it a minute.");
     this.last.set(may.wallet, now);
@@ -216,6 +283,8 @@ export class Rescue {
     const profile = this.accounts.profileOf(event.wallet);
     const p = profile ? this.accounts.profile(profile) : undefined;
     if (!profile || !p?.autoRescue || !PLANS[p.tier].rescue) return false;
+    // only a wallet known to be set up: an alert about any other costs the chain nothing
+    if (!this.store.wallets().find((w) => w.address === event.wallet)?.sentinelDelegate) return false;
     return (await this.rescue(profile, event.wallet, "sentinel")).ok;
   }
 }

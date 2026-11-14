@@ -7,7 +7,7 @@
  */
 import { getWallets } from "@wallet-standard/app";
 import { PAGE_ASKS, WARDEN_ANSWERS, type PageAnswer, type PageAsk } from "../../../src/sentinel-link.js";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, decimal, paceText, prepaidTerms, purchaseTerms, renewalTerms } from "../../service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, RESCUE_TERMS, WATCH_FEATURES, decimal, paceText, prepaidTerms, purchaseTerms, renewalTerms } from "../../service/src/plans.js";
 import { dayOf } from "../../service/src/notices.js";
 import { LINK_STATEMENT, SIGN_IN_STATEMENT, signInText } from "../../service/src/signin-text.js";
 
@@ -16,7 +16,11 @@ const SESSION = "sentinel.session";
 
 interface WalletRow { address: string; armed: boolean; reporting: boolean; paused: boolean; lastReadAt: number | null }
 interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack" | "telegram"; hint: string; active: boolean; lastDeliveredAt: number | null; failing: { since: number; why: string } | null }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number; push?: boolean } }
-interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; signals: string[]; sentence: string; answer: string | null; undelivered?: boolean }
+interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; signals: string[]; sentence: string; answer: string | null; undelivered?: boolean; canRescue?: boolean }
+/** Whether rescue can work here at all, whether this service can carry one out, whether the plan has it, and the profile's own switch. */
+interface RescueInfo { available: boolean; on: boolean; plan: boolean; auto: boolean; chain: string | null }
+interface TokenView { account: string; mint: string; amount: string; decimals: number }
+interface RescueStanding { armed: boolean; vault: string | null; rescuers: "lamport" | "own" | null; covered: TokenView[]; uncovered: (TokenView & { why: "not set up" | "frozen" })[] }
 type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null; paidUntil?: number | null; crypto?: { payTo: string; assets: ("USDC" | "SOL")[]; months: number[] } | null };
 type PayQuote = { reference: string; payTo: string; asset: "USDC" | "SOL"; units: string; decimals: number; months: number; cents: number; expiresAt: number; url: string };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
@@ -35,6 +39,9 @@ let me: Me | null = null;
 let alerts: Alert[] = [];
 let plan: Plan = { enabled: false };
 let warden: Hello | null = null;
+let rescueInfo: RescueInfo | null = null;
+/** How each wallet stood on the chain when this page last asked. */
+const standings = new Map<string, RescueStanding>();
 
 function say(text: string, bad = false): void { const n = $("notice"); n.textContent = text; n.className = bad ? "notice bad" : "notice"; n.hidden = text === ""; }
 function keep(token: string | null): void { session = token; try { if (token) sessionStorage.setItem(SESSION, token); else sessionStorage.removeItem(SESSION); } catch { /* kept in memory only */ } }
@@ -202,12 +209,19 @@ function render(): void {
   $("events").replaceChildren(...(shown.length ? shown.map((a) => {
     const li = el("li"), what = el("div", "", "what"), head = el("b");
     head.append(el("span", a.level === "urgent" ? "Urgent" : a.level === "alert" ? "Alert" : "Note", `tag ${a.level}`), document.createTextNode(a.sentence));
-    what.append(head, el("span", `${short(a.wallet)}${a.at ? ` · ${ago(a.at)}` : ""}${a.answer === "this_was_me" ? " · you said this was you" : a.answer === "ignore" ? " · ignored" : ""}${a.undelivered ? " · not delivered: no channel took it" : ""}`));
+    what.append(head, el("span", `${short(a.wallet)}${a.at ? ` · ${ago(a.at)}` : ""}${a.answer === "this_was_me" ? " · you said this was you" : a.answer === "ignore" ? " · ignored" : a.answer === "rescue" ? " · answered with a rescue" : ""}${a.undelivered ? " · not delivered: no channel took it" : ""}`));
     li.append(what);
-    // a notice about the watching itself is not something the owner did or did not do: it has no answer
-    const aboutWatching = Array.isArray(a.signals) && a.signals.some((s) => s === "watch_stopped" || s === "watch_resumed");
+    // a notice about the watching itself, or about a rescue, is not something the owner did or did not do: it has no answer
+    const aboutWatching = Array.isArray(a.signals) && a.signals.some((s) => s === "watch_stopped" || s === "watch_resumed" || s === "rescued");
     if (!a.answer && a.level !== "info" && !aboutWatching) {
       const acts = el("div", "", "acts");
+      // an alert that is reason enough on its own, about a wallet that is set up: the rescue is one press away
+      if (a.canRescue && rescueInfo?.available && rescueInfo.on && rescueInfo.plan && mine.wallets.some((w) => w.address === a.wallet && w.armed)) {
+        acts.append(sure("Rescue now", "Move it all to the vault?", async () => {
+          const r = await call("POST", `/events/${a.id}/answer`, { answer: "rescue" });
+          if (r.status === 200) { say(rescuedText(r.body)); standings.delete(a.wallet); await refresh(); } else say(String(r.body?.error ?? "That did not work."), true);
+        }));
+      }
       const was = el("button", "This was me", "small"), ignore = el("button", "Ignore", "small");
       was.addEventListener("click", async () => { if (await done(call("POST", `/events/${a.id}/answer`, { answer: "this_was_me" }), "Noted. Sentinel will treat who that paid as someone this wallet pays.")) await refresh(); });
       ignore.addEventListener("click", async () => { if (await done(call("POST", `/events/${a.id}/answer`, { answer: "ignore" }))) await refresh(); });
@@ -237,7 +251,155 @@ function render(): void {
     return row(w.address, here ? "Linked from this browser." : w.reporting ? "Linked from another browser. Linking this one replaces that link." : "Not linked.", [b], "addr");
   }) : []));
 
+  drawRescue(mine);
   plans(mine);
+}
+
+// ---- rescue
+
+const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+const rescuedText = (r: { moved?: number; failed?: number; vault?: string }): string =>
+  Number(r.moved) + Number(r.failed) === 0 ? "There was nothing set up to move."
+    : `Moved ${count(Number(r.moved), "token account")} into your vault ${short(String(r.vault))}.${Number(r.failed) > 0 ? ` ${count(Number(r.failed), "account")} could not be moved and ${Number(r.failed) === 1 ? "is" : "are"} still in the wallet.` : ""}`;
+
+function standingText(s: RescueStanding): string {
+  const loose = s.uncovered.filter((u) => u.why === "not set up").length, frozen = s.uncovered.filter((u) => u.why === "frozen").length;
+  if (!s.armed) return `Not set up for rescue.${loose + frozen > 0 ? ` It holds ${count(loose + frozen, "token account")}.` : " It holds no tokens."}`;
+  return `Set up for rescue into the vault ${short(s.vault ?? "")}. A rescue now would move ${count(s.covered.length, "token account")}.`
+    + (loose > 0 ? ` ${count(loose, "account")} that hold${loose === 1 ? "s" : ""} something ${loose === 1 ? "is" : "are"} not covered: press Cover new tokens.` : "")
+    + (frozen > 0 ? ` ${count(frozen, "account")} ${frozen === 1 ? "is" : "are"} frozen and cannot be moved by anyone.` : "")
+    + (s.rescuers === "own" ? " Only a key you named may start a rescue of this wallet, so Sentinel cannot." : "");
+}
+
+/** Asks the chain, through the service, how a wallet stands, and draws it. */
+async function lookAt(wallet: string): Promise<RescueStanding | null> {
+  const r = await call("GET", `/wallets/${wallet}/rescue`);
+  if (r.status !== 200) { say(String(r.body?.error ?? "That could not be looked up just now."), true); return null; }
+  standings.set(wallet, r.body as RescueStanding);
+  if (me) drawRescue(me);
+  return r.body as RescueStanding;
+}
+
+/**
+ * Hands transactions the service built to the wallet that holds `address`, one after another. The service
+ * built them and signed nothing: what they do is decided by the wallet's signature, and Warden, when it is
+ * here, reads each one first like any other.
+ */
+function handToWallet(out: HTMLElement, address: string, transactions: string[], lead: HTMLElement[], sent: () => Promise<void>): void {
+  const pays = el("div", "", "choices");
+  const wallets = (registry.get() as unknown as AnyWallet[]).filter((x) => "standard:connect" in x.features && "solana:signAndSendTransaction" in x.features && x.chains.some((c) => c.startsWith("solana:")));
+  for (const w of wallets) {
+    const b = el("button", `Sign with ${w.name}`, "solid");
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        const { accounts } = await w.features["standard:connect"].connect();
+        const account = accounts.find((a: { address: string }) => a.address === address);
+        if (!account) { say(`${w.name} is not showing ${short(address)}. Switch it to that wallet, or choose the wallet that holds it.`, true); return; }
+        for (const [i, t] of transactions.entries()) {
+          say(transactions.length > 1 ? `Waiting for the wallet: ${i + 1} of ${transactions.length}.` : "Waiting for the wallet.");
+          await w.features["solana:signAndSendTransaction"].signAndSendTransaction({ account, chain: rescueInfo?.chain ?? "solana:mainnet", transaction: Uint8Array.from(atob(t), (c) => c.charCodeAt(0)) });
+        }
+        out.hidden = true;
+        await sent();
+      } catch { say("The wallet did not send it. What was already sent stands; press Look to see how the wallet stands now.", true); } finally { b.disabled = false; }
+    });
+    pays.append(b);
+  }
+  if (wallets.length === 0) pays.append(el("p", "No wallet in this browser can be handed a transaction. Open this page in the browser that has the wallet.", "soft"));
+  const close = el("button", "Not now", "small");
+  close.addEventListener("click", () => { out.hidden = true; });
+  out.replaceChildren(...lead, pays, close);
+  out.hidden = false;
+}
+
+/** After the wallet sent something: the chain is asked a few times until it shows the change. */
+async function settle(wallet: string, want: (s: RescueStanding) => boolean, okText: string): Promise<void> {
+  say("Sent. Waiting for the chain to show it…");
+  for (let i = 0; i < 8; i++) {
+    await new Promise((r) => setTimeout(r, 2500));
+    const s = await lookAt(wallet);
+    if (s && want(s)) { say(okText); await refresh(); return; }
+  }
+  say("Sent, and the chain does not show it yet. Press Look in a minute.");
+}
+
+/** The setup: rescue's own terms first, then the vault, then the wallet's signature. */
+function openSetup(wallet: string, standing: RescueStanding | null): void {
+  const out = $("rescueSetup");
+  const head = el("p", `Set up ${short(wallet)} for rescue`, "plain");
+  const terms = el("ul", "", "terms");
+  terms.append(...RESCUE_TERMS.map((t) => el("li", t)));
+  const agree = el("label", "", "soft"), agreed = el("input");
+  agreed.type = "checkbox"; agreed.id = "rescueAgreed";
+  const link = el("a", "terms");
+  link.href = "/terms/#rescue"; link.target = "_blank"; link.rel = "noopener";
+  agree.append(agreed, document.createTextNode(" I have read these lines, and agree to them and to the "), link, document.createTextNode("."));
+  const field = el("div", "", "field"), vault = el("input"), setUp = el("button", standing?.armed ? "Cover new tokens" : "Build the setup", "solid");
+  vault.type = "text"; vault.id = "rescueVault"; vault.spellcheck = false; vault.autocomplete = "off"; vault.placeholder = "The address of your Lamport Vault"; vault.setAttribute("aria-label", "Your Lamport Vault's address");
+  // a wallet that is set up keeps its vault: only the tokens that came since are added
+  if (standing?.armed && standing.vault) { vault.value = standing.vault; vault.readOnly = true; }
+  setUp.id = "rescueBuild";
+  setUp.disabled = !agreed.checked;
+  agreed.addEventListener("change", () => { setUp.disabled = !agreed.checked; });
+  field.append(vault, setUp);
+  const close = el("button", "Not now", "small");
+  close.addEventListener("click", () => { out.hidden = true; });
+  setUp.addEventListener("click", async () => {
+    if (!agreed.checked) return;
+    setUp.disabled = true;
+    const r = await call("POST", `/wallets/${wallet}/rescue/arm`, { vault: vault.value.trim() });
+    setUp.disabled = false;
+    if (r.status !== 200 || !Array.isArray(r.body?.transactions)) { say(String(r.body?.error ?? "That did not work."), true); return; }
+    const transactions = r.body.transactions as string[];
+    if (transactions.length === 0) { out.hidden = true; say("Nothing to set up: every token account that holds something is already covered."); return; }
+    say("");
+    const what = el("p", `${count(transactions.length, "transaction")} to sign. ${transactions.length === 1 ? "It names" : "They name"} the vault ${short(String(r.body.vault))} and ${transactions.length === 1 ? "gives" : "give"} the rescue program permission on ${count(Number(r.body.accounts), "token account")}. Nothing in ${transactions.length === 1 ? "it" : "them"} moves anything.`, "plain");
+    const check = el("p", "Warden, if it is in this browser, will stop and say that an unlimited permission to spend is being given. That is this setup. The address it names should be exactly this one: ", "soft");
+    check.append(el("code", String(r.body.delegate), "addr"));
+    handToWallet(out, wallet, transactions, [head, what, check], () => settle(wallet, (s) => s.armed && s.uncovered.every((u) => u.why !== "not set up"), "Set up. A rescue of this wallet now goes into that vault."));
+  });
+  out.replaceChildren(head, terms, agree, field, close);
+  out.hidden = false;
+  say("");
+}
+
+function drawRescue(mine: Me): void {
+  const info = rescueInfo;
+  $("rescueSection").hidden = !info?.available;
+  if (!info?.available) return;
+  $("rescueState").textContent = !info.plan ? "Rescue comes with Pro. A wallet that was set up before stays set up until you take the setup away, which you can do here on any plan."
+    : info.on ? "Sentinel can rescue the wallets that are set up below."
+    : "This service holds no key to rescue with: it can show how a wallet stands and build a setup, and cannot carry a rescue out.";
+  $("rescueWallets").replaceChildren(...mine.wallets.map((w) => {
+    const seen = standings.get(w.address) ?? null;
+    const armed = seen ? seen.armed : w.armed;
+    const acts: HTMLElement[] = [];
+    const look = el("button", "Look", "small");
+    look.addEventListener("click", async () => { look.disabled = true; if (await lookAt(w.address)) say(""); look.disabled = false; });
+    acts.push(look);
+    if (info.plan) {
+      const set = el("button", armed ? "Cover new tokens" : "Set up", "small");
+      set.addEventListener("click", async () => { set.disabled = true; const s = await lookAt(w.address); set.disabled = false; if (s) openSetup(w.address, s); });
+      acts.push(set);
+    }
+    if (armed && info.on && info.plan) acts.push(sure("Rescue now", "Move it all to the vault?", async () => {
+      const r = await call("POST", `/wallets/${w.address}/rescue/now`);
+      if (r.status === 200) { say(rescuedText(r.body)); await lookAt(w.address); await refresh(); } else say(String(r.body?.error ?? "That did not work."), true);
+    }));
+    if (armed) acts.push(sure("Take the setup away", "Take it away?", async () => {
+      const r = await call("POST", `/wallets/${w.address}/rescue/disarm`);
+      if (r.status !== 200 || !Array.isArray(r.body?.transactions)) { say(String(r.body?.error ?? "That did not work."), true); return; }
+      const transactions = r.body.transactions as string[];
+      const what = el("p", `${count(transactions.length, "transaction")} to sign. ${transactions.length === 1 ? "It revokes" : "They revoke"} every permission this wallet gave for rescue and ${transactions.length === 1 ? "closes" : "close"} the setup. After that nothing can rescue this wallet.`, "plain");
+      handToWallet($("rescueSetup"), w.address, transactions, [el("p", `Take the rescue setup away from ${short(w.address)}`, "plain"), what], () => settle(w.address, (s) => !s.armed, "Taken away. This wallet is no longer set up for rescue."));
+    }));
+    return row(w.address, seen ? standingText(seen) : armed ? "Set up for rescue. Press Look to see what a rescue would move now." : "Not set up for rescue.", acts, "addr");
+  }));
+  const auto = $<HTMLInputElement>("rescueAuto");
+  auto.checked = info.auto;
+  // switching it off is always allowed; switching it on needs the plan and a service that can rescue
+  auto.disabled = !info.auto && !(info.plan && info.on);
 }
 
 /**
@@ -378,7 +540,8 @@ let watching: { push: boolean; late: boolean } | null = null;
 
 async function refresh(): Promise<void> {
   if (!session) { me = null; render(); return; }
-  const [m, e, b, h] = await Promise.all([call("GET", "/me"), call("GET", "/events"), call("GET", "/billing"), call("GET", "/health")]);
+  const [m, e, b, h, r] = await Promise.all([call("GET", "/me"), call("GET", "/events"), call("GET", "/billing"), call("GET", "/health"), call("GET", "/rescue")]);
+  rescueInfo = r.status === 200 && typeof r.body?.available === "boolean" ? (r.body as RescueInfo) : rescueInfo;
   watching = h.status === 200 && h.body ? { push: h.body.push === "on", late: Number(h.body.late) > 0 } : null;
   if (m.status !== 200) { if (m.status !== 401) say(String(m.body?.error ?? "Sentinel could not be reached."), true); me = m.status === 401 ? null : me; render(); return; }
   me = m.body as Me;
@@ -418,6 +581,14 @@ $("addTelegram").addEventListener("click", async () => {
     if (Date.now() < until) setTimeout(() => void look(), 4000); else box.hidden = true;
   };
   setTimeout(() => void look(), 4000);
+});
+
+$<HTMLInputElement>("rescueAuto").addEventListener("change", async (e) => {
+  const box = e.target as HTMLInputElement, on = box.checked;
+  box.disabled = true;
+  const worked = await done(call("POST", "/rescue/auto", { on }), on ? "On. After a serious alert Sentinel rescues the wallets that are set up, and tells you afterwards." : "Off. Sentinel only alerts; a rescue happens when you press the button.");
+  if (!worked) box.checked = !on;
+  await refresh();
 });
 
 registry.on("register", () => { if (!me || me.wallets.length < me.limits.wallets) render(); });

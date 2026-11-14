@@ -17,7 +17,8 @@ import { verifyStripeSignature, type Billing } from "./billing.js";
 import type { Prepaid } from "./prepaid.js";
 import { LINK_SECONDS, type LinkCodes } from "./telegram.js";
 import { addressBytes, looksLikeSignature } from "./crypto.js";
-import { channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, takerTrustedNotice, walletRemovedNotice } from "./notices.js";
+import { autoRescueNotice, channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, takerTrustedNotice, walletRemovedNotice } from "./notices.js";
+import { NOT_ON_CHAIN, type Rescue } from "./rescue.js";
 import { NonceBook, verifySignIn } from "./signin.js";
 import type { MemoryStore, StoredEvent } from "./store.js";
 import type { Watcher } from "./watcher.js";
@@ -61,6 +62,11 @@ export interface ApiDeps {
   prepaid?: Pick<Prepaid, "offer" | "quote" | "check" | "transaction">;
   /** The Telegram bot, when the service has one: its name, and the codes that tie a chat to a profile. Absent: Telegram is not offered. */
   telegram?: { username: string; codes: Pick<LinkCodes, "issue"> };
+  /**
+   * Rescue (rescue.ts): showing how a wallet stands, building the setup its owner signs, and moving what is
+   * set up into the owner's vault. Absent: the page is told there is no rescue here.
+   */
+  rescue?: Pick<Rescue, "on" | "available" | "network" | "status" | "arm" | "disarm" | "rescue">;
   /** How many new profiles one network may start in a day (default 5). */
   newProfilesPerDay?: number;
   /** Told when a webhook that Stripe signed could not be applied: Stripe will send it again, and someone should know. */
@@ -136,7 +142,7 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       })),
       // `active`: alerts go there now. A channel the plan does not cover stays listed, and unused.
       channels: accounts.channelViews(profile),
-      limits: { wallets: PLANS[p.tier].wallets, channels: PLANS[p.tier].channels, kinds: PLANS[p.tier].kinds.filter((k) => k !== "telegram" || !!deps.telegram), pollSeconds: PLANS[p.tier].pollSeconds, push: PLANS[p.tier].push },
+      limits: { wallets: PLANS[p.tier].wallets, channels: PLANS[p.tier].channels, kinds: PLANS[p.tier].kinds.filter((k) => k !== "telegram" || !!deps.telegram), pollSeconds: PLANS[p.tier].pollSeconds, push: PLANS[p.tier].push, rescue: PLANS[p.tier].rescue },
     };
   };
 
@@ -309,14 +315,59 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       return r.ok ? ok({ url: r.url }) : no(r.status, r.why);
     }
 
+    // ---- rescue: moving a wallet's tokens into its owner's Lamport Vault
+    if (route === "GET /rescue") {
+      // `available`: the programs are on the chain. `on`: this service holds a key to rescue with; without one it shows and builds, and cannot move.
+      const available = !!deps.rescue && (await deps.rescue.available());
+      return ok({ available, on: available && deps.rescue!.on, plan: PLANS[accounts.profile(session)!.tier].rescue, auto: accounts.profile(session)!.autoRescue, chain: available ? await deps.rescue!.network() : null });
+    }
+    if (route === "POST /rescue/auto") {
+      const on = field(req.body, "on");
+      if (typeof on !== "boolean") return no(400, "say on: true or on: false.");
+      // switching it off is never refused; switching it on needs the plan that has rescue, and a service that can rescue
+      if (on && !PLANS[accounts.profile(session)!.tier].rescue) return no(403, "rescue comes with Pro.");
+      if (on && !(deps.rescue?.on && (await deps.rescue.available()))) return no(501, NOT_ON_CHAIN);
+      if (!limiter.allow(`change:${session}`, 20, 3600, t)) return TOO_MANY_CHANGES;
+      if (accounts.setAutoRescue(session, on)) notice(session, autoRescueNotice(on, who!.wallet));
+      return ok({ auto: on });
+    }
+    if (parts[1] === "wallets" && parts[2] && parts[3] === "rescue" && parts.length <= 5) {
+      const wallet = parts[2], what = parts[4] ?? "";
+      if (!accounts.walletsOf(session).includes(wallet)) return no(404, "that wallet is not in this profile.");
+      if (!deps.rescue || !(await deps.rescue.available())) return no(501, NOT_ON_CHAIN);
+      if (req.method === "GET" && what === "") {
+        // a look costs the two listings an RPC rations: as many as someone setting a wallet up needs, and no more
+        if (!limiter.allow(`rescue-look:${session}`, 40, 600, t)) return SLOW_DOWN;
+        try { return ok(await deps.rescue.status(wallet)); } catch { return no(502, "the chain could not be read just now. Try again in a minute."); }
+      }
+      if (req.method === "POST" && (what === "arm" || what === "disarm")) {
+        if (!limiter.allow(`rescue-setup:${session}`, 20, 600, t)) return SLOW_DOWN;
+        const r = what === "arm" ? await deps.rescue.arm(session, wallet, field(req.body, "vault")) : await deps.rescue.disarm(session, wallet);
+        return r.ok ? ok(r) : no(r.status, r.why);
+      }
+      if (req.method === "POST" && what === "now") {
+        if (!limiter.allow(`rescue-now:${session}`, 10, 600, t)) return SLOW_DOWN;
+        const r = await deps.rescue.rescue(session, wallet);
+        return r.ok ? ok(r) : no(r.status, r.why);
+      }
+    }
+
     if (route === "GET /events") return ok({ events: accounts.eventsOf(session).map(eventView) });
 
     if (req.method === "POST" && parts[1] === "events" && parts[2] && parts[3] === "answer" && parts.length === 4) {
       const event = accounts.eventOf(session, parts[2]);
       if (!event) return no(404, "there is no such alert.");
       const answer = field(req.body, "answer");
-      if (answer === "rescue") return no(501, "rescue is not switched on yet.");
-      if (answer !== "this_was_me" && answer !== "ignore") return no(400, "the answer is this_was_me or ignore.");
+      if (answer === "rescue") {
+        // the same rescue as the one asked for on the wallet itself; the alert then shows that it was answered with one
+        if (!deps.rescue || !(await deps.rescue.available())) return no(501, NOT_ON_CHAIN);
+        if (!limiter.allow(`rescue-now:${session}`, 10, 600, t)) return SLOW_DOWN;
+        const r = await deps.rescue.rescue(session, event.wallet);
+        if (!r.ok) return no(r.status, r.why);
+        store.answer(event.id!, "rescue");
+        return ok(r);
+      }
+      if (answer !== "this_was_me" && answer !== "ignore") return no(400, "the answer is this_was_me, rescue or ignore.");
       store.answer(event.id!, answer);
       // who it paid becomes someone this wallet pays; read from the chain again, not taken from the page
       if (answer === "this_was_me" && event.signature) {

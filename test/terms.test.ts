@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PRICE_CENTS, prepaidTerms, purchaseTerms } from "../sentinel/service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PRICE_CENTS, RESCUE_TERMS, prepaidTerms, purchaseTerms } from "../sentinel/service/src/plans.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (...p: string[]) => readFileSync(join(root, ...p), "utf8");
@@ -39,11 +39,26 @@ describe("the terms", () => {
     expect(read("scripts", "stripe-sentinel-setup.mjs")).toContain("['features[subscription_cancel][mode]', 'at_period_end']");
     // a price that moves with the token is told before the bill
     expect(read("sentinel", "service", "src", "billing.ts")).toContain("this.tell(p.id, priceChangedNotice(");
-    // rescue is not something Sentinel can do today
-    expect(text).toContain("Sentinel cannot move anything today.");
-    expect(read("sentinel", "service", "src", "server.ts")).toContain('if (answer === "rescue") return no(501, "rescue is not switched on yet.");');
+    // Sentinel moves nothing unless a wallet was set up for rescue, and nothing at all without a key to rescue with
+    expect(text).toContain("Sentinel can move nothing of yours unless you set a wallet up for rescue, and then only the tokens you set up, and only into the Lamport Vault you named.");
+    const rescue = read("sentinel", "service", "src", "rescue.ts");
+    expect(rescue).toContain('if (!this.rescuer) return no(501, "rescue is not switched on here.");');
+    expect(rescue).toContain("if (!(await this.available())) return no(501, NOT_ON_CHAIN);");
+    // where a rescue goes is the program's rule, not the service's: the destination is worked out from the vault in the owner's own setup
+    expect(read("sentinel", "program", "README.md")).toContain("They cannot decide where");
     // each wallet is added on its own signature
     expect(text).toContain("Sentinel asks each one for a signature before it is added.");
+  });
+
+  it("state rescue's own terms in the words the page shows before a wallet can be set up, and the page will not set one up before they are agreed to", () => {
+    const list = /<ul id="rescue-terms">([\s\S]*?)<\/ul>/.exec(terms)![1]!;
+    const lines = [...list.matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]!.trim());
+    expect(lines).toEqual([...RESCUE_TERMS]);
+    const page = read("sentinel", "web", "src", "app.ts");
+    expect(page).toContain("RESCUE_TERMS.map(");
+    expect(page).toContain("setUp.disabled = !agreed.checked");
+    // what the terms say of the program is what the program's own notes say
+    expect(read("sentinel", "program", "README.md")).toMatch(/not audited/i);
   });
 
   it("are linked from where someone pays, and from every page's foot", () => {

@@ -99,4 +99,17 @@ export function paceText(pollSeconds: number, now: { push: boolean; late: boolea
 
 /** What Pro will add, and why it does not yet. Shown wherever Pro is described, and never as a feature. */
 export const PRO_NOT_YET =
-  "Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs the vault and the rescue program on mainnet, and both are waiting on their audits. It joins Pro when they are, at the same price.";
+  "Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs Lamport Vault and the rescue program on Solana mainnet, and neither is there yet. It joins Pro when they are, at the same price.";
+
+/**
+ * Rescue's own terms: what someone agrees to by setting a wallet up for it. The Sentinel page shows these
+ * lines before the setup can be started, and the terms page states the same ones (test/terms.test.ts).
+ */
+export const RESCUE_TERMS: readonly string[] = [
+  "Setting a wallet up is your signature. It names one Lamport Vault of yours, and gives the rescue program permission to move each token account you set up. That permission has no limit in amount and, as the program stands, one destination: that vault.",
+  "A rescue moves every token account you set up into that vault, whole. You can start one. So can Sentinel: when you ask it to, or on its own after a serious alert if you switch that on. Whoever holds one of Lamport's rescuer keys could start one at a time you did not choose; your tokens would then be in your vault, not gone.",
+  "Only your vault's key moves anything out of the vault. If you lose that key, what was rescued is lost with it, and we cannot get it back.",
+  "A rescue does not cover SOL, tokens that arrive after you set a wallet up (set it up again to cover them), frozen token accounts, or anything staked, lent or listed somewhere else. A wallet can be emptied in one transaction, and a rescue can come too late.",
+  "The rescue program and Lamport Vault are public code that no outside firm has audited, and Lamport holds the key that can change the rescue program. You use rescue at your own risk, within the limits in these terms.",
+  "You can take the setup away at any time on the Sentinel page: your wallet revokes each permission and closes the setup.",
+];

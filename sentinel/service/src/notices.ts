@@ -74,3 +74,9 @@ export const priceChangedNotice = (to: "full" | "holder", cents: number, holderM
   to === "holder"
     ? `From its next bill, this profile's Sentinel plan is ${dollars(cents)} a month: its wallets hold ${holderMin.toLocaleString("en-US")} $LAMPORT between them.`
     : `From its next bill, this profile's Sentinel plan is ${dollars(cents)} a month: its wallets no longer hold ${holderMin.toLocaleString("en-US")} $LAMPORT between them.`;
+
+/** Rescue, unasked, was switched on or off for the profile. */
+export const autoRescueNotice = (on: boolean, wallet: string | null): string =>
+  on
+    ? `Rescue without asking was switched on for your Sentinel profile${by(wallet)}. From now on, when an alert is serious enough on its own, Sentinel moves the tokens of your armed wallets into your Lamport Vault at once and tells you afterwards. ${notYou(wallet)}`
+    : `Rescue without asking was switched off for your Sentinel profile${by(wallet)}. Sentinel now only alerts; a rescue happens when you ask for one. ${notYou(wallet)}`;
