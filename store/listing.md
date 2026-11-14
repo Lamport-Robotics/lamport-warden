@@ -5,14 +5,16 @@ What to paste into the developer dashboard. Keep this file in step with what is 
 Item ID: `dmlhclkglnpkdhidfjfgjfdjnblnalea`, created on 2026-11-13 from `lamport-warden-0.5.0.zip`. It is a
 **draft** and is not submitted. It was submitted once that day and the review was cancelled, to wait for the
 version that has Sentinel built in. That was 0.6.0; 0.6.1 added a welcome on first install and a link to the
-practice page; the current one is 0.7.0, whose settings page describes the plans as they now are (alerts in
-seconds on Pro) and which goes with the published terms at warden.lamportrobotics.com/terms/.
+practice page; 0.7.0's settings page describes the plans as they now are (alerts in seconds on Pro) and goes
+with the published terms at warden.lamportrobotics.com/terms/; the current one is 0.7.1, which reads a
+wallet's rescue setup from the chain when the Sentinel page asks it to cover tokens in a browser that never
+saw the setup.
 
-To submit 0.7.0:
+To submit 0.7.1:
 
-1. Package tab: upload `lamport-warden-0.7.0.zip` (`pnpm package`).
+1. Package tab: upload `lamport-warden-0.7.1.zip` (`pnpm package`).
 2. Store listing tab: paste the description below again (it now mentions Sentinel and the practice page)
-   and replace the screenshots with the four in `store/screenshots/` (retaken from 0.7.0).
+   and replace the screenshots with the four in `store/screenshots/` (retaken from 0.7.1).
 3. Privacy tab: paste the storage justification and the data-usage note below again.
 4. Distribution tab: Payments. The extension itself sells nothing; it links to the Sentinel page, where the
    paid plan is sold once checkout is open. Choose "Contains in-app purchases" if checkout is open when you
@@ -58,8 +60,8 @@ page tells you when Warden meets it.
 You can watch it work before you trust it with anything: warden.lamportrobotics.com/try has a practice wallet
 that holds nothing and eight requests to try on it.
 
-No account, no model, and by default nothing goes to Lamport. The only network request is to read on-chain
-lookup tables from a Solana RPC you can change or turn off. You can turn on simulation, which sends a swap,
+No account, no model, and by default nothing goes to Lamport. The only network requests are to a Solana RPC
+you can change or turn off: to read on-chain lookup tables, and, on the Sentinel page, a wallet's rescue setup. You can turn on simulation, which sends a swap,
 unsigned, to your RPC to find out what it would do; it is off until you choose it.
 
 Sentinel is Warden's optional watching service: it watches the wallets you give it after you sign and tells
@@ -80,7 +82,7 @@ Pro is $15 a month, or $10 while a wallet in your Sentinel profile holds 250,000
 • Each wallet read every 20 seconds instead of every minute
 • Up to 5 alert channels, including Discord and Slack, so a team sees an alert together
 
-Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs the vault and the rescue program on mainnet, and both are waiting on their audits. It joins Pro when they are, at the same price.
+Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs Lamport Vault and the rescue program on Solana mainnet, and neither is there yet. It joins Pro when they are, at the same price.
 
 A plan is started and cancelled on the Sentinel page (warden.lamportrobotics.com/sentinel), which says
 whether Pro is on sale. It is paid by card through Stripe; nothing is bought inside the extension.
@@ -140,7 +142,7 @@ No login is needed. No wallet or cryptocurrency is needed.
 1. Install the extension. It opens its own settings page with a short welcome. Press
    "See it work with a practice wallet" there, or open https://warden.lamportrobotics.com/try/
    The page makes a practice wallet that holds nothing. Nothing on it is sent to any blockchain.
-   Near the top it says "Warden 0.7.0 is in this browser and is standing in front of the practice wallet."
+   Near the top it says "Warden 0.7.1 is in this browser and is standing in front of the practice wallet."
 2. Press "Try it" beside "Pay someone for the first time".
    The extension shows its prompt: one sentence saying what the request does, with Cancel and
    "Continue to wallet". Press "Continue to wallet".

@@ -1,6 +1,6 @@
 /**
  * The background worker. Holds the engine, the owner's history (chrome.storage.local, on this machine only)
- * and the one network call (lookup tables). The content script on each page only draws the prompt.
+ * and the calls to the RPC (lookup tables, and a wallet's rescue setup when the Sentinel page needs it). The content script on each page only draws the prompt.
  *
  * It keeps nothing between messages that it could not lose: the browser stops an idle worker after half a
  * minute, and a wallet's own prompt can stay open longer than that.
@@ -11,7 +11,8 @@ import { ARMING_ORIGIN } from "./defaults.js";
 import { judge, recordSigned, type Judged, type Sources, type Store } from "./judge.js";
 import { reportOwnSignature } from "./report.js";
 import { LINK_PREFIX, fromSentinelPage, linkFrom, linkKey, readPageAsk, type PageAnswer } from "./sentinel-link.js";
-import { TableReader } from "./rpc.js";
+import { TableReader, readAccount } from "./rpc.js";
+import { configAddress, vaultOfConfig } from "./sentinel.js";
 import { KEYS, settingsFrom } from "./settings.js";
 import { Simulator } from "./simulate.js";
 import type { JudgeReply, ToBackground, WireRequest } from "./messages.js";
@@ -38,9 +39,15 @@ const sources: Sources = {
     if (!s.simulate || !s.rpcUrl) return null;
     return simulator.run(txBytes, messageBytes, owner, tables, s.rpcUrl);
   },
+  // only for approvals handed over by the Sentinel page when this browser remembers no setup (judge.ts)
+  sentinelVault: async (owner) => {
+    const { rpcUrl } = await settings();
+    if (!rpcUrl) return null;
+    return vaultOfConfig(await readAccount(configAddress(owner), rpcUrl, plainFetch), owner);
+  },
 };
 /** For recording a signed send: the same reading of the request, without asking the RPC to run it again. */
-const withoutSimulation: Sources = { tables: sources.tables };
+const withoutSimulation: Sources = { tables: sources.tables, sentinelVault: sources.sentinelVault };
 
 const valid = (r: any): r is WireRequest => !!r && ["tx", "msg", "signin", "opaque"].includes(r.kind) && typeof r.bytes === "string" && r.bytes.length < 200_000 && typeof r.owner === "string" && r.owner.length <= 64;
 

@@ -54,6 +54,19 @@ export function approveForRescue(o: { owner: PublicKey; source: PublicKey; mint:
   });
 }
 
+/**
+ * Makes the vault's own token account for a mint, paid for by `payer`, and does nothing when it is there
+ * already. An owner signs these at setup, so that a rescue only ever moves tokens into accounts that exist:
+ * the key that rescues then never pays for one, and nobody can make it pay.
+ */
+export function createVaultTokenAccount(payer: PublicKey, vault: PublicKey, mint: PublicKey, tokenProgram = TOKEN): TransactionInstruction {
+  return new TransactionInstruction({
+    programId: ASSOCIATED_TOKEN,
+    keys: [key(payer, true, true), key(vaultTokenAddress(vault, mint, tokenProgram), false, true), key(vault, false, false), key(mint, false, false), key(SYSTEM, false, false), key(tokenProgram, false, false)],
+    data: Buffer.from([1]), // CreateIdempotent
+  });
+}
+
 export const proposeVault = (owner: PublicKey, newVault: PublicKey) => new TransactionInstruction({ programId: PROGRAM, keys: [key(owner, true, false), key(configAddress(owner), false, true), key(newVault, false, false)], data: data("propose_vault") });
 export const acceptVault = (owner: PublicKey, newVault: PublicKey) => new TransactionInstruction({ programId: PROGRAM, keys: [key(owner, true, false), key(configAddress(owner), false, true), key(newVault, false, false)], data: data("accept_vault") });
 export const cancelProposal = (owner: PublicKey) => new TransactionInstruction({ programId: PROGRAM, keys: [key(owner, true, false), key(configAddress(owner), false, true)], data: data("cancel_proposal") });
@@ -108,19 +121,25 @@ export interface Holding {
   amount: bigint; decimals: number;
   delegate: string | null; delegatedAmount: bigint;
   frozen: boolean;
+  /**
+   * True for a token that cannot be moved by a plain transfer, or not safely: one that is not transferable at
+   * all, or one whose issuer runs a program of its own on every transfer (which could refuse a rescue, or
+   * refuse the vault's owner when they take it out again). Left out of a setup and of a rescue.
+   */
+  unmovable?: boolean;
 }
 
 /**
  * Which accounts a rescue can move, biggest first. Only an account that still names Sentinel's delegate for
- * this vault, with something in it, not frozen: anything else the program would refuse, and a refused
- * instruction fails the whole transaction it rides in.
+ * this vault, with something in it, not frozen, and of a token a plain transfer moves: anything else the
+ * program or the token would refuse, and a refused instruction fails the whole transaction it rides in.
  * `worth` puts a value on a holding so that the most valuable goes first; without it, the largest count of
  * whole tokens does, which is only a guess across different tokens.
  */
 export function planRescue(holdings: Holding[], owner: PublicKey, vault: PublicKey, worth?: (h: Holding) => number): Holding[] {
   const delegate = delegateAddress(owner, vault).toBase58();
   const value = worth ?? ((h: Holding) => Number(h.amount) / 10 ** h.decimals);
-  return holdings.filter((h) => h.delegate === delegate && h.delegatedAmount > 0n && h.amount > 0n && !h.frozen).sort((a, b) => value(b) - value(a));
+  return holdings.filter((h) => h.delegate === delegate && h.delegatedAmount > 0n && h.amount > 0n && !h.frozen && !h.unmovable).sort((a, b) => value(b) - value(a));
 }
 
 /**

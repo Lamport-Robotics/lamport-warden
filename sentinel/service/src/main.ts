@@ -1,6 +1,7 @@
 /**
- * The process: the watcher on a timer, and the API beside it. It holds no signing key. Everything it needs
- * comes from the environment, and it refuses to start without the parts that keep owners' data closed.
+ * The process: the watcher on a timer, and the API beside it. It holds no signing key, unless it was given
+ * one to rescue with (SENTINEL_RESCUER_KEY, below). Everything it needs comes from the environment, and it
+ * refuses to start without the parts that keep owners' data closed.
  *
  *   SENTINEL_RPC_URL      the Solana RPC to read from (required)
  *   SENTINEL_DATA_KEY     32 random bytes in base64, sealing where alerts go (required; `openssl rand -base64 32`)
@@ -49,6 +50,15 @@
  *   SENTINEL_HOLDER_MINT, SENTINEL_HOLDER_MIN                  the token and whole-token amount for the holder price
  *                                                              (default $LAMPORT, 250000)
  *   SENTINEL_HOLDER_RPC_URL    a mainnet RPC for the holder check, when SENTINEL_RPC_URL is not mainnet
+ *
+ * Rescue (rescue.ts) is shown and set up through the page wherever the rescue program and Lamport Vault are on
+ * the chain SENTINEL_RPC_URL reads. To carry a rescue out the service needs a key:
+ *   SENTINEL_RESCUER_KEY       the secret key of one of Lamport's rescuers, as `solana-keygen` writes it (a JSON
+ *                              list of 64 numbers) or the same 64 bytes in base64. All this key can do to an owner
+ *                              is move the tokens they set up into the vault they named. It pays the fee of each
+ *                              rescue, so it has to hold a little SOL. Without it nothing here can move anything.
+ *   SENTINEL_RESCUE_RPC_URL    an RPC for sending rescues, when it should not be SENTINEL_RPC_URL. Either way a
+ *                              rescue's calls go ahead of the watcher's reading and never wait behind it.
  */
 import { join } from "node:path";
 import { Accounts, cleanTarget, type ReadBudget } from "./accounts.js";
@@ -60,6 +70,9 @@ import { Ops } from "./ops.js";
 import { PLANS, type ChannelKind, type Tier } from "./plans.js";
 import { Prepaid } from "./prepaid.js";
 import { Push, pushUrlFor } from "./push.js";
+import { Rescue } from "./rescue.js";
+import { Rescuer } from "./rescuer.js";
+import { Keypair } from "@solana/web3.js";
 import { SolPrice } from "./solprice.js";
 import { LinkCodes, TOKEN_SHAPE, TelegramBot, listen as hearTelegram, type TelegramDeps } from "./telegram.js";
 import { channelAddedNotice, channelRemovedNotice } from "./notices.js";
@@ -69,7 +82,7 @@ import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore, type StoredEvent } from "./store.js";
 import { ACCOUNTS_PER_CALL, Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { payTo: string | null; payUsdcMint: string | null; paySol: boolean; telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rescuerKey: Uint8Array | null; rescueRpcUrl: string | null; payTo: string | null; payUsdcMint: string | null; paySol: boolean; telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -93,6 +106,19 @@ function billingFrom(env: Record<string, string | undefined>, origin: string, rp
     holderRpcUrl: env.SENTINEL_HOLDER_RPC_URL || rpcUrl,
     ...(/^bpc_[A-Za-z0-9]+$/.test(env.SENTINEL_STRIPE_PORTAL_CONFIG ?? "") ? { portalConfiguration: env.SENTINEL_STRIPE_PORTAL_CONFIG } : {}),
   } };
+}
+
+/** The rescuer's secret key from its setting: null when there is none, undefined when what is there is not a keypair. */
+export function rescuerKeyFrom(given: string | undefined): Uint8Array | null | undefined {
+  const s = (given ?? "").trim();
+  if (s === "") return null;
+  let bytes: Uint8Array | null = null;
+  if (s.startsWith("[")) { try { const a: unknown = JSON.parse(s); if (Array.isArray(a) && a.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) bytes = Uint8Array.from(a as number[]); } catch { /* not a list */ } }
+  else if (/^[A-Za-z0-9+/]+={0,2}$/.test(s)) bytes = Uint8Array.from(Buffer.from(s, "base64"));
+  if (!bytes || bytes.length !== 64) return undefined;
+  // the two halves have to belong together: a key pasted wrong would sign nothing the chain accepts
+  try { Keypair.fromSecretKey(bytes); } catch { return undefined; }
+  return bytes;
 }
 
 /** Reads the configuration, or says in one sentence what is missing. */
@@ -156,7 +182,12 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
     ? { perMinute, cost: { watch: 60 / pollSeconds, pro: 60 / proPollSeconds }, reservedForPro: billing.billing ? Math.floor(perMinute * (reservedForPro / maxWallets)) : 0 }
     : null;
   if (payTo && !billing.billing) return { ok: false, why: "SENTINEL_PAY_TO needs the paid plan's settings (the Stripe ones) beside it: they say who is sold to and at what price." };
-  return { ok: true, config: { payTo, payUsdcMint, paySol: env.SENTINEL_PAY_SOL !== "off", telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
+  const rescuerKey = rescuerKeyFrom(env.SENTINEL_RESCUER_KEY);
+  // said without repeating it: a key that is wrong is still a secret
+  if (rescuerKey === undefined) return { ok: false, why: "SENTINEL_RESCUER_KEY has to be a keypair as solana-keygen writes it (a list of 64 numbers), or those 64 bytes in base64." };
+  const rescueRpcUrl = (env.SENTINEL_RESCUE_RPC_URL ?? "").trim() || null;
+  try { if (rescueRpcUrl && !/^https?:$/.test(new URL(rescueRpcUrl).protocol)) throw new Error(); } catch { return { ok: false, why: "SENTINEL_RESCUE_RPC_URL has to be the address of a Solana RPC." }; }
+  return { ok: true, config: { rescuerKey, rescueRpcUrl, payTo, payUsdcMint, paySol: env.SENTINEL_PAY_SOL !== "off", telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -421,7 +452,21 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   // fifths of its pace is given to this; the rest is for wallets whose accounts did move).
   const passesPerMinute = cfg.rpcPace.heavyPer10s ? cfg.rpcPace.heavyPer10s * 6 * 0.4 : Infinity;
   const fullEverySeconds = () => Math.max(600, Math.ceil(store.wallets().length / passesPerMinute) * 60);
-  const watcher = new Watcher(rpc, store, notifier, { readers: cfg.readers, fullEverySeconds });
+  // Rescue: shown and set up wherever the two programs are on this chain; carried out only with a key.
+  // The key that rescues asks the chain ahead of everything else that is waiting (rescuer.ts): a rescue is a
+  // race, and must not stand in line behind the reading of every other wallet. Through the same client, so
+  // that one RPC is still asked at one pace; through another when it was given an RPC of its own.
+  const rescuer = cfg.rescuerKey ? new Rescuer(cfg.rescueRpcUrl ? new HttpRpc(cfg.rescueRpcUrl) : rpc, Keypair.fromSecretKey(cfg.rescuerKey)) : null;
+  const rescue = new Rescue(rpc, rescuer, accounts, store, {
+    notify: (wallet, sentence) => notifier.notify(wallet, "urgent", sentence),
+    notice: (profile, sentence) => notifier.notice(profile, sentence),
+  });
+  const watcher = new Watcher(rpc, store, notifier, {
+    readers: cfg.readers, fullEverySeconds,
+    ...(rescuer ? { ownRescues: rescuer.sent } : {}),
+    // an alert that is reason enough on its own, for an owner who asked for it: rescued without waiting to be asked
+    onRaised: (event) => { void rescue.after(event).catch((e) => console.error(`sentinel: a rescue after an alert failed: ${String((e as Error).message ?? e).slice(0, 200)}`)); },
+  });
   const state = { lastPassAt: null as number | null, blind: 0, late: 0 };
 
   if (store.restoredFrom) void ops.say(`The data file was ${store.setAside ? "unreadable" : "missing"}, so Sentinel started from the snapshot ${store.restoredFrom.split("/").pop()}. What changed after that snapshot is lost${store.setAside ? "; the unreadable file was set aside, not deleted" : ""}.`, "restored", 0);
@@ -451,6 +496,20 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
     const short = places.reads ? nearlyOutOfReads(places.reads.promised, places.reads.open, places.reads.inAll) : null;
     if (short) void ops.say(short, "nearly-out-of-reads", 86_400);
   }, 3600);
+
+  // Every five minutes, where rescue can work at all: which wallets are set up for it is read from the chain,
+  // so that a setup made or taken away anywhere is noticed and its owner told. And the key that rescues is
+  // looked at: one that cannot pay for a rescue, or is not among Lamport's rescuers, rescues nothing.
+  let resumed = false;
+  const stopRescueSync = startRounds(async () => {
+    if (!(await rescue.available())) return;
+    const key = await rescue.keyStanding();
+    // once, after starting: an alert that was reason for a rescue just before the service went down is acted on now
+    if (!resumed) { resumed = true; const n = await rescue.resume(); if (n) console.error(`sentinel: ${n} rescue(s) picked up after the restart`); }
+    await rescue.sync(store.wallets().map((w) => w.address));
+    if (key && !key.amongRescuers) void ops.say("The key Sentinel rescues with is not among Lamport's rescuers on the chain. No rescue it sends will be accepted until it is added to them.", "rescuer-not-listed", 6 * 3600);
+    if (key && key.lamports < 20_000_000) void ops.say(`The key Sentinel rescues with holds ${(key.lamports / 1e9).toFixed(3)} SOL. It pays the fee of every rescue, and for the vault's token accounts the first time: send it some before it runs out.`, "rescuer-low", 6 * 3600);
+  }, 300);
 
   const billing = cfg.billing ? new Billing(cfg.billing, accounts, cfg.billing.holderRpcUrl === cfg.rpcUrl ? rpc : new HttpRpc(cfg.billing.holderRpcUrl), new Stripe(cfg.billing.secretKey), { notice: (profile, sentence) => notifier.notice(profile, sentence) }) : null;
   // Paying ahead in USDC or SOL: sold to the same people at the same prices as the card plan, checked on
@@ -519,6 +578,7 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
     webhookFailed: (why) => { void ops.say(`A webhook from Stripe could not be applied (${why.slice(0, 120)}). Stripe sends it again; if this repeats, a plan may not be starting or ending when it should.`, "webhook-failed", 3600); },
     ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}),
     ...(prepaid ? { prepaid } : {}),
+    rescue,
     // read when a request comes in, so that a bot that answers later is offered from then on
     get telegram() { return offered.telegram; },
   }, { port: cfg.port, trustProxy: cfg.trustProxy });
@@ -526,5 +586,5 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   // said at most every ten minutes, so a service that keeps falling over does not fill the channel
   void ops.say(`Sentinel started: ${started}.`, "started", 600);
   // on the way out, what was waiting to be written (when each wallet was last looked at) is written
-  return async () => { stopRounds(); push?.stop(); stopTelegram(); stopHourly(); stopPrepaid(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); store.flush(); };
+  return async () => { stopRounds(); push?.stop(); stopTelegram(); stopHourly(); stopPrepaid(); stopDaily(); stopRescueSync(); await new Promise<void>((r) => server.close(() => r())); store.flush(); };
 }

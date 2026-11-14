@@ -69,6 +69,15 @@
       <ul class="rows" id="events"></ul>
     </section>
 
+    <section id="rescueSection" hidden>
+      <h2>Rescue</h2>
+      <p class="plain">A rescue moves a wallet's tokens into a Lamport Vault of yours, where only the vault's key can move them. You set a wallet up for it with your own signature. After that Sentinel can do it when you press the button, or on its own after a serious alert if you switch that on. A rescue goes to your vault and nowhere else.</p>
+      <p class="soft" id="rescueState"></p>
+      <ul class="rows" id="rescueWallets"></ul>
+      <div class="setup" id="rescueSetup" hidden></div>
+      <p class="soft"><label><input type="checkbox" id="rescueAuto"> Rescue without asking, after an alert that is serious on its own (an account handed to someone else, tokens taken under a permission). You are told afterwards. Off, Sentinel only alerts and you press the button.</label></p>
+    </section>
+
     <section>
       <h2>Warden in this browser</h2>
       <p class="plain">Sentinel sees only the chain, so it cannot tell a payment you made from one a thief made with your key. Warden can tell it: when a wallet you link here signs a transaction you let through, Warden sends Sentinel the wallet's address and the transaction's signature, and Sentinel stays quiet about your own activity.</p>

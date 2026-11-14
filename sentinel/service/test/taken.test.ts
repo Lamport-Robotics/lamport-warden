@@ -127,14 +127,14 @@ class Chain implements Rpc {
 }
 
 /** A wallet that has been read and looked at once, with the token accounts a test gives it. */
-async function watched(build: (chain: Chain) => void, opts: { sentinelDelegate?: string; drainers?: string[]; ownListPagesInAll?: number } = {}) {
+async function watched(build: (chain: Chain) => void, opts: { sentinelDelegate?: string; sentinelVault?: string; drainers?: string[]; ownListPagesInAll?: number; ownRescues?: Set<string> } = {}) {
   const chain = new Chain();
   build(chain);
-  const store = new MemoryStore([{ address: W, ...(opts.sentinelDelegate ? { sentinelDelegate: opts.sentinelDelegate } : {}) }]);
+  const store = new MemoryStore([{ address: W, ...(opts.sentinelDelegate ? { sentinelDelegate: opts.sentinelDelegate } : {}), ...(opts.sentinelVault ? { sentinelVault: opts.sentinelVault } : {}) }]);
   let now = T0;
   const told: { level: string; sentence: string }[] = [];
   const notifier: Notifier = { notify: async (_w, level, sentence) => { told.push({ level, sentence }); } };
-  const make = () => new Watcher(chain, store, notifier, { now: () => now, ...(opts.drainers ? { drainers: new Set(opts.drainers) } : {}), ...(opts.ownListPagesInAll ? { ownListPagesInAll: opts.ownListPagesInAll } : {}) });
+  const make = () => new Watcher(chain, store, notifier, { now: () => now, ...(opts.drainers ? { drainers: new Set(opts.drainers) } : {}), ...(opts.ownListPagesInAll ? { ownListPagesInAll: opts.ownListPagesInAll } : {}), ...(opts.ownRescues ? { ownRescues: opts.ownRescues } : {}) });
   let watcher = make();
   await watcher.passAll(); await watcher.passAll();
   chain.took();
@@ -387,15 +387,60 @@ describe("tokens taken through a permission the wallet gave earlier", () => {
     expect(await s.round()).toEqual({ raised: [], calls: ["look"] });
   });
 
-  it("does not call Sentinel's own rescue a taking", async () => {
+  it("does not call a rescue this service sent a taking, and says nothing more of it: the owner was told when it was sent", async () => {
     let mine = "", vault = "";
-    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: SD }); vault = c.account(key(91), 0); }, { sentinelDelegate: SD });
-    s.chain.transfer(rescuer, [[mine, vault, usdc(100)]], { authority: new PublicKey(SD) });
+    const ours = new Set<string>();
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: SD }); vault = c.account(key(91), 0); }, { sentinelDelegate: SD, ownRescues: ours });
+    ours.add(s.chain.transfer(rescuer, [[mine, vault, usdc(100)]], { authority: new PublicKey(SD) }));
     const r = await s.round();
     expect(r.raised).toEqual([]);
     expect(r.calls).toEqual(["look", "list:wallet", "list:account", "tx"]);
     expect(s.amountOnRecord(mine)).toBe("0");
     expect(await s.round()).toEqual({ raised: [], calls: ["look"] });
+  });
+
+  it("a rescue somebody else started is said as one, once, and is no reason for another", async () => {
+    // Another of the keys that may start a rescue did: nothing leaves a watched wallet unsaid, and a setup
+    // the owner did not make would look exactly like this.
+    let mine = "", vault = "";
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: SD }); vault = c.account(key(91), 0); }, { sentinelDelegate: SD, sentinelVault: key(91).toBase58(), ownRescues: new Set() });
+    const signature = s.chain.transfer(rescuer, [[mine, vault, usdc(100)]], { authority: new PublicKey(SD) });
+    const r = await s.round();
+    expect(r.raised.map((e) => [e.signals, e.level, e.signature, e.rescueWorthy])).toEqual([[["rescued"], "urgent", signature, false]]);
+    expect(r.raised[0]!.sentence).toBe(`100 USDC left your wallet in a rescue that Sentinel did not start from here, and went into the Lamport Vault this wallet is set up for (${short(key(91).toBase58())}). Only that vault's key can move it on. If you did not set this wallet up for rescue, or that vault is not yours, treat the wallet as compromised.`);
+    expect(s.told).toHaveLength(1);
+    expect(await s.round()).toEqual({ raised: [], calls: ["look"] });
+    s.restart();
+    expect((await s.round()).raised).toEqual([]);
+  });
+
+  it("an account set up for rescue that is emptied to anywhere but the vault was robbed, not rescued", async () => {
+    // A token whose issuer may move anyone's, or any other power over the account: the account still names
+    // Sentinel's address as its delegate, and that says nothing about who took what was in it. Only tokens
+    // that arrive in the wallet's own vault were rescued.
+    let mine = "", theirs = "";
+    const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: SD }); theirs = c.account(thief, 0); c.account(key(91), 0); }, { sentinelDelegate: SD, sentinelVault: key(91).toBase58(), ownRescues: new Set() });
+    const signature = s.chain.transfer(thief, [[mine, theirs, usdc(100)]]);
+    const r = await s.round();
+    // Urgent, and said as a taking. Sentinel's own address on the account is not named as what let it happen:
+    // nobody but the rescue program signs for that. With no other permission on record it was a power the
+    // token itself gives someone, which is no reason to move everything else (anyone can stage it, with a
+    // token of their own making).
+    expect(r.raised.map((e) => [e.signals, e.level, e.signature, e.rescueWorthy, e.takers])).toEqual([[["taken_by_permission"], "urgent", signature, false, undefined]]);
+    expect(r.raised[0]!.sentence).toBe(`100 USDC left your wallet in a transaction your wallet did not sign. ${short(thief.toBase58())} signed it.`);
+  });
+
+  it("tokens taken under a permission the wallet gave are reason to rescue the rest; tokens their issuer took back are not", async () => {
+    // What a drainer does: the wallet approved it once, and it comes back for what the approval covers. And
+    // what anyone can do to any wallet: send it a token they made, and take it back.
+    let approved = "", junk = "", theirs = "";
+    const s = await watched((c) => { approved = c.account(wallet.publicKey, usdc(100), { delegate: thief.toBase58() }); junk = c.account(wallet.publicKey, usdc(5)); theirs = c.account(thief, 0); });
+    s.chain.transfer(thief, [[junk, theirs, usdc(1)]]);
+    const back = (await s.round()).raised;
+    expect(back.map((e) => [e.signals, e.level, e.rescueWorthy])).toEqual([[["taken_by_permission"], "urgent", false]]);
+    s.chain.transfer(thief, [[approved, theirs, usdc(40)]]);
+    const drained = (await s.round()).raised;
+    expect(drained.map((e) => [e.signals, e.level, e.rescueWorthy, e.takers])).toEqual([[["taken_by_permission"], "urgent", true, [thief.toBase58()]]]);
   });
 
   it("waits for an RPC that is behind, and tells the owner when the transaction shows", async () => {
@@ -866,11 +911,25 @@ describe("the sentence", () => {
     expect(assessTransaction(t.tx, { wallet: W, baseline: Baseline.empty(), drainers: new Set(), tokenAccounts: t.onRecord, ownerSigned: true }).level).toBe("urgent");
   });
 
-  it("says nothing of what Sentinel's own delegate moved, and still tells of the rest", () => {
+  it("tells what the rescue permission moved apart from what was taken, and nothing of a rescue this service sent", () => {
+    // (in these, what leaves goes to an account of the thief's: naming the thief as the vault is what makes it an arrival in the vault)
+    const VAULT = thief.toBase58();
     const t = taking(2, { delegates: [SD, thief.toBase58()] });
-    expect(assessTaken(t.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: t.onRecord }).sentence.split(" left ")[0]).toBe("2 USDC");
+    const mixed = assessTaken(t.tx, { wallet: W, sentinelDelegate: SD, rescueVault: VAULT, tokenAccounts: t.onRecord });
+    expect(mixed.signals.map((s) => [s.kind, s.sentence.split(" left ")[0]])).toEqual([["taken_by_permission", "2 USDC"], ["rescued", "1 USDC"]]);
+    // the taking is reason for a rescue; the rescue beside it is not what makes it one
+    expect(mixed.rescueWorthy).toBe(true);
     const all = taking(2, { delegates: [SD, SD] });
-    expect(assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: all.onRecord }).level).toBeNull();
+    const elsewhere = assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, rescueVault: VAULT, tokenAccounts: all.onRecord });
+    expect([elsewhere.level, elsewhere.signals.map((s) => s.kind), elsewhere.rescueWorthy]).toEqual(["urgent", ["rescued"], false]);
+    expect(assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, rescueVault: VAULT, tokenAccounts: all.onRecord, ownRescues: new Set([all.tx.signature]) }).level).toBeNull();
+    expect(assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, rescueVault: VAULT, tokenAccounts: all.onRecord, ownRescues: new Set(["another"]) }).level).toBe("urgent");
+    // Set up for rescue is not the same as rescued: what did not arrive in the vault the setup names was taken,
+    // and is said as a taking, with everything a taking sets off.
+    for (const ctx of [{ rescueVault: key(91).toBase58() }, {}]) {
+      const robbed = assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: all.onRecord, ...ctx });
+      expect([robbed.level, robbed.signals.map((s) => s.kind), robbed.rescueWorthy, robbed.signals[0]!.takers]).toEqual(["urgent", ["taken_by_permission"], false, undefined]);
+    }
     // someone else's delegate that happens to be on an unarmed wallet is not excused
     expect(assessTaken(all.tx, { wallet: W, tokenAccounts: all.onRecord }).level).toBe("urgent");
   });

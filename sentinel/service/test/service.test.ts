@@ -306,7 +306,7 @@ describe("where alerts go", () => {
     const file = join(mkdtempSync(join(tmpdir(), "sentinel-")), "s.json");
     const s = service({ store: new FileStore(file) });
     const a = (await s.signIn(alice)).body as any;
-    expect(a.limits).toEqual({ wallets: 3, channels: 1, kinds: ["ntfy"], pollSeconds: 60, push: false });
+    expect(a.limits).toEqual({ wallets: 3, channels: 1, kinds: ["ntfy"], pollSeconds: 60, push: false, rescue: false });
     const add = (target: unknown, session = a.session) => s.call("POST", "/v1/channels", { target }, session);
 
     const first = await add("https://ntfy.sh/alice-private-topic-77");
@@ -329,7 +329,7 @@ describe("where alerts go", () => {
 
     // Pro: five channels of any kind
     s.accounts.setTier(a.profile.id, "pro");
-    expect(((await s.call("GET", "/v1/me", undefined, a.session)).body as any).limits).toEqual({ wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack"], pollSeconds: 20, push: true });
+    expect(((await s.call("GET", "/v1/me", undefined, a.session)).body as any).limits).toEqual({ wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack"], pollSeconds: 20, push: true, rescue: true });
     expect((await add("https://ntfy.sh/alice-private-topic-77")).status).toBe(409);
     const discord = await add(DISCORD);
     expect(discord).toMatchObject({ status: 201, body: { kind: "discord", hint: "Discord webhook …abcd" } });
@@ -496,8 +496,9 @@ describe("alerts", () => {
     expect((await s.call("POST", `/v1/events/${e2}/answer`, { answer: "ignore" }, a.session)).status).toBe(200);
     expect(s.calls.confirmOwn).toEqual([[alice.address, "sigA"]]);
     expect(((await s.call("GET", "/v1/events", undefined, a.session)).body as any).events.map((e: any) => e.answer)).toEqual(["ignore", "this_was_me"]);
-    // rescue is not something this service does yet, and it says so
-    expect(await s.call("POST", `/v1/events/${e1}/answer`, { answer: "rescue" }, a.session)).toEqual({ status: 501, body: { error: "rescue is not switched on yet." } });
+    // a service without rescue says so, and the alert is not marked as answered with one
+    expect(await s.call("POST", `/v1/events/${e1}/answer`, { answer: "rescue" }, a.session)).toEqual({ status: 501, body: { error: "rescue is not available yet: Lamport Vault and the rescue program are not on this network." } });
+    expect(((await s.call("GET", "/v1/events", undefined, a.session)).body as any).events.map((e: any) => e.answer)).toEqual(["ignore", "this_was_me"]);
   });
 });
 

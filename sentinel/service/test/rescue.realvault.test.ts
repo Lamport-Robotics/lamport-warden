@@ -12,12 +12,13 @@
  * signs the tokens out of the vault to a new wallet.
  *
  * It needs the Lamport Vault repository beside this one (or `LAMPORT_VAULT_REPO`), with its SDK installed,
- * and a vault program: the one built there (`target/deploy/lamport_vault.so`, or `LAMPORT_VAULT_SO`), or,
- * with `LAMPORT_VAULT_FROM=devnet`, the one that is deployed on devnet, fetched as the validator starts.
- * Skipped when any of that is missing.
+ * and it is run only when asked for, by saying which vault program to use: `LAMPORT_VAULT_FROM=devnet` for
+ * the one that is deployed on devnet, fetched as the validator starts; `LAMPORT_VAULT_FROM=local` for the one
+ * built in that repository (`target/deploy/lamport_vault.so`, or `LAMPORT_VAULT_SO`). What happens to be
+ * built there may be another variant of the program, under another address, so it is not used unasked.
  *
- *   pnpm vitest run sentinel/service/test/rescue.realvault.test.ts
  *   LAMPORT_VAULT_FROM=devnet pnpm vitest run sentinel/service/test/rescue.realvault.test.ts
+ *   LAMPORT_VAULT_FROM=local pnpm vitest run sentinel/service/test/rescue.realvault.test.ts
  */
 import "../../../src/polyfill.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -28,7 +29,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { ASSOCIATED_TOKEN, PROGRAM, TOKEN, TOKEN_2022, approveForRescue, configAddress, delegateAddress, initConfig, initRescuerSet, vaultTokenAddress } from "../src/program.js";
+import { ASSOCIATED_TOKEN, PROGRAM, TOKEN, TOKEN_2022, approveForRescue, configAddress, createVaultTokenAccount, delegateAddress, initConfig, initRescuerSet, vaultTokenAddress } from "../src/program.js";
 import { Rescuer, readConfig } from "../src/rescuer.js";
 import { HttpRpc } from "../src/rpc.js";
 
@@ -41,7 +42,7 @@ const FROM_DEVNET = process.env.LAMPORT_VAULT_FROM === "devnet";
 const VAULT_SO = process.env.LAMPORT_VAULT_SO ?? join(VAULT_REPO, "target", "deploy", "lamport_vault.so");
 const LAMPORT_VAULT = new PublicKey("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH");
 const onPath = (() => { try { execFileSync("solana-test-validator", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
-const ready = onPath && existsSync(SO) && existsSync(VAULT_SDK) && existsSync(LMS_SDK) && existsSync(join(VAULT_REPO, "sdk", "node_modules")) && (FROM_DEVNET || existsSync(VAULT_SO));
+const ready = onPath && existsSync(SO) && existsSync(VAULT_SDK) && existsSync(LMS_SDK) && existsSync(join(VAULT_REPO, "sdk", "node_modules")) && (FROM_DEVNET || (process.env.LAMPORT_VAULT_FROM === "local" && existsSync(VAULT_SO)));
 
 const seeded = (n: number) => Keypair.fromSeed(new Uint8Array(32).fill(n));
 const authority = seeded(51), owner = seeded(52), lamportRescuer = seeded(53), vaultPayer = seeded(54), safe = seeded(55);
@@ -151,7 +152,7 @@ describe.skipIf(!ready)(`a rescue into a real Lamport Vault (${FROM_DEVNET ? "th
 
   it("what is rescued lands in the vault, and the vault's owner signs it out again to a wallet of their choosing", async () => {
     const usdc = await tokenFor(owner.publicKey, 250_000_000n);
-    await send([owner], approveForRescue({ owner: owner.publicKey, source: usdc.account, mint: usdc.mint, decimals: 6, vault }));
+    await send([owner], createVaultTokenAccount(owner.publicKey, vault, usdc.mint), approveForRescue({ owner: owner.publicKey, source: usdc.account, mint: usdc.mint, decimals: 6, vault }));
     const result = await new Rescuer(rpc, lamportRescuer, quick).rescue(owner.publicKey.toBase58());
     expect(result).toMatchObject({ ok: true, vault: vault.toBase58(), steps: [{ ok: true }] });
     const inVault = vaultTokenAddress(vault, usdc.mint);
@@ -168,7 +169,7 @@ describe.skipIf(!ready)(`a rescue into a real Lamport Vault (${FROM_DEVNET ? "th
 
   it("the same for a Token-2022 token: in by a rescue, out by the vault's signature", async () => {
     const t22 = await tokenFor(owner.publicKey, 7_000_000n, TOKEN_2022);
-    await send([owner], approveForRescue({ owner: owner.publicKey, source: t22.account, mint: t22.mint, decimals: 6, vault, tokenProgram: TOKEN_2022 }));
+    await send([owner], createVaultTokenAccount(owner.publicKey, vault, t22.mint, TOKEN_2022), approveForRescue({ owner: owner.publicKey, source: t22.account, mint: t22.mint, decimals: 6, vault, tokenProgram: TOKEN_2022 }));
     const result = await new Rescuer(rpc, lamportRescuer, quick).rescue(owner.publicKey.toBase58());
     expect(result).toMatchObject({ ok: true, steps: [{ ok: true }] });
     const inVault = vaultTokenAddress(vault, t22.mint, TOKEN_2022);
@@ -187,7 +188,7 @@ describe.skipIf(!ready)(`a rescue into a real Lamport Vault (${FROM_DEVNET ? "th
     const next = lms.LmsPrivateKey.generate(lms.randomKeyMaterial(lms.LMS_SHA256_M32_H5));
     await signer.execute({ kind: "Rotate", newLmsPubkey: next.publicKey }, { commitment: "confirmed", allowForeignKey: true });
     const t = await tokenFor(owner.publicKey, 42n);
-    await send([owner], approveForRescue({ owner: owner.publicKey, source: t.account, mint: t.mint, decimals: 6, vault }));
+    await send([owner], createVaultTokenAccount(owner.publicKey, vault, t.mint), approveForRescue({ owner: owner.publicKey, source: t.account, mint: t.mint, decimals: 6, vault }));
     expect(await new Rescuer(rpc, lamportRescuer, quick).rescue(owner.publicKey.toBase58())).toMatchObject({ ok: true, vault: vault.toBase58(), steps: [{ ok: true }] });
     expect(await balance(vaultTokenAddress(vault, t.mint))).toBe(42n);
     signer = new vaultSdk.VaultSigner({ rpc: connection, key: next, payer: vaultPayer, vault: made(vault), journal: "ephemeral" });
@@ -198,14 +199,15 @@ describe.skipIf(!ready)(`a rescue into a real Lamport Vault (${FROM_DEVNET ? "th
 
   it("a vault that was closed is sent nothing: the rescue is refused and the tokens stay where they were", async () => {
     const t = await tokenFor(owner.publicKey, 9n);
-    await send([owner], approveForRescue({ owner: owner.publicKey, source: t.account, mint: t.mint, decimals: 6, vault }));
+    await send([owner], createVaultTokenAccount(owner.publicKey, vault, t.mint), approveForRescue({ owner: owner.publicKey, source: t.account, mint: t.mint, decimals: 6, vault }));
     expect((await rpc.call("getAccountInfo", [t.account.toBase58(), { encoding: "jsonParsed", commitment: "confirmed" }])).value.data.parsed.info.delegate).toBe(delegateAddress(owner.publicKey, vault).toBase58());
     await signer.execute({ kind: "Close", to: safe.publicKey }, { commitment: "confirmed" });
     const result = await new Rescuer(rpc, lamportRescuer, quick).rescue(owner.publicKey.toBase58());
     // either told before anything is sent, or refused by the program: never moved
     if (result.ok) expect(result.steps.every((s) => !s.ok)).toBe(true);
     expect(await balance(t.account)).toBe(9n);
-    expect(await balance(vaultTokenAddress(vault, t.mint))).toBeNull();
+    // the token account the owner made for it at setup is there, and nothing was put in it
+    expect(await balance(vaultTokenAddress(vault, t.mint))).toBe(0n);
     expect(ASSOCIATED_TOKEN.toBase58()).toBe("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
   }, 180_000);
 

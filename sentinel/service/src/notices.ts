@@ -74,3 +74,19 @@ export const priceChangedNotice = (to: "full" | "holder", cents: number, holderM
   to === "holder"
     ? `From its next bill, this profile's Sentinel plan is ${dollars(cents)} a month: its wallets hold ${holderMin.toLocaleString("en-US")} $LAMPORT between them.`
     : `From its next bill, this profile's Sentinel plan is ${dollars(cents)} a month: its wallets no longer hold ${holderMin.toLocaleString("en-US")} $LAMPORT between them.`;
+
+/** Rescue, unasked, was switched on or off for the profile. */
+export const autoRescueNotice = (on: boolean, wallet: string | null): string =>
+  on
+    ? `Rescue without asking was switched on for your Sentinel profile${by(wallet)}. From now on, when an alert is serious enough on its own, Sentinel moves the tokens of your armed wallets into your Lamport Vault at once and tells you afterwards. ${notYou(wallet)}`
+    : `Rescue without asking was switched off for your Sentinel profile${by(wallet)}. Sentinel now only alerts; a rescue happens when you ask for one. ${notYou(wallet)}`;
+
+/**
+ * Somebody signed in asked the page to set a wallet up for rescue, or to take a setup away. Nothing has
+ * changed yet: the wallet has to sign. But from the asking on, Sentinel takes the wallet's signing of exactly
+ * that for its owner's doing, so the owner hears that it was asked.
+ */
+export const rescueAskedNotice = (watched: string, vault: string, wallet: string | null): string =>
+  `A rescue setup for ${short(watched)} into the Lamport Vault ${short(vault)} was asked for on the Sentinel page${by(wallet)}. Nothing changes until that wallet signs it. From now on a setup that names that vault is the one Sentinel uses. ${notYou(wallet)}`;
+export const rescueTakeAwayAskedNotice = (watched: string, wallet: string | null): string =>
+  `Taking the rescue setup away from ${short(watched)} was asked for on the Sentinel page${by(wallet)}. Nothing changes until that wallet signs it. For the next half hour Sentinel takes its rescue permissions being removed for your doing. ${notYou(wallet)}`;

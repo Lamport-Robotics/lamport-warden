@@ -124,7 +124,7 @@
   <ul>
     <li><b>They are a second pair of eyes, not a guarantee.</b> We do not promise that Warden will stop every harmful request, or that Sentinel will notice every theft or notice it in time. A page can reach a wallet in ways an extension never sees, and a wallet can be emptied in one transaction.</li>
     <li><b>You decide what to sign.</b> What happens to your money because of a transaction you signed, or one that someone signed with your keys, is not something we can undo or make good.</li>
-    <li><b>They never hold your keys or your money.</b> Your keys stay in your wallet. Sentinel cannot move anything today. If a rescue feature is added, it will have its own terms, shown before you can turn it on.</li>
+    <li><b>They never hold your keys or your money.</b> Your keys stay in your wallet. Sentinel can move nothing of yours unless you set a wallet up for rescue, and then only the tokens you set up, and only into the Lamport Vault you named. Rescue has its own terms, <a href="#rescue">below</a>, and they are shown again before you can turn it on.</li>
     <li><b>Nothing here is financial, investment or legal advice.</b></li>
   </ul>
 
@@ -156,6 +156,18 @@
     <li><b>Taxes.</b> If a tax applies where you are, checkout shows it before you pay.</li>
     <li><b>Holding $LAMPORT</b> gets you the lower price and nothing else. It is not a share in anything, and the lower price is not a promise about the token.</li>
   </ul>
+
+  <h2 id="rescue">Rescue</h2>
+  <p>Rescue is part of Pro, and is there only where the Sentinel page offers it: it needs Lamport Vault and the rescue program on the network, and they are not on Solana mainnet yet. It is off until you set a wallet up for it, and these lines are shown to you before you can:</p>
+  <ul id="rescue-terms">
+    <li>Setting a wallet up is your signature. It names one Lamport Vault of yours, makes a token account in that vault for each token (you pay the network's deposit for each), and gives the rescue program permission to move each token account you set up. That permission has no limit in amount, does not run out, and has, as the program stands, one destination: that vault.</li>
+    <li>A rescue moves every token account you set up into that vault, whole. You can start one. So can Sentinel: when you ask it to, or on its own after a serious alert if you switch that on. Whoever holds one of Lamport's rescuer keys could start one at a time you did not choose; your tokens would then be in your vault, not gone.</li>
+    <li>Only your vault's key moves anything out of the vault. If you lose that key, what was rescued is lost with it, and we cannot get it back.</li>
+    <li>A rescue does not cover SOL, tokens of a kind this wallet did not hold when you set it up (set it up again to cover them), frozen token accounts, tokens that an ordinary transfer cannot move, or anything staked, lent or listed somewhere else. A wallet can be emptied in one transaction, and a rescue can come too late.</li>
+    <li>The rescue program and Lamport Vault are public code that no outside firm has audited, and Lamport holds the key that can change the rescue program. You use rescue at your own risk, within the limits in these terms.</li>
+    <li>You can take the setup away at any time on the Sentinel page: your wallet revokes each permission and closes the setup.</li>
+  </ul>
+  <p>A rescue that was started on a false alarm has moved your tokens into your own vault. We do not undo it, and nothing is owed for it: you move them back with your vault's key.</p>
 
   <h2>Changes, pauses and the end</h2>
   <ul>

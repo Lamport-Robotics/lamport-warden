@@ -24,8 +24,8 @@ Warden does not keep the sites you visit or the requests it read.
 
 ## What leaves your browser
 
-Two kinds of request go to the Solana RPC chosen on the settings page. By default that is the public RPC at
-`api.mainnet-beta.solana.com`; it can be your own, or turned off. A third goes to Lamport, and only if you
+Three kinds of request go to the Solana RPC chosen on the settings page. By default that is the public RPC at
+`api.mainnet-beta.solana.com`; it can be your own, or turned off. A fourth goes to Lamport, and only if you
 turn it on.
 
 1. **Reading lookup tables.** When a transaction names its accounts through a table stored on chain, Warden
@@ -34,8 +34,12 @@ turn it on.
 2. **Simulation, only if you turn it on.** For a transaction that calls a program Warden cannot read, Warden
    sends the unsigned transaction and the list of accounts it writes to the RPC, which runs it and answers
    with the result. The transaction names your wallet. This is off until you turn it on.
+3. **Reading a rescue setup, on the Sentinel page only.** When the Sentinel page asks your wallet to cover
+   tokens for rescue and this browser has no memory of that wallet's setup, Warden asks the RPC for the
+   setup's account, to see which vault it names. The RPC receives that account's address, which is worked
+   out from your wallet's address, and your IP address.
 
-3. **Telling Sentinel a signature was yours, only if you turn it on.** Sentinel is Lamport's watching
+4. **Telling Sentinel a signature was yours, only if you turn it on.** Sentinel is Lamport's watching
    service. It sees only the chain, so it cannot tell a payment you made from one a thief made with your key.
    With "Tell Sentinel which signatures were mine" on, when a wallet you linked on the Sentinel page signs a
    transaction you let through, Warden sends the Sentinel service at `warden.lamportrobotics.com` that
@@ -78,6 +82,9 @@ What it keeps, on that server:
   and its dates. Not your card, your name or your email address: those are with Stripe and never reach
   Sentinel. If you pay ahead in USDC or SOL: the amounts you were shown in the last week, and for each
   payment the transaction, what it paid, for how many months, and when.
+- If you set a wallet up for rescue: the address that wallet approved for it, which is on the chain for
+  anyone to read, and whether you switched rescue without asking on. Not your vault's key or its 24 words:
+  those never leave you, and Sentinel has no use for them.
 
 It does not keep your IP address. The address a request comes from is held in memory for up to a day, to
 limit abuse, and is not written down; the web server in front of Sentinel keeps no access log. The Sentinel
@@ -97,6 +104,8 @@ Who else receives something:
 - Everyone, if you pay in USDC or SOL. A transfer on the chain is public: anyone can see that the wallet
   you paid from paid Lamport's address, how much and when. It can be paid from a wallet that is not one you
   have Sentinel watch.
+- Everyone, if you set a wallet up for rescue. The setup is on the chain: anyone can see which Lamport Vault
+  a wallet's rescue would go to, and so that the wallet and the vault have one owner.
 - Stripe, if you pay by card. It takes the payment under its own privacy policy. Sentinel gives Stripe a random id
   that stands for your profile, and learns from Stripe whether the plan is paid.
 

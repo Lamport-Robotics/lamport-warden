@@ -48,6 +48,14 @@ describe("the pace an RPC is asked at", () => {
     await Promise.all(all);
     expect(order).toEqual(["history-1", "alert", "history-2", "history-3"]); // the first was already on its way; the alert took the next turn
     expect(s.at()).toBe(3000); // and the pace was kept all the same: four calls, a second apart
+    // A rescue goes ahead of everything that is waiting, whatever it is and however long it has waited;
+    // two of them keep their own order.
+    const r = setup({ heavyPer10s: 10 });
+    const seen: string[] = [];
+    const ask = (name: string, opts: { background?: boolean; first?: boolean } = {}) => r.rpc.call("getTransaction", [name], opts).then(() => { seen.push(name); });
+    await Promise.all([ask("reading-1"), ask("reading-2"), ask("history", { background: true }), ask("rescue-1", { first: true }), ask("rescue-2", { first: true })]);
+    expect(seen).toEqual(["reading-1", "rescue-1", "rescue-2", "reading-2", "history"]);
+    expect(r.at()).toBe(4000); // at the same pace: being first is not being faster than the RPC allows
     // with nothing else asking, work that can wait is not held back at all
     const quiet = setup({ heavyPer10s: 10 });
     for (let i = 0; i < 3; i++) await quiet.rpc.call("getTransaction", [], { background: true });

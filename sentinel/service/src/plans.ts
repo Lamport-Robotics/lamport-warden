@@ -18,12 +18,14 @@ export interface Plan {
   pollSeconds: number;
   /** Whether a wallet is also read at once when the network reports a transaction in it, ahead of its turn. */
   push: boolean;
+  /** Whether the plan has rescue. It is offered only where the service is set up to do one (rescue.ts). */
+  rescue: boolean;
 }
 
 export const PLANS: Record<Tier, Plan> = {
   // "telegram" is in both, and is offered only where the service has a Telegram bot to send through (telegram.ts)
-  watch: { name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy", "telegram"], pollSeconds: 60, push: false },
-  pro: { name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack", "telegram"], pollSeconds: 20, push: true },
+  watch: { name: "Watch", wallets: 3, channels: 1, kinds: ["ntfy", "telegram"], pollSeconds: 60, push: false, rescue: false },
+  pro: { name: "Pro", wallets: 10, channels: 5, kinds: ["ntfy", "discord", "slack", "telegram"], pollSeconds: 20, push: true, rescue: true },
 };
 
 /** The monthly prices, in cents, as the page shows them when the service has not said otherwise. */
@@ -63,6 +65,8 @@ export const PREPAID_MONTHS: readonly number[] = [1, 3, 12];
 
 /** An amount in an asset's smallest units as a wallet shows it: no trailing zeros. */
 export function decimal(units: bigint, decimals: number): string {
+  // a token that is not divided at all (most collectibles): the count is the amount
+  if (decimals <= 0) return units.toString();
   const s = units.toString().padStart(decimals + 1, "0");
   const whole = s.slice(0, -decimals), frac = s.slice(-decimals).replace(/0+$/, "");
   return frac ? `${whole}.${frac}` : whole;
@@ -97,4 +101,17 @@ export function paceText(pollSeconds: number, now: { push: boolean; late: boolea
 
 /** What Pro will add, and why it does not yet. Shown wherever Pro is described, and never as a feature. */
 export const PRO_NOT_YET =
-  "Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs the vault and the rescue program on mainnet, and both are waiting on their audits. It joins Pro when they are, at the same price.";
+  "Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs Lamport Vault and the rescue program on Solana mainnet, and neither is there yet. It joins Pro when they are, at the same price.";
+
+/**
+ * Rescue's own terms: what someone agrees to by setting a wallet up for it. The Sentinel page shows these
+ * lines before the setup can be started, and the terms page states the same ones (test/terms.test.ts).
+ */
+export const RESCUE_TERMS: readonly string[] = [
+  "Setting a wallet up is your signature. It names one Lamport Vault of yours, makes a token account in that vault for each token (you pay the network's deposit for each), and gives the rescue program permission to move each token account you set up. That permission has no limit in amount, does not run out, and has, as the program stands, one destination: that vault.",
+  "A rescue moves every token account you set up into that vault, whole. You can start one. So can Sentinel: when you ask it to, or on its own after a serious alert if you switch that on. Whoever holds one of Lamport's rescuer keys could start one at a time you did not choose; your tokens would then be in your vault, not gone.",
+  "Only your vault's key moves anything out of the vault. If you lose that key, what was rescued is lost with it, and we cannot get it back.",
+  "A rescue does not cover SOL, tokens of a kind this wallet did not hold when you set it up (set it up again to cover them), frozen token accounts, tokens that an ordinary transfer cannot move, or anything staked, lent or listed somewhere else. A wallet can be emptied in one transaction, and a rescue can come too late.",
+  "The rescue program and Lamport Vault are public code that no outside firm has audited, and Lamport holds the key that can change the rescue program. You use rescue at your own risk, within the limits in these terms.",
+  "You can take the setup away at any time on the Sentinel page: your wallet revokes each permission and closes the setup.",
+];

@@ -16,14 +16,15 @@ import { createServer as createHttps, type Server } from "node:https";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
+import { Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import type { Page } from "playwright";
 import { Prompt, WARDEN, launch, type Browser } from "./harness.js";
 import { USDC_MINT, paymentInstruction } from "../../sentinel/service/src/prepaid.js";
 import { Accounts } from "../../sentinel/service/src/accounts.js";
 import { Billing, Stripe, type BillingConfig, type StripeFetch } from "../../sentinel/service/src/billing.js";
 import { LAMPORT_MINT, telegramLinking } from "../../sentinel/service/src/main.js";
-import { PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, prepaidTerms, purchaseTerms, renewalTerms } from "../../sentinel/service/src/plans.js";
+import { PRO_FEATURES, PRO_NOT_YET, RESCUE_TERMS, WATCH_FEATURES, prepaidTerms, purchaseTerms, renewalTerms } from "../../sentinel/service/src/plans.js";
+import { approveForRescue, closeConfig, delegateAddress, initConfig } from "../../sentinel/service/src/program.js";
 import type { Rpc } from "../../sentinel/service/src/rpc.js";
 import { listen, type ApiDeps } from "../../sentinel/service/src/server.js";
 import { LinkCodes, answer, linkedTo } from "../../sentinel/service/src/telegram.js";
@@ -58,7 +59,7 @@ const WALLET = `(() => {
       "standard:connect": { version: "1.0.0", connect: async () => ({ accounts: [keys[window.__account].account] }) },
       "standard:events": { version: "1.0.0", on: () => () => {} },
       // a payment handed to the wallet: what it was given is kept for the test to look at, and nothing is sent anywhere
-      "solana:signAndSendTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signAndSendTransaction: async ({ transaction, chain }) => { window.__sent = { bytes: Array.from(transaction), chain }; return [{ signature: new Uint8Array(64) }]; } },
+      "solana:signAndSendTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signAndSendTransaction: async ({ transaction, chain }) => { window.__sent = { bytes: Array.from(transaction), chain }; (window.__sentAll = window.__sentAll || []).push(Array.from(transaction)); return [{ signature: new Uint8Array(64) }]; } },
       "solana:signIn": { version: "1.0.0", signIn: async (input) => {
         const account = keys[window.__account].account;
         const lines = [input.domain + " wants you to sign in with your Solana account:", account.address, "", input.statement, "", "Nonce: " + input.nonce, "Issued At: " + input.issuedAt];
@@ -355,7 +356,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     Object.assign(healthNow, { push: "on" });
     await page.goto(`${ARMING}/sentinel/?plan=started`);
     await expect.poll(() => page.locator("#notice").innerText(), { timeout: 10_000 }).toContain("Stripe is confirming the payment");
-    expect(await page.locator("#pace").innerText()).toBe("Each wallet is read every minute.");
+    await expect.poll(() => page.locator("#pace").innerText(), { timeout: 10_000 }).toBe("Each wallet is read every minute."); // once the page has heard from the service
     expect(page.url()).toBe(`${ARMING}/sentinel/`); // the marker is taken out of the address
     await expect.poll(() => page.locator("#plans .plan.mine h3").innerText(), { timeout: 10_000 }).toBe("Watch");
     expect(accounts.profile(profile)!.tier).toBe("watch");
@@ -439,6 +440,196 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     const forged = await fetch(`http://127.0.0.1:${apiPort}/v1/stripe/webhook`, { method: "POST", headers: { "stripe-signature": "t=1,v1=00" }, body: "{}" });
     expect(forged.status).toBe(400);
   });
+
+  it("sets a wallet up for rescue only after rescue's own terms are agreed to, rescues when asked, and takes the setup away", async () => {
+    const profile = accounts.profileOf(W1)!;
+    accounts.setTier(profile, "pro");
+    // where rescue cannot work, the page does not show it
+    await page.reload();
+    await expect.poll(() => page.locator("#wallets li").count(), { timeout: 10_000 }).toBeGreaterThan(0);
+    expect(await page.locator("#rescueSection").isVisible()).toBe(false);
+
+    // Rescue, with the chain stood in for: what the service would build is built here with the service's own code.
+    const VAULT = Keypair.fromSeed(new Uint8Array(32).fill(63)).publicKey.toBase58();
+    const delegate = delegateAddress(new PublicKey(W1), new PublicKey(VAULT)).toBase58();
+    const A1 = Keypair.fromSeed(new Uint8Array(32).fill(61)).publicKey, A2 = Keypair.fromSeed(new Uint8Array(32).fill(62)).publicKey, MINT = new PublicKey(USDC_MINT);
+    const unsigned = (...ixs: Parameters<Transaction["add"]>) => new Transaction({ feePayer: new PublicKey(W1), recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" }).add(...ixs).serialize({ requireAllSignatures: false, verifySignatures: false });
+    const setup = unsigned(initConfig(new PublicKey(W1), new PublicKey(VAULT)), approveForRescue({ owner: new PublicKey(W1), source: A1, mint: MINT, decimals: 6, vault: new PublicKey(VAULT) }), approveForRescue({ owner: new PublicKey(W1), source: A2, mint: MINT, decimals: 6, vault: new PublicKey(VAULT) }));
+    // taking it away, as the service builds it: the revokes, and then the closing in a transaction of its own
+    const revoke = (source: PublicKey) => new TransactionInstruction({ programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), data: Buffer.from([5]), keys: [{ pubkey: source, isSigner: false, isWritable: true }, { pubkey: new PublicKey(W1), isSigner: true, isWritable: false }] });
+    const revokes = unsigned(revoke(A1), revoke(A2)), takeAway = unsigned(closeConfig(new PublicKey(W1)));
+    const tokens = [{ account: A1.toBase58(), mint: USDC_MINT, amount: "5000000", decimals: 6 }, { account: A2.toBase58(), mint: USDC_MINT, amount: "7000000", decimals: 6 }];
+    // and a token nobody asked for, of the kind every wallet collects
+    const JUNK = Keypair.fromSeed(new Uint8Array(32).fill(64)).publicKey.toBase58(), JUNK_MINT = Keypair.fromSeed(new Uint8Array(32).fill(65)).publicKey.toBase58();
+    const junk = { account: JUNK, mint: JUNK_MINT, amount: "1000000000", decimals: 0, why: "not set up" as const };
+    const asked: unknown[][] = [];
+    let armed = false, away = 0, foreign = false;
+    apiDeps.rescue = {
+      on: true,
+      available: async () => true,
+      network: async () => "solana:devnet",
+      status: async (wallet) => {
+        const mine = wallet === W1 && armed;
+        store.setDelegate(wallet, mine ? delegate : null, mine ? VAULT : undefined);
+        // a setup on the second wallet that nobody asked for on this page
+        if (wallet === W2 && foreign) return { armed: true, ours: false, vault: VAULT, rescuers: "own" as const, covered: [], uncovered: [] };
+        return mine ? { armed: true, ours: true, vault: VAULT, rescuers: "lamport" as const, covered: tokens, uncovered: [] }
+          : { armed: false, ours: false, vault: null, rescuers: null, covered: [], uncovered: wallet === W1 ? [...tokens.map((t) => ({ ...t, why: "not set up" as const })), junk] : [] };
+      },
+      // asked again once the wallet has sent it, there is nothing left to sign: that is how the page knows it is done
+      arm: async (who, wallet, vault, only) => { asked.push(["arm", who, wallet, vault, only]); return vault === VAULT ? { ok: true, transactions: armed ? [] : [Buffer.from(setup).toString("base64")], accounts: armed ? 0 : 2, makes: 0, vault: VAULT, delegate, asked: !armed } : { ok: false, status: 400, why: "that address is not a Lamport Vault." }; },
+      // the revokes, then the closing; and once that is on the chain there is no setup left to take away
+      disarm: async (who, wallet) => { asked.push(["disarm", who, wallet]); return away >= 2 ? { ok: false, status: 409, why: "this wallet is not set up for rescue." } : { ok: true, transactions: [Buffer.from(revokes).toString("base64"), Buffer.from(takeAway).toString("base64")].slice(away), frozen: 0, asked: away === 0 }; },
+      rescue: async (who, wallet) => { asked.push(["rescue", who, wallet]); return { ok: true, vault: VAULT, moved: 2, failed: 0, gone: 0, signatures: ["sig"] }; },
+    };
+    await page.reload();
+    const section = page.locator("#rescueSection");
+    await expect.poll(() => section.isVisible(), { timeout: 10_000 }).toBe(true);
+    expect(await page.locator("#rescueState").innerText()).toBe("Sentinel can rescue the wallets that are set up below.");
+    const mine = page.locator("#rescueWallets li").filter({ hasText: W1 });
+    expect(await mine.locator(".what span").innerText()).toBe("Not set up for rescue.");
+    expect(await mine.getByRole("button").allInnerTexts()).toEqual(["Look", "Set up"]); // nothing to rescue, nothing to take away
+
+    // A setup that was made somewhere else is shown for what it is: Sentinel does not rescue into it, and
+    // offers to take it away or, if the vault is the owner's after all, to use it.
+    foreign = true;
+    const other = page.locator("#rescueWallets li").filter({ hasText: W2 });
+    await other.getByRole("button", { name: "Look" }).click();
+    await expect.poll(() => other.locator(".what span").innerText(), { timeout: 8000 }).toBe(`Set up for rescue into the vault ${short(VAULT)}, and not from this page. Sentinel will not rescue into it. If that vault is yours, press Use this vault. If it is not, take the setup away and treat this wallet's key as stolen.`);
+    expect(await other.getByRole("button").allInnerTexts()).toEqual(["Look", "Use this vault", "Take the setup away"]);
+    foreign = false;
+    await other.getByRole("button", { name: "Look" }).click();
+    await expect.poll(() => other.locator(".what span").innerText(), { timeout: 8000 }).toBe("Not set up for rescue. It holds no tokens.");
+
+    // Set up: the terms first. Nothing can be built until they are agreed to.
+    await mine.getByRole("button", { name: "Set up" }).click();
+    const panel = page.locator("#rescueSetup");
+    await expect.poll(() => panel.isVisible(), { timeout: 8000 }).toBe(true);
+    expect(await panel.locator("ul.terms li").allInnerTexts()).toEqual([...RESCUE_TERMS]);
+    expect(await panel.locator("label a").getAttribute("href")).toBe("/terms/#rescue");
+    // Which tokens is the owner's choice: the ones everybody knows are ticked, and the one nobody asked for is not.
+    const picks = panel.locator(".pick label");
+    expect((await picks.allInnerTexts()).map((t) => t.trim())).toEqual(["5 USDC", "7 USDC", `1000000000 of the token ${short(JUNK_MINT)}`]);
+    expect(await Promise.all([0, 1, 2].map((i) => picks.nth(i).getByRole("checkbox").isChecked()))).toEqual([true, true, false]);
+    const build = panel.getByRole("button", { name: "Build the setup" });
+    await panel.getByLabel("Your Lamport Vault's address").fill(VAULT);
+    expect(await build.isDisabled()).toBe(true);
+    expect(asked).toEqual([]);
+    await panel.locator("#rescueAgreed").check();
+    expect(await build.isDisabled()).toBe(false);
+    // an address that is not a vault is refused by the service, in its words, and nothing is handed to a wallet
+    await panel.getByLabel("Your Lamport Vault's address").fill(W2);
+    await build.click();
+    await expect.poll(() => page.locator("#notice").innerText(), { timeout: 8000 }).toBe("that address is not a Lamport Vault.");
+    await panel.getByLabel("Your Lamport Vault's address").fill(VAULT);
+    await build.click();
+    await expect.poll(() => panel.innerText(), { timeout: 8000 }).toContain("1 transaction to sign, one after another.");
+    // what was asked of the service: that vault, and the two accounts that were ticked
+    expect(asked.at(-1)).toEqual(["arm", profile, W1, VAULT, [A1.toBase58(), A2.toBase58()]]);
+    expect(await panel.innerText()).toContain(`It names the vault ${short(VAULT)} and gives the rescue program permission on 2 token accounts. Nothing in it moves a token.`);
+    // the vault Warden will name is shown in full, so that the owner can hold the two side by side
+    expect(await panel.locator("code.addr").innerText()).toBe(VAULT);
+
+    // a wallet showing another account is not handed it
+    await page.evaluate(() => { (window as any).__sent = null; (window as any).__account = 1; });
+    await panel.getByRole("button", { name: "Sign with TestWallet" }).click();
+    await expect.poll(() => page.locator("#notice").innerText(), { timeout: 8000 }).toBe(`TestWallet is not showing ${short(W1)}. Switch it to that wallet, or choose the wallet that holds it.`);
+    expect(await page.evaluate(() => (window as any).__sent)).toBeNull();
+    await page.evaluate(() => { (window as any).__account = 0; });
+
+    // The right one is. Warden reads the setup like anything else and says what it is, in its own words: where a
+    // rescue would go, and how many accounts it covers. It lets it through only when the owner has typed the
+    // end of the vault's address, which is the one thing a page that lied about the vault could not fake.
+    await panel.getByRole("button", { name: "Sign with TestWallet" }).click();
+    const warden = await Prompt.on(page);
+    const held = await warden.text(10_000);
+    expect(held?.tag).toBe("Lamport Warden · Check this carefully");
+    expect(held!.sentence).toBe(`Sets up Warden Sentinel for this wallet. In a rescue, your tokens can go only to the Lamport Vault ${short(VAULT)}. It arms 2 token accounts. Changing that vault later takes 72 hours, or closing this setup and making another.`);
+    expect(await page.evaluate(() => (window as any).__sent)).toBeNull(); // the wallet has not been asked yet
+    armed = true; // what the chain will show once the wallet has sent it
+    await warden.type(VAULT.slice(-4));
+    await warden.click("Continue to wallet");
+    await expect.poll(async () => (await page.evaluate(() => (window as any).__sent ?? null)) ?? `not sent; the page says: ${await page.locator("#notice").innerText().catch(() => "")}`, { timeout: 8000 }).toEqual({ bytes: Array.from(setup), chain: "solana:devnet" });
+    await expect.poll(() => page.locator("#notice").innerText(), { timeout: 30_000 }).toBe("Set up. A rescue of this wallet now goes into that vault.");
+    expect(await mine.locator(".what span").innerText()).toBe(`Set up for rescue into the vault ${short(VAULT)}. A rescue now would move 2 token accounts.`);
+    expect(await panel.isVisible()).toBe(false);
+
+    // Rescue now asks once more, and then does it; what was moved is said in a sentence.
+    expect(await mine.getByRole("button").allInnerTexts()).toEqual(["Look", "Cover more tokens", "Rescue now", "Take the setup away"]);
+    await mine.getByRole("button", { name: "Rescue now" }).click();
+    expect(asked.some((a) => a[0] === "rescue")).toBe(false);
+    await mine.getByRole("button", { name: "Move it all to the vault?" }).click();
+    await expect.poll(() => page.locator("#notice").innerText(), { timeout: 8000 }).toBe(`Moved 2 token accounts into your vault ${short(VAULT)}.`);
+    expect(asked.at(-1)).toEqual(["rescue", profile, W1]);
+
+    // An alert that is reason enough, about a wallet that is set up, has the rescue on it; one about a wallet that is not, has not.
+    store.addEvent({ wallet: W1, signature: "sigTaken", slot: 9, at: Math.floor(Date.now() / 1000), level: "urgent", signals: ["taken_by_permission"], sentence: "40 USDC left your wallet in a transaction your wallet did not sign.", rescueWorthy: true });
+    store.addEvent({ wallet: W2, signature: "sigOther", slot: 9, at: Math.floor(Date.now() / 1000), level: "urgent", signals: ["taken_by_permission"], sentence: "9 USDC left your wallet in a transaction your wallet did not sign.", rescueWorthy: true });
+    await page.reload();
+    const alert = page.locator("#events li").filter({ hasText: "40 USDC left your wallet" });
+    await expect.poll(() => alert.count(), { timeout: 10_000 }).toBe(1);
+    expect(await alert.getByRole("button").allInnerTexts()).toEqual(["Rescue now", "This was me", "Ignore"]);
+    expect(await page.locator("#events li").filter({ hasText: "9 USDC left your wallet" }).getByRole("button").allInnerTexts()).toEqual(["This was me", "Ignore"]);
+    const before = asked.length;
+    await alert.getByRole("button", { name: "Rescue now" }).click();
+    await alert.getByRole("button", { name: "Move it all to the vault?" }).click();
+    await expect.poll(() => alert.locator(".what span").last().innerText(), { timeout: 10_000 }).toContain("answered with a rescue");
+    expect(asked.slice(before)).toEqual([["rescue", profile, W1]]);
+    expect(store.events(W1).find((e) => e.signature === "sigTaken")!.answer).toBe("rescue");
+
+    // Rescue without asking is the owner's switch, off until they turn it.
+    const auto = page.locator("#rescueAuto");
+    expect(await auto.isChecked()).toBe(false);
+    await auto.check();
+    await expect.poll(() => page.locator("#notice").innerText(), { timeout: 8000 }).toBe("On. After a serious alert Sentinel rescues the wallets that are set up, and tells you afterwards.");
+    expect(accounts.profile(profile)!.autoRescue).toBe(true);
+    await auto.uncheck();
+    await expect.poll(() => accounts.profile(profile)!.autoRescue, { timeout: 8000 }).toBe(false);
+
+    // Taking the setup away asks once more, and is the wallet's own signature too.
+    await page.evaluate(() => { (window as any).__sent = null; (window as any).__sentAll = []; });
+    const again = page.locator("#rescueWallets li").filter({ hasText: W1 });
+    await again.getByRole("button", { name: "Take the setup away" }).click();
+    await again.getByRole("button", { name: "Take it away?" }).click();
+    await expect.poll(() => panel.isVisible(), { timeout: 8000 }).toBe(true);
+    expect(await panel.innerText()).toContain("2 transactions to sign, one after another. The last closes the setup, and the others revoke every permission this wallet gave for rescue. After that nothing can rescue this wallet.");
+    expect(asked.at(-1)).toEqual(["disarm", profile, W1]);
+    armed = false;
+    await panel.getByRole("button", { name: "Sign with TestWallet" }).click();
+    // Each goes through Warden on its way to the wallet. A revoke is an ordinary transaction, which Warden may
+    // pass or explain; the closing it holds until "I understand" is typed. The wallet gets each only after.
+    const off = await Prompt.on(page);
+    const sentSoFar = () => page.evaluate(() => ((window as any).__sentAll ?? []).length as number);
+    for (let i = 0; i < 2; i++) {
+      let shown: Awaited<ReturnType<Prompt["text"]>> = null;
+      for (let t = 0; t < 100 && !shown && (await sentSoFar()) <= i; t++) shown = await off.text(100);
+      if (shown && (await sentSoFar()) <= i) {
+        if (i === 1) {
+          expect(shown.sentence).toBe("Turns Warden Sentinel off for this wallet. Nothing can be rescued any more. The permissions on your token accounts stay until you revoke them, but nothing can use them.");
+          await off.type("I understand");
+        }
+        await off.click("Continue to wallet");
+      } else expect(i, "the closing never reaches a wallet without Warden's say").toBe(0);
+      await expect.poll(sentSoFar, { timeout: 10_000 }).toBe(i + 1);
+      // The chain shows it. The page asks the service what is left before it hands the wallet anything more:
+      // the closing is not asked for until the revokes are on the chain.
+      if (i === 0) { await page.waitForTimeout(1200); expect(await sentSoFar()).toBe(1); }
+      away = i + 1;
+    }
+    expect(await page.evaluate(() => (window as any).__sentAll)).toEqual([Array.from(revokes), Array.from(takeAway)]);
+    await expect.poll(() => page.locator("#notice").innerText(), { timeout: 30_000 }).toBe("Taken away. This wallet is no longer set up for rescue.");
+    expect(await again.locator(".what span").innerText()).toBe("Not set up for rescue. It holds 3 token accounts.");
+
+    // on the free plan the section says whose it is, and offers no setup
+    accounts.setTier(profile, "watch");
+    await page.reload();
+    await expect.poll(() => page.locator("#rescueState").innerText(), { timeout: 10_000 }).toContain("Rescue comes with Pro.");
+    expect(await page.locator("#rescueWallets li").filter({ hasText: W1 }).getByRole("button").allInnerTexts()).toEqual(["Look"]);
+    expect(await page.locator("#rescueAuto").isDisabled()).toBe(true);
+    delete apiDeps.rescue;
+    accounts.setTier(profile, "pro");
+    await page.reload();
+  }, 180_000);
 
   it("removes a wallet only when asked twice, signs out, and ran without an error or a blocked request", async () => {
     const second = page.locator("#wallets li").filter({ hasText: W2 });
