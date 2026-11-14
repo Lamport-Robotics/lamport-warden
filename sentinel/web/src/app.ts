@@ -20,7 +20,7 @@ interface Alert { id: string; wallet: string; at: number | null; level: "info" |
 /** Whether rescue can work here at all, whether this service can carry one out, whether the plan has it, and the profile's own switch. */
 interface RescueInfo { available: boolean; on: boolean; plan: boolean; auto: boolean; chain: string | null }
 interface TokenView { account: string; mint: string; amount: string; decimals: number }
-interface RescueStanding { armed: boolean; vault: string | null; rescuers: "lamport" | "own" | null; covered: TokenView[]; uncovered: (TokenView & { why: "not set up" | "frozen" })[] }
+interface RescueStanding { armed: boolean; vault: string | null; rescuers: "lamport" | "own" | null; covered: TokenView[]; uncovered: (TokenView & { why: "not set up" | "frozen" | "cannot be moved" })[] }
 type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null; paidUntil?: number | null; crypto?: { payTo: string; assets: ("USDC" | "SOL")[]; months: number[] } | null };
 type PayQuote = { reference: string; payTo: string; asset: "USDC" | "SOL"; units: string; decimals: number; months: number; cents: number; expiresAt: number; url: string };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
@@ -258,16 +258,22 @@ function render(): void {
 // ---- rescue
 
 const count = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
-const rescuedText = (r: { moved?: number; failed?: number; vault?: string }): string =>
-  Number(r.moved) + Number(r.failed) === 0 ? "There was nothing set up to move."
-    : `Moved ${count(Number(r.moved), "token account")} into your vault ${short(String(r.vault))}.${Number(r.failed) > 0 ? ` ${count(Number(r.failed), "account")} could not be moved and ${Number(r.failed) === 1 ? "is" : "are"} still in the wallet.` : ""}`;
+/** What a rescue did. `gone`: accounts that were empty when the rescue reached them, which it did not empty. */
+const rescuedText = (r: { moved?: number; failed?: number; gone?: number; vault?: string }): string => {
+  const moved = Number(r.moved) || 0, failed = Number(r.failed) || 0, gone = Number(r.gone) || 0;
+  if (moved + failed + gone === 0) return "There was nothing set up to move.";
+  return (moved > 0 ? `Moved ${count(moved, "token account")} into your vault ${short(String(r.vault))}.` : "Nothing was moved.")
+    + (failed > 0 ? ` ${count(failed, "account")} could not be moved and ${failed === 1 ? "is" : "are"} still in the wallet.` : "")
+    + (gone > 0 ? ` ${count(gone, "account")} ${gone === 1 ? "was" : "were"} emptied by something else before the rescue reached ${gone === 1 ? "it" : "them"}.` : "");
+};
 
 function standingText(s: RescueStanding): string {
-  const loose = s.uncovered.filter((u) => u.why === "not set up").length, frozen = s.uncovered.filter((u) => u.why === "frozen").length;
-  if (!s.armed) return `Not set up for rescue.${loose + frozen > 0 ? ` It holds ${count(loose + frozen, "token account")}.` : " It holds no tokens."}`;
+  const loose = s.uncovered.filter((u) => u.why === "not set up").length, frozen = s.uncovered.filter((u) => u.why === "frozen").length, fixed = s.uncovered.filter((u) => u.why === "cannot be moved").length;
+  if (!s.armed) return `Not set up for rescue.${s.uncovered.length > 0 ? ` It holds ${count(s.uncovered.length, "token account")}.` : " It holds no tokens."}`;
   return `Set up for rescue into the vault ${short(s.vault ?? "")}. A rescue now would move ${count(s.covered.length, "token account")}.`
     + (loose > 0 ? ` ${count(loose, "account")} that hold${loose === 1 ? "s" : ""} something ${loose === 1 ? "is" : "are"} not covered: press Cover new tokens.` : "")
     + (frozen > 0 ? ` ${count(frozen, "account")} ${frozen === 1 ? "is" : "are"} frozen and cannot be moved by anyone.` : "")
+    + (fixed > 0 ? ` ${count(fixed, "account")} ${fixed === 1 ? "holds a token" : "hold tokens"} that an ordinary transfer cannot move, and ${fixed === 1 ? "is" : "are"} left out.` : "")
     + (s.rescuers === "own" ? " Only a key you named may start a rescue of this wallet, so Sentinel cannot." : "");
 }
 
@@ -354,7 +360,8 @@ function openSetup(wallet: string, standing: RescueStanding | null): void {
     const transactions = r.body.transactions as string[];
     if (transactions.length === 0) { out.hidden = true; say("Nothing to set up: every token account that holds something is already covered."); return; }
     say("");
-    const what = el("p", `${count(transactions.length, "transaction")} to sign. ${transactions.length === 1 ? "It names" : "They name"} the vault ${short(String(r.body.vault))} and ${transactions.length === 1 ? "gives" : "give"} the rescue program permission on ${count(Number(r.body.accounts), "token account")}. Nothing in ${transactions.length === 1 ? "it" : "them"} moves anything.`, "plain");
+    const one = transactions.length === 1, makes = Number(r.body.makes) || 0;
+    const what = el("p", `${count(transactions.length, "transaction")} to sign. ${one ? "It names" : "They name"} the vault ${short(String(r.body.vault))} and ${one ? "gives" : "give"} the rescue program permission on ${count(Number(r.body.accounts), "token account")}.${makes > 0 ? ` The first ${makes === 1 ? "makes a token account in your vault for one token" : `make a token account in your vault for each of ${makes} tokens`}, so that a rescue has somewhere to put ${makes === 1 ? "it" : "them"}: the network takes a small deposit in SOL for each, from this wallet.` : ""} Nothing in ${one ? "it" : "them"} moves a token.`, "plain");
     // Warden knows a rescue setup when it reads one, and holds it until the owner has looked at where a rescue would go
     const check = el("p", "Warden, if it is in this browser, will stop, name the vault a rescue would go to, and ask for the last four characters of its address. It should be exactly this one: ", "soft");
     check.append(el("code", String(r.body.vault), "addr"));

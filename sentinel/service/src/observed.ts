@@ -170,6 +170,17 @@ export function tokenLossesOf(tx: ObservedTx, wallet: string): TokenLoss[] {
   return out;
 }
 
+/** The mints of which accounts belonging to `owner` held more after the transaction than before. */
+export function tokenGainsOf(tx: ObservedTx, owner: string): Set<string> {
+  const out = new Set<string>();
+  for (const b of tx.postTokenBalances) {
+    if (b.owner !== owner) continue;
+    const a = tx.preTokenBalances.find((p) => p.accountIndex === b.accountIndex);
+    if (BigInt(b.amount) > (a && a.owner === owner ? BigInt(a.amount) : 0n)) out.add(b.mint);
+  }
+  return out;
+}
+
 /** Every token account whose holding the transaction changed, and by how much. */
 export function tokenDeltasOf(tx: ObservedTx): Map<string, bigint> {
   const keys = accountKeys(tx);

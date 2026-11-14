@@ -57,6 +57,8 @@
  *                              list of 64 numbers) or the same 64 bytes in base64. All this key can do to an owner
  *                              is move the tokens they set up into the vault they named. It pays the fee of each
  *                              rescue, so it has to hold a little SOL. Without it nothing here can move anything.
+ *   SENTINEL_RESCUE_RPC_URL    an RPC for sending rescues, when it should not be SENTINEL_RPC_URL. Either way a
+ *                              rescue has an RPC client of its own and never waits behind the watcher's reading.
  */
 import { join } from "node:path";
 import { Accounts, cleanTarget, type ReadBudget } from "./accounts.js";
@@ -80,7 +82,7 @@ import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore, type StoredEvent } from "./store.js";
 import { ACCOUNTS_PER_CALL, Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { rescuerKey: Uint8Array | null; payTo: string | null; payUsdcMint: string | null; paySol: boolean; telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rescuerKey: Uint8Array | null; rescueRpcUrl: string | null; payTo: string | null; payUsdcMint: string | null; paySol: boolean; telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -183,7 +185,9 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const rescuerKey = rescuerKeyFrom(env.SENTINEL_RESCUER_KEY);
   // said without repeating it: a key that is wrong is still a secret
   if (rescuerKey === undefined) return { ok: false, why: "SENTINEL_RESCUER_KEY has to be a keypair as solana-keygen writes it (a list of 64 numbers), or those 64 bytes in base64." };
-  return { ok: true, config: { rescuerKey, payTo, payUsdcMint, paySol: env.SENTINEL_PAY_SOL !== "off", telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
+  const rescueRpcUrl = (env.SENTINEL_RESCUE_RPC_URL ?? "").trim() || null;
+  try { if (rescueRpcUrl && !/^https?:$/.test(new URL(rescueRpcUrl).protocol)) throw new Error(); } catch { return { ok: false, why: "SENTINEL_RESCUE_RPC_URL has to be the address of a Solana RPC." }; }
+  return { ok: true, config: { rescuerKey, rescueRpcUrl, payTo, payUsdcMint, paySol: env.SENTINEL_PAY_SOL !== "off", telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -449,7 +453,9 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const passesPerMinute = cfg.rpcPace.heavyPer10s ? cfg.rpcPace.heavyPer10s * 6 * 0.4 : Infinity;
   const fullEverySeconds = () => Math.max(600, Math.ceil(store.wallets().length / passesPerMinute) * 60);
   // Rescue: shown and set up wherever the two programs are on this chain; carried out only with a key.
-  const rescuer = cfg.rescuerKey ? new Rescuer(rpc, Keypair.fromSecretKey(cfg.rescuerKey)) : null;
+  // The key that rescues asks the chain through a client of its own: a rescue is a race, and must not stand
+  // in line behind the reading of every other wallet.
+  const rescuer = cfg.rescuerKey ? new Rescuer(new HttpRpc(cfg.rescueRpcUrl ?? cfg.rpcUrl, undefined, { pace: cfg.rpcPace }), Keypair.fromSecretKey(cfg.rescuerKey)) : null;
   const rescue = new Rescue(rpc, rescuer, accounts, store, {
     notify: (wallet, sentence) => notifier.notify(wallet, "urgent", sentence),
     notice: (profile, sentence) => notifier.notice(profile, sentence),

@@ -15,7 +15,7 @@ import { looksAlike } from "../../../pincer1/daemon/src/warden/index.js";
 import { fmtSol, fmtToken } from "../../../pincer1/daemon/src/tx/explain.js";
 import { KNOWN_MINTS, U64_MAX } from "../../../pincer1/daemon/src/tx/known.js";
 import type { Baseline } from "./baseline.js";
-import { accountKeys, decode, movementOf, signersOf, tokenLossesOf, type ObservedTx } from "./observed.js";
+import { accountKeys, decode, movementOf, signersOf, tokenLossesOf, type ObservedTx, tokenGainsOf } from "./observed.js";
 
 export type Level = "info" | "alert" | "urgent";
 export type SignalKind =
@@ -26,6 +26,8 @@ export type SignalKind =
   | "watch_behind"
   // Sentinel moved the wallet's armed tokens into its owner's vault (rescue.ts)
   | "rescued"
+  // the wallet's rescue setup was closed, and not from the Sentinel page (rescue.ts)
+  | "rescue_closed"
   | "inbound_from_drainer" | "inbound_from_lookalike"
   // not about the wallet but about the watching of it (blindness.ts)
   | "watch_stopped" | "watch_resumed";
@@ -112,6 +114,8 @@ export interface WatchContext {
   tokenAccounts?: Readonly<Record<string, TokenAccountState>>;
   /** Holders of a permission whose takings the owner has said were theirs (a marketplace selling what they listed). */
   trustedTakers?: ReadonlySet<string>;
+  /** The vault the wallet's rescue setup names: tokens that leave under the rescue permission and arrive there were rescued. */
+  rescueVault?: string;
   /** True while the owner is taking the rescue setup away through the Sentinel page: the permissions going is then their doing. */
   disarming?: boolean;
   /** The rescues this service sent itself, by signature: those it has already told the owner of. */
@@ -287,10 +291,28 @@ function listed(parts: string[], more: number): string {
  * transaction that need not even name the wallet); or a power the token gives its issuer. Either way the
  * owner did not do it, and whatever the permission still covers can go the same way.
  */
-function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts" | "trustedTakers">): Signal | null {
+type RescueContext = Pick<WatchContext, "wallet" | "sentinelDelegate" | "rescueVault" | "tokenAccounts" | "ownRescues">;
+
+/**
+ * Which of a wallet's losses in a transaction were a rescue. An account that is set up for rescue can still
+ * lose its tokens some other way (a token whose issuer may move anyone's, a permission the token gives
+ * somebody else), so being set up is not enough: it is a rescue when this service sent it, or when tokens of
+ * that kind arrived, in the same transaction, in an account that belongs to the vault the setup names.
+ * Anything else that leaves is a taking, whatever the account was set up for.
+ */
+function rescuedLosses(tx: ObservedTx, ctx: RescueContext) {
+  const losses = tokenLossesOf(tx, ctx.wallet);
+  if (!ctx.sentinelDelegate) return { rescued: [], taken: losses };
+  const ours = ctx.ownRescues?.has(tx.signature) === true;
+  const arrived = ctx.rescueVault ? tokenGainsOf(tx, ctx.rescueVault) : new Set<string>();
+  const isRescue = (l: (typeof losses)[number]) => ctx.tokenAccounts?.[l.account]?.delegate === ctx.sentinelDelegate && (ours || arrived.has(l.mint));
+  return { rescued: losses.filter(isRescue), taken: losses.filter((l) => !isRescue(l)) };
+}
+
+function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "rescueVault" | "tokenAccounts" | "trustedTakers" | "ownRescues">): Signal | null {
   const permitted = (account: string) => ctx.tokenAccounts?.[account]?.delegate ?? null;
-  // what Sentinel's own delegate moves is a rescue, into the owner's vault, and is reported as one
-  const losses = tokenLossesOf(tx, ctx.wallet).filter((l) => !(ctx.sentinelDelegate && permitted(l.account) === ctx.sentinelDelegate));
+  // what went into the owner's vault under the rescue permission is a rescue, and is reported as one
+  const losses = rescuedLosses(tx, ctx).taken;
   if (losses.length === 0) return null;
   const what = listed(losses.slice(0, 3).map((l) => fmtToken(l.lost, l.mint, { decimals: l.decimals })), Math.max(0, losses.length - 3));
   const start = `${what} left your wallet in a transaction your wallet did not sign.`;
@@ -319,12 +341,12 @@ function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, 
  * rescuer keys, or the key the setup names). The owner hears of it all the same: nothing leaves a watched
  * wallet unsaid, and a setup the owner did not make would look exactly like this.
  */
-function rescuedSignal(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts" | "ownRescues">): Signal | null {
+function rescuedSignal(tx: ObservedTx, ctx: RescueContext): Signal | null {
   if (!ctx.sentinelDelegate || ctx.ownRescues?.has(tx.signature)) return null;
-  const moved = tokenLossesOf(tx, ctx.wallet).filter((l) => ctx.tokenAccounts?.[l.account]?.delegate === ctx.sentinelDelegate);
+  const moved = rescuedLosses(tx, ctx).rescued;
   if (moved.length === 0) return null;
   const what = listed(moved.slice(0, 3).map((l) => fmtToken(l.lost, l.mint, { decimals: l.decimals })), Math.max(0, moved.length - 3));
-  return signal("rescued", "urgent", false, `${what} left your wallet in a rescue that Sentinel did not start from here. A rescue can only go into the Lamport Vault this wallet is set up for, and only that vault's key can move it on. If you did not set this wallet up for rescue, or that vault is not yours, treat the wallet as compromised.`);
+  return signal("rescued", "urgent", false, `${what} left your wallet in a rescue that Sentinel did not start from here, and went into the Lamport Vault this wallet is set up for${ctx.rescueVault ? ` (${short(ctx.rescueVault)})` : ""}. Only that vault's key can move it on. If you did not set this wallet up for rescue, or that vault is not yours, treat the wallet as compromised.`);
 }
 
 /**
@@ -333,7 +355,7 @@ function rescuedSignal(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "senti
  * judged by who signed, and when that cannot be read nothing is said. (Such a transaction is also in the
  * wallet's own list and `assessTransaction` says the same of it there; the watcher tells of it once.)
  */
-export function assessTaken(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "tokenAccounts" | "trustedTakers" | "ownRescues">): Assessment {
+export function assessTaken(tx: ObservedTx, ctx: Pick<WatchContext, "wallet" | "sentinelDelegate" | "rescueVault" | "tokenAccounts" | "trustedTakers" | "ownRescues">): Assessment {
   if (tx.failed) return finish([], false, false);
   const signers = signersOf(tx);
   if (accountKeys(tx).includes(ctx.wallet) && (signers.length === 0 || signers.includes(ctx.wallet))) return finish([], false, false);

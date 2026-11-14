@@ -11,7 +11,7 @@ import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { createPrivateKey, sign as edSign } from "node:crypto";
 import { Accounts } from "../src/accounts.js";
 import { configFrom, rescuerKeyFrom } from "../src/main.js";
-import { PROGRAM, TOKEN, TOKEN_2022, configAddress, delegateAddress } from "../src/program.js";
+import { ASSOCIATED_TOKEN, PROGRAM, TOKEN, TOKEN_2022, configAddress, delegateAddress, vaultTokenAddress } from "../src/program.js";
 import { CHANGE_SECONDS, LAMPORT_VAULT_PROGRAM, NOT_ON_CHAIN, Rescue } from "../src/rescue.js";
 import type { RescueResult } from "../src/rescuer.js";
 import type { Rpc } from "../src/rpc.js";
@@ -23,6 +23,7 @@ import { Baseline } from "../src/baseline.js";
 import { MemoryStore, disarmingNow, rescueDelegateOf } from "../src/store.js";
 import { parseAnyMessage } from "../../../pincer1/daemon/src/tx/parse.js";
 import { readSentinel } from "../../../src/sentinel.js";
+import { judge } from "../../../src/judge.js";
 
 const ORIGIN = "https://warden.lamportrobotics.com", HOST = "warden.lamportrobotics.com";
 const T0 = 1_800_000_000;
@@ -49,11 +50,16 @@ class Chain implements Rpc {
   programs = true;
   genesis = "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
   accounts = new Map<string, { owner: string; data: Buffer; executable?: boolean }>([[VAULT.address, { owner: LAMPORT_VAULT_PROGRAM, data: VAULT.data }], [OTHER_VAULT.address, { owner: LAMPORT_VAULT_PROGRAM, data: OTHER_VAULT.data }]]);
-  tokens = new Map<string, { pubkey: string; mint: string; amount: string; decimals: number; delegate?: string; delegated?: string; frozen?: boolean; program?: string }[]>();
+  tokens = new Map<string, { pubkey: string; mint: string; amount: string; decimals: number; delegate?: string; delegated?: string; frozen?: boolean; program?: string; marks?: string[] }[]>();
+  /** The token accounts a vault has, by address, and the token program each is under. */
+  places = new Map<string, string>();
   calls: string[] = [];
   down = false;
+  /** Gives the vault a token account for a mint: what an owner's setup makes. */
+  place(vault: string, mintOf: string, program = TOKEN): void { this.places.set(vaultTokenAddress(new PublicKey(vault), new PublicKey(mintOf), program).toBase58(), program.toBase58()); }
   private view(address: string) {
     if ((address === PROGRAM.toBase58() || address === LAMPORT_VAULT_PROGRAM) && this.programs) return { owner: "BPFLoaderUpgradeab1e11111111111111111111111", data: ["", "base64"], executable: true };
+    if (this.places.has(address)) return { owner: this.places.get(address)!, data: ["", "base64"], executable: false };
     const a = this.accounts.get(address);
     return a ? { owner: a.owner, data: [a.data.toString("base64"), "base64"], executable: false } : null;
   }
@@ -65,7 +71,7 @@ class Chain implements Rpc {
     if (method === "getGenesisHash") return this.genesis;
     if (method === "getLatestBlockhash") return { value: { blockhash: PublicKey.default.toBase58() } };
     if (method === "getBalance") return { value: 1 };
-    if (method === "getTokenAccountsByOwner") return { value: (this.tokens.get(params[0]) ?? []).filter((t) => (t.program ?? TOKEN.toBase58()) === params[1].programId).map((t) => ({ pubkey: t.pubkey, account: { data: { parsed: { info: { mint: t.mint, state: t.frozen ? "frozen" : "initialized", tokenAmount: { amount: t.amount, decimals: t.decimals }, ...(t.delegate ? { delegate: t.delegate, delegatedAmount: { amount: t.delegated ?? "18446744073709551615" } } : {}) } } } } })) };
+    if (method === "getTokenAccountsByOwner") return { value: (this.tokens.get(params[0]) ?? []).filter((t) => (t.program ?? TOKEN.toBase58()) === params[1].programId).map((t) => ({ pubkey: t.pubkey, account: { data: { parsed: { info: { mint: t.mint, state: t.frozen ? "frozen" : "initialized", tokenAmount: { amount: t.amount, decimals: t.decimals }, ...(t.marks ? { extensions: t.marks.map((extension) => ({ extension })) } : {}), ...(t.delegate ? { delegate: t.delegate, delegatedAmount: { amount: t.delegated ?? "18446744073709551615" } } : {}) } } } } })) };
     throw new Error(`not stood in for: ${method}`);
   }
   arm(owner: PublicKey, vault: string): string {
@@ -80,9 +86,16 @@ function service(o: { rescuer?: boolean; rescue?: boolean } = {}) {
   const chain = new Chain();
   let now = T0;
   const noticed: [string, string][] = [], told: [string, string][] = [];
-  const rescued: string[] = [];
-  let next: RescueResult | Error = { ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(1), tokenAccount(2)], signature: "sig1", ok: true }, { accounts: [tokenAccount(3)], signature: null, ok: false, why: "refused" }] };
-  const rescuer = { address: alice.address, rescue: async (owner: string): Promise<RescueResult> => { rescued.push(owner); if (next instanceof Error) throw next; return next; } };
+  const rescued: string[] = [], how: { perTransaction?: number }[] = [];
+  /** What the rescuer answers, try after try; the last answer is given to every try after it. */
+  let next: (RescueResult | Error)[] = [{ ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(1), tokenAccount(2)], signature: "sig1", ok: true }] }];
+  /** Signatures the chain says landed. */
+  const landed = new Set<string>();
+  const rescuer = {
+    address: alice.address,
+    rescue: async (owner: string, opts: { perTransaction?: number } = {}): Promise<RescueResult> => { rescued.push(owner); how.push(opts); const r = next.length > 1 ? next.shift()! : next[0]!; if (r instanceof Error) throw r; return r; },
+    landed: async (signature: string) => landed.has(signature),
+  };
   const rescue = new Rescue(chain, o.rescuer === false ? null : rescuer, accounts, store, { now: () => now, notify: async (w, s) => { told.push([w, s]); return { delivered: 1, failed: 0 }; }, notice: async (p, s) => { noticed.push([p, s]); } });
   const nonces = new NonceBook();
   const handle = api({ accounts, store, watcher: { ownerSigned: async () => undefined, confirmOwn: async () => true }, nonces, origin: ORIGIN, now: () => now, limiter: new RateLimiter(), notice: async (p, s) => { noticed.push([p, s]); }, ...(o.rescue === false ? {} : { rescue }) });
@@ -92,7 +105,7 @@ function service(o: { rescuer?: boolean; rescue?: boolean } = {}) {
     const message = new TextEncoder().encode(signInText({ host: HOST, address: w.address, nonce: (n.body as any).nonce, purpose: session ? "link" : "signin", issuedAt: new Date(now * 1000).toISOString() }));
     return (await call("POST", "/v1/signin", { address: w.address, message: b64(message), signature: b64(w.sign(message)) }, session ?? null)).body as any;
   };
-  return { store, accounts, chain, rescue, call, signIn, noticed, told, rescued, tick: (s: number) => { now += s; }, now: () => now, answers: (r: RescueResult | Error) => { next = r; } };
+  return { store, accounts, chain, rescue, call, signIn, noticed, told, rescued, how, landed, tick: (s: number) => { now += s; }, now: () => now, answers: (...r: (RescueResult | Error)[]) => { next = r; } };
 }
 
 describe("rescue, where it is not", () => {
@@ -167,15 +180,26 @@ describe("rescue through the API", () => {
       { pubkey: tokenAccount(2), mint: mint(2), amount: "900", decimals: 0, program: TOKEN_2022.toBase58() },
       { pubkey: tokenAccount(3), mint: mint(3), amount: "0", decimals: 6 },
       { pubkey: tokenAccount(4), mint: mint(4), amount: "7", decimals: 0, frozen: true },
+      // a token that cannot be transferred at all, and one whose issuer's program runs on every transfer
+      { pubkey: tokenAccount(5), mint: mint(5), amount: "1", decimals: 0, program: TOKEN_2022.toBase58(), marks: ["immutableOwner", "nonTransferableAccount"] },
+      { pubkey: tokenAccount(6), mint: mint(6), amount: "40", decimals: 0, program: TOKEN_2022.toBase58(), marks: ["transferHookAccount"] },
     ]);
     const built = (await s.call("POST", `/v1/wallets/${alice.address}/rescue/arm`, { vault: VAULT.address }, a.session)).body as any;
     const delegate = delegateAddress(alice.key, new PublicKey(VAULT.address)).toBase58();
-    expect(built).toMatchObject({ ok: true, accounts: 2, vault: VAULT.address, delegate });
-    // one transaction, paid by the owner, signed by nobody: the config, and an approval for each account that holds something and can move
-    const tx = Transaction.from(Buffer.from(built.transactions[0], "base64"));
-    expect(built.transactions).toHaveLength(1);
-    expect(tx.feePayer!.toBase58()).toBe(alice.address);
-    expect(tx.signatures.every((sig) => sig.signature === null)).toBe(true);
+    expect(built).toMatchObject({ ok: true, accounts: 2, makes: 2, vault: VAULT.address, delegate });
+    // Two transactions, paid by the owner, signed by nobody. First the vault's own token account for each
+    // token, which the owner pays for, so that the key that rescues never pays for one.
+    expect(built.transactions).toHaveLength(2);
+    const makes = Transaction.from(Buffer.from(built.transactions[0], "base64"));
+    expect(makes.instructions.map((ix) => [ix.programId.toBase58(), ix.data[0], ix.keys[0]!.pubkey.toBase58(), ix.keys[1]!.pubkey.toBase58(), ix.keys[2]!.pubkey.toBase58()])).toEqual([
+      [ASSOCIATED_TOKEN.toBase58(), 1, alice.address, vaultTokenAddress(new PublicKey(VAULT.address), new PublicKey(mint(2)), TOKEN_2022).toBase58(), VAULT.address],
+      [ASSOCIATED_TOKEN.toBase58(), 1, alice.address, vaultTokenAddress(new PublicKey(VAULT.address), new PublicKey(mint(1)), TOKEN).toBase58(), VAULT.address],
+    ]);
+    // Then the config, and an approval for each account that holds something and can be moved. The frozen
+    // account and the two tokens a plain transfer cannot move are left out: one of those in a rescue would
+    // fail every account sent beside it.
+    const tx = Transaction.from(Buffer.from(built.transactions[1], "base64"));
+    for (const t of [makes, tx]) { expect(t.feePayer!.toBase58()).toBe(alice.address); expect(t.signatures.every((sig) => sig.signature === null)).toBe(true); }
     expect(tx.instructions.map((ix) => ix.programId.toBase58())).toEqual([PROGRAM.toBase58(), TOKEN_2022.toBase58(), TOKEN.toBase58()]); // the biggest holding first
     for (const ix of tx.instructions.slice(1)) {
       expect(ix.data[0]).toBe(13); // ApproveChecked, and to the one address the rescue program signs for
@@ -195,10 +219,22 @@ describe("rescue through the API", () => {
     s.chain.arm(alice.key, VAULT.address);
     s.chain.tokens.get(alice.address)![0]!.delegate = delegate;
     s.chain.tokens.get(alice.address)![1]!.delegate = delegate;
+    s.chain.place(VAULT.address, mint(1));
+    // approved, and the vault has nowhere to put it yet: a rescue would leave it, so it is not called covered
+    const half = (await s.call("GET", `/v1/wallets/${alice.address}/rescue`, undefined, a.session)).body as any;
+    expect(half.covered.map((c: any) => c.account)).toEqual([tokenAccount(1)]);
+    expect(half.uncovered.find((u: any) => u.account === tokenAccount(2))).toMatchObject({ why: "not set up" });
+    // asked again, the setup is the one thing that is missing: the vault's account for that token, and no new approval
+    const rest = (await s.call("POST", `/v1/wallets/${alice.address}/rescue/arm`, { vault: VAULT.address }, a.session)).body as any;
+    expect(rest).toMatchObject({ accounts: 1, makes: 1 });
+    expect(rest.transactions.map((t: string) => Transaction.from(Buffer.from(t, "base64")).instructions.map((ix) => ix.programId.toBase58()))).toEqual([[ASSOCIATED_TOKEN.toBase58()]]);
+    s.chain.place(VAULT.address, mint(2), TOKEN_2022);
     const look = (await s.call("GET", `/v1/wallets/${alice.address}/rescue`, undefined, a.session)).body as any;
     expect(look).toMatchObject({ armed: true, vault: VAULT.address, rescuers: "lamport" });
     expect(look.covered.map((c: any) => c.account).sort()).toEqual([tokenAccount(1), tokenAccount(2)].sort());
-    expect(look.uncovered).toEqual([{ account: tokenAccount(4), mint: mint(4), amount: "7", decimals: 0, why: "frozen" }]);
+    expect(look.uncovered.map((u: any) => [u.account, u.why])).toEqual([[tokenAccount(4), "frozen"], [tokenAccount(5), "cannot be moved"], [tokenAccount(6), "cannot be moved"]]);
+    // the watcher is told the vault with the address: tokens that arrive there were rescued, and tokens that do not were taken
+    expect(s.store.wallets()[0]).toMatchObject({ sentinelDelegate: delegate, sentinelVault: VAULT.address });
     expect(((await s.call("GET", "/v1/me", undefined, a.session)).body as any).wallets[0].armed).toBe(true);
     expect(s.noticed).toEqual([[a.profile.id, `The wallet ${alice.address.slice(0, 4)}..${alice.address.slice(-4)} is set up for rescue into the Lamport Vault ${VAULT.address.slice(0, 4)}..${VAULT.address.slice(-4)}. If that was not you, or that is not your vault, someone else has the key to that wallet.`]]);
     await s.call("GET", `/v1/wallets/${alice.address}/rescue`, undefined, a.session);
@@ -219,12 +255,10 @@ describe("rescue through the API", () => {
     const a = await s.signIn(alice);
     s.accounts.setTier(a.profile.id, "pro");
     s.chain.arm(alice.key, VAULT.address);
-    // two accounts go; a third is refused, is sent once more and refused again, and the chain shows it still holding
-    s.chain.tokens.set(alice.address, [{ pubkey: tokenAccount(3), mint: mint(3), amount: "5", decimals: 0 }]);
     const r = await s.call("POST", `/v1/wallets/${alice.address}/rescue/now`, undefined, a.session);
-    expect(r).toEqual({ status: 200, body: { ok: true, vault: VAULT.address, moved: 2, failed: 1, signatures: ["sig1", "sig1"] } });
-    expect(s.rescued).toEqual([alice.address, alice.address]);
-    const sentence = `Sentinel moved 2 of this wallet's token accounts into your Lamport Vault (${VAULT.address.slice(0, 4)}..${VAULT.address.slice(-4)}). 1 could not be moved and is still in the wallet. Only your vault's key can move what is there now. SOL is not moved by a rescue.`;
+    expect(r).toEqual({ status: 200, body: { ok: true, vault: VAULT.address, moved: 2, failed: 0, gone: 0, signatures: ["sig1"] } });
+    expect(s.rescued).toEqual([alice.address]);
+    const sentence = `Sentinel moved 2 of this wallet's token accounts into your Lamport Vault (${VAULT.address.slice(0, 4)}..${VAULT.address.slice(-4)}). Only your vault's key can move what is there now. SOL is not moved by a rescue.`;
     expect(s.told).toEqual([[alice.address, sentence]]);
     const events = ((await s.call("GET", "/v1/events", undefined, a.session)).body as any).events;
     expect(events.map((e: any) => [e.signals, e.level, e.signature, e.sentence, e.canRescue])).toEqual([[["rescued"], "urgent", "sig1", sentence, false]]);
@@ -235,7 +269,7 @@ describe("rescue through the API", () => {
     s.store.addEvent({ wallet: alice.address, signature: "sigT", slot: 1, at: s.now(), level: "urgent", signals: ["taken_by_permission"], sentence: "x", rescueWorthy: true });
     const alert = s.store.events(alice.address).find((e) => e.signature === "sigT")!;
     s.answers({ ok: true, vault: VAULT.address, steps: [] });
-    expect(await s.call("POST", `/v1/events/${alert.id}/answer`, { answer: "rescue" }, a.session)).toEqual({ status: 200, body: { ok: true, vault: VAULT.address, moved: 0, failed: 0, signatures: [] } });
+    expect(await s.call("POST", `/v1/events/${alert.id}/answer`, { answer: "rescue" }, a.session)).toEqual({ status: 200, body: { ok: true, vault: VAULT.address, moved: 0, failed: 0, gone: 0, signatures: [] } });
     expect(s.store.events(alice.address).find((e) => e.signature === "sigT")!.answer).toBe("rescue");
     // nothing was there to move, so nothing more was said or recorded
     expect(s.told).toHaveLength(1);
@@ -243,7 +277,6 @@ describe("rescue through the API", () => {
 
     // A rescue the chain refused, or could not be asked for, is said as that and the alert stays unanswered.
     // And it can be asked for again at once: nobody is made to wait a minute for a rescue that did not happen.
-    s.tick(61);
     s.store.addEvent({ wallet: alice.address, signature: "sigU", slot: 2, at: s.now(), level: "urgent", signals: ["taken_by_permission"], sentence: "y", rescueWorthy: true });
     const second = s.store.events(alice.address).find((e) => e.signature === "sigU")!;
     s.answers({ ok: false, why: "this wallet is not armed." });
@@ -251,17 +284,67 @@ describe("rescue through the API", () => {
     s.answers(new Error("down"));
     expect(await s.call("POST", `/v1/events/${second.id}/answer`, { answer: "rescue" }, a.session)).toEqual({ status: 502, body: { error: "the chain could not be reached, so nothing was moved. Try again." } });
     expect(s.store.events(alice.address).find((e) => e.signature === "sigU")!.answer).toBeUndefined();
-    // a transaction that was given up on and landed all the same is not said to be still in the wallet
-    s.chain.tokens.set(alice.address, []);
-    s.answers({ ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(3)], signature: "sig9", ok: false, why: "not confirmed in time" }] });
-    expect((await s.call("POST", `/v1/events/${second.id}/answer`, { answer: "rescue" }, a.session)).body).toMatchObject({ moved: 1, failed: 0 });
-    expect(s.told.at(-1)![1]).toBe(`Sentinel moved 1 of this wallet's token account into your Lamport Vault (${VAULT.address.slice(0, 4)}..${VAULT.address.slice(-4)}). Only your vault's key can move what is there now. SOL is not moved by a rescue.`);
-    s.tick(61);
     // and it cannot be asked for without end
+    s.answers({ ok: true, vault: VAULT.address, steps: [] });
     let last = 0;
     for (let i = 0; i < 12; i++) last = (await s.call("POST", `/v1/wallets/${alice.address}/rescue/now`, undefined, a.session)).status;
     expect(last).toBe(429);
     expect((await s.call("POST", `/v1/wallets/${alice.address}/rescue/now`, undefined, a.session)).body).toEqual({ error: "too many requests. Wait a minute and try again." });
+  });
+
+  it("says what a rescue did and nothing more: what moved, what is still there, and what somebody else emptied first", async () => {
+    const VAULT_SHORT = `${VAULT.address.slice(0, 4)}..${VAULT.address.slice(-4)}`;
+    const ask = async (s: ReturnType<typeof service>, session: string) => (await s.call("POST", `/v1/wallets/${alice.address}/rescue/now`, undefined, session)).body as any;
+    const pro = async () => { const s = service(); const a = await s.signIn(alice); s.accounts.setTier(a.profile.id, "pro"); s.chain.arm(alice.key, VAULT.address); return { s, session: a.session as string }; };
+    const holds = (s: ReturnType<typeof service>, ...n: number[]) => s.chain.tokens.set(alice.address, n.map((i) => ({ pubkey: tokenAccount(i), mint: mint(i), amount: "5", decimals: 0 })));
+
+    // One account will not move (its token refuses), and it rode with two that would have. What the first
+    // try leaves is sent again one account to a transaction, so the two go and only the one stays.
+    {
+      const { s, session } = await pro();
+      holds(s, 3);
+      s.answers(
+        { ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(1), tokenAccount(2), tokenAccount(3)], signature: null, ok: false, why: "refused" }] },
+        { ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(1)], signature: "s1", ok: true }, { accounts: [tokenAccount(2)], signature: "s2", ok: true }, { accounts: [tokenAccount(3)], signature: null, ok: false, why: "refused" }] },
+      );
+      expect(await ask(s, session)).toEqual({ ok: true, vault: VAULT.address, moved: 2, failed: 1, gone: 0, signatures: ["s1", "s2"] });
+      expect(s.how).toEqual([{}, { perTransaction: 1 }]);
+      expect(s.told[0]![1]).toBe(`Sentinel moved 2 of this wallet's token accounts into your Lamport Vault (${VAULT_SHORT}). 1 could not be moved and is still in the wallet. Only your vault's key can move what is there now. SOL is not moved by a rescue.`);
+      // something was left behind, so it can be asked for again at once
+      s.answers({ ok: true, vault: VAULT.address, steps: [] });
+      expect((await s.call("POST", `/v1/wallets/${alice.address}/rescue/now`, undefined, session)).status).toBe(200);
+    }
+
+    // A thief got there first: the transactions failed, the accounts are empty, and none of it is in the
+    // vault. That is not a rescue, and it is not said as one.
+    {
+      const { s, session } = await pro();
+      holds(s);
+      s.answers({ ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(1), tokenAccount(2), tokenAccount(3)], signature: "lost", ok: false, why: "the chain refused it" }] }, { ok: true, vault: VAULT.address, steps: [] });
+      expect(await ask(s, session)).toEqual({ ok: true, vault: VAULT.address, moved: 0, failed: 0, gone: 3, signatures: [] });
+      expect(s.told[0]![1]).toBe("Sentinel tried to rescue this wallet and moved nothing. 3 were emptied by something else before the rescue reached them: Sentinel did not move what was in them. SOL is not moved by a rescue.");
+      expect(s.store.events(alice.address).map((e) => [e.signals, e.level, e.signature])).toEqual([[["rescued"], "urgent", ""]]);
+    }
+
+    // A transaction that was given up on and landed all the same: the chain is asked, and its word makes it moved.
+    {
+      const { s, session } = await pro();
+      holds(s);
+      s.landed.add("slow");
+      s.answers({ ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(1)], signature: "slow", ok: false, why: "not seen to land in time" }] }, { ok: true, vault: VAULT.address, steps: [] });
+      expect(await ask(s, session)).toEqual({ ok: true, vault: VAULT.address, moved: 1, failed: 0, gone: 0, signatures: ["slow"] });
+      expect(s.told[0]![1]).toBe(`Sentinel moved 1 of this wallet's token account into your Lamport Vault (${VAULT_SHORT}). Only your vault's key can move what is there now. SOL is not moved by a rescue.`);
+    }
+
+    // When the chain cannot be asked afterwards, what did not go through is said to be still there: the careful reading.
+    {
+      const { s, session } = await pro();
+      s.answers({ ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(1)], signature: null, ok: false, why: "refused" }] });
+      const down = s.chain.call.bind(s.chain);
+      s.chain.call = async (method, params) => { if (method === "getTokenAccountsByOwner") throw new Error("down"); return down(method, params); };
+      expect(await ask(s, session)).toMatchObject({ moved: 0, failed: 1, gone: 0 });
+      expect(s.told[0]![1]).toBe("Sentinel tried to rescue this wallet and moved nothing. 1 could not be moved and is still in the wallet. SOL is not moved by a rescue.");
+    }
   });
 
   it("rescues unasked only for an owner who switched that on, and the channels hear when the switch is turned", async () => {
@@ -319,13 +402,26 @@ describe("rescue through the API", () => {
     s.chain.accounts.set(configAddress(bob.key).toBase58(), { owner: TOKEN.toBase58(), data: configData(bob.key, VAULT.address) });
     await s.rescue.sync([alice.address, bob.address]);
     expect(s.store.wallets()[1]!.sentinelDelegate).toBeUndefined();
-    // taken away
+    // Closed, and not from the Sentinel page. Only the wallet's key can do that, and it is what a thief does
+    // first: an Urgent alert, on record, and no mere notice.
     s.chain.accounts.delete(configAddress(alice.key).toBase58());
     await s.rescue.sync([alice.address, bob.address]);
-    expect(s.store.wallets()[0]!.sentinelDelegate).toBeUndefined();
-    expect(s.noticed.at(-1)).toEqual([a.profile.id, `The wallet ${alice.address.slice(0, 4)}..${alice.address.slice(-4)} is no longer set up for rescue. If that was not you, someone else has the key to that wallet.`]);
-    expect(s.noticed).toHaveLength(2);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(s.store.wallets()[0]).toEqual({ address: alice.address });
+    expect(s.noticed).toHaveLength(1);
+    const closed = "This wallet's rescue setup was closed, and not from the Sentinel page. Nothing can rescue it now. If that was not you, someone else has this wallet's key: move what is left to a new wallet.";
+    expect(s.told).toEqual([[alice.address, closed]]);
+    expect(s.store.events(alice.address).map((e) => [e.signals, e.level, e.sentence, e.rescueWorthy])).toEqual([[["rescue_closed"], "urgent", closed, false]]);
     expect(b.profile.id).not.toBe(a.profile.id);
+
+    // Taken away on the page, it is the owner's doing: a notice, and no alert.
+    s.chain.arm(alice.key, VAULT.address);
+    await s.rescue.sync([alice.address]);
+    expect((await s.call("POST", `/v1/wallets/${alice.address}/rescue/disarm`, undefined, a.session)).status).toBe(200);
+    s.chain.accounts.delete(configAddress(alice.key).toBase58());
+    await s.rescue.sync([alice.address]);
+    expect(s.noticed.at(-1)).toEqual([a.profile.id, `The wallet ${alice.address.slice(0, 4)}..${alice.address.slice(-4)} is no longer set up for rescue. If that was not you, someone else has the key to that wallet.`]);
+    expect(s.told).toHaveLength(1);
   });
 
   it("taking a setup away is the owner's on any plan, and tells the watcher the permissions going is their doing", async () => {
@@ -368,19 +464,28 @@ describe("what the service builds, Warden lets through", () => {
     // more token accounts than one transaction carries
     s.chain.tokens.set(alice.address, Array.from({ length: 8 }, (_, i) => ({ pubkey: tokenAccount(i + 1), mint: mint(i + 1), amount: String(100 - i), decimals: 0, ...(i % 2 ? { program: TOKEN_2022.toBase58() } : {}) })));
     const built = (await s.call("POST", `/v1/wallets/${alice.address}/rescue/arm`, { vault: VAULT.address }, a.session)).body as any;
-    expect(built.transactions).toHaveLength(2);
-    const first = wardenOn(built.transactions[0]);
+    expect(built).toMatchObject({ accounts: 8, makes: 8 });
+    expect(built.transactions).toHaveLength(3);
+    // First the vault's token accounts, eight to a transaction. Nothing of Sentinel's is in it, so it is left
+    // to Warden's engine like any transaction, and the engine lets it through: no token leaves the wallet.
+    expect(wardenOn(built.transactions[0])).toEqual({ kind: "none" });
+    const memory = { load: async () => undefined, save: async () => undefined };
+    const engine = await judge({ kind: "tx", bytes: Uint8Array.from(Buffer.from(built.transactions[0], "base64")), owner: alice.address }, ORIGIN, memory as any);
+    expect(engine.verdict.level).toBe("allow");
+    const first = wardenOn(built.transactions[1]);
     expect(first).toMatchObject({ kind: "verdict", after: { vault: VAULT.address }, verdict: { level: "confirm", confirm: { kind: "last4", expect: VAULT.address.slice(-4) }, sentence: `Sets up Warden Sentinel for this wallet. In a rescue, your tokens can go only to the Lamport Vault ${short(VAULT.address)}. It arms 6 token accounts. Changing that vault later takes 72 hours.` } });
     // the rest of the approvals, once this browser has seen the setup
-    expect(wardenOn(built.transactions[1], { vault: VAULT.address })).toMatchObject({ kind: "verdict", verdict: { level: "explain", sentence: `Arms 2 token accounts for Warden Sentinel: it may move them into your Lamport Vault ${short(VAULT.address)}, and nowhere else.` } });
+    expect(wardenOn(built.transactions[2], { vault: VAULT.address })).toMatchObject({ kind: "verdict", verdict: { level: "explain", sentence: `Arms 2 token accounts for Warden Sentinel: it may move them into your Lamport Vault ${short(VAULT.address)}, and nowhere else.` } });
 
-    // set up; a token arrives; covering it is approvals alone
+    // set up; a token arrives; covering it is a place for it in the vault, and then an approval alone
     const delegate = s.chain.arm(alice.key, VAULT.address);
-    for (const t of s.chain.tokens.get(alice.address)!) t.delegate = delegate;
+    for (const t of s.chain.tokens.get(alice.address)!) { t.delegate = delegate; s.chain.place(VAULT.address, t.mint, new PublicKey(t.program ?? TOKEN.toBase58())); }
     s.chain.tokens.get(alice.address)!.push({ pubkey: tokenAccount(20), mint: mint(20), amount: "3", decimals: 0 });
     const more = (await s.call("POST", `/v1/wallets/${alice.address}/rescue/arm`, { vault: VAULT.address }, a.session)).body as any;
-    expect(more.transactions).toHaveLength(1);
-    expect(wardenOn(more.transactions[0], { vault: VAULT.address })).toMatchObject({ verdict: { level: "explain", sentence: expect.stringContaining("Arms 1 token account for Warden Sentinel") } });
+    expect(more).toMatchObject({ accounts: 1, makes: 1 });
+    expect(more.transactions).toHaveLength(2);
+    expect(wardenOn(more.transactions[0], { vault: VAULT.address })).toEqual({ kind: "none" });
+    expect(wardenOn(more.transactions[1], { vault: VAULT.address })).toMatchObject({ verdict: { level: "explain", sentence: expect.stringContaining("Arms 1 token account for Warden Sentinel") } });
 
     // Taking it away: the revokes are ordinary transactions, left to Warden's engine like any other; the
     // closing stands alone, and Warden asks for a typed "I understand" before it passes it on.

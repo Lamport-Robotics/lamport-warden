@@ -16,10 +16,10 @@
 import { PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import type { Accounts } from "./accounts.js";
 import { PLANS } from "./plans.js";
-import { PROGRAM, approveForRescue, closeConfig, configAddress, delegateAddress, initConfig, planRescue, rescuerSetAddress, type Holding } from "./program.js";
-import { holdingsOf, readConfig, readRescuerSet, type Config, type Rescuer } from "./rescuer.js";
+import { PROGRAM, approveForRescue, closeConfig, configAddress, createVaultTokenAccount, delegateAddress, initConfig, planRescue, rescuerSetAddress, type Holding } from "./program.js";
+import { holdingsOf, readConfig, readRescuerSet, vaultAccountsThere, type Config, type Rescuer } from "./rescuer.js";
 import type { Rpc } from "./rpc.js";
-import type { MemoryStore, StoredEvent } from "./store.js";
+import { disarmingNow, type MemoryStore, type StoredEvent } from "./store.js";
 
 /** The Lamport Vault program whose vaults a rescue may go to: the one the rescue program itself pins. */
 export const LAMPORT_VAULT_PROGRAM = "B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH";
@@ -28,9 +28,11 @@ const ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 /** How many token accounts are set up in one go, and how many approvals ride in one transaction. */
 export const MOST_ARMED_AT_ONCE = 40;
 const APPROVALS_PER_TRANSACTION = 6;
+/** How many of the vault's token accounts are made in one transaction. */
+const CREATES_PER_TRANSACTION = 8;
 /** How soon after one rescue of a wallet another may be asked for. */
 export const RESCUE_AGAIN_SECONDS = 60;
-/** How many times a rescue is sent in all: once, and once more for whatever the first left behind. */
+/** How many times a rescue is sent in all: once, and once more, one account to a transaction, for whatever the first left behind. */
 export const RESCUE_TRIES = 2;
 /** How long what the owner asked for on the page is taken for theirs by the watcher, while the chain catches up. */
 export const CHANGE_SECONDS = 30 * 60;
@@ -68,14 +70,25 @@ export interface WalletRescue {
   /** Token accounts a rescue would move now. */
   covered: TokenView[];
   /** Token accounts that hold something and would be left where they are, and why. */
-  uncovered: (TokenView & { why: "not set up" | "frozen" })[];
+  uncovered: (TokenView & { why: "not set up" | "frozen" | "cannot be moved" })[];
 }
 
 const view = (h: Holding): TokenView => ({ account: h.address, mint: h.mint, amount: h.amount.toString(), decimals: h.decimals });
 const revoke = (source: PublicKey, owner: PublicKey, tokenProgram: PublicKey) => new TransactionInstruction({ programId: tokenProgram, data: Buffer.from([5]), keys: [{ pubkey: source, isSigner: false, isWritable: true }, { pubkey: owner, isSigner: true, isWritable: false }] });
 
-export const rescuedSentence = (moved: number, failed: number, vault: string): string =>
-  `Sentinel moved ${moved} of this wallet's token account${moved === 1 ? "" : "s"} into your Lamport Vault (${vault.slice(0, 4)}..${vault.slice(-4)}).${failed > 0 ? ` ${failed} could not be moved and ${failed === 1 ? "is" : "are"} still in the wallet.` : ""} Only your vault's key can move what is there now. SOL is not moved by a rescue.`;
+/**
+ * What a rescue did, in a sentence. `moved`: token accounts whose transaction is on the chain. `failed`: ones
+ * that could not be moved and still hold their tokens. `gone`: ones that were empty by the time the rescue
+ * reached them, which nothing of Sentinel's emptied: in a theft, those are what the thief got to first.
+ */
+export const rescuedSentence = (moved: number, failed: number, vault: string, gone = 0): string =>
+  (moved > 0
+    ? `Sentinel moved ${moved} of this wallet's token account${moved === 1 ? "" : "s"} into your Lamport Vault (${vault.slice(0, 4)}..${vault.slice(-4)}).`
+    : "Sentinel tried to rescue this wallet and moved nothing.")
+  + (failed > 0 ? ` ${failed} could not be moved and ${failed === 1 ? "is" : "are"} still in the wallet.` : "")
+  + (gone > 0 ? ` ${gone} ${gone === 1 ? "was" : "were"} emptied by something else before the rescue reached ${gone === 1 ? "it" : "them"}: Sentinel did not move what was in ${gone === 1 ? "it" : "them"}.` : "")
+  + (moved > 0 ? " Only your vault's key can move what is there now." : "")
+  + " SOL is not moved by a rescue.";
 
 export class Rescue {
   private last = new Map<string, number>();
@@ -83,7 +96,7 @@ export class Rescue {
   private there: { ok: boolean; at: number } | null = null;
   private net: string | null = null;
   constructor(
-    private rpc: Rpc, private rescuer: (Pick<Rescuer, "rescue"> & { address?: string }) | null, private accounts: Accounts, private store: MemoryStore,
+    private rpc: Rpc, private rescuer: (Pick<Rescuer, "rescue"> & { address?: string; landed?: Rescuer["landed"] }) | null, private accounts: Accounts, private store: MemoryStore,
     private opts: { now?: () => number; notify?: (wallet: string, sentence: string) => Promise<unknown>; notice?: (profile: string, sentence: string) => Promise<void> } = {},
   ) {}
 
@@ -130,11 +143,25 @@ export class Rescue {
    */
   private note(wallet: string, config: Config | null): void {
     const delegate = config ? delegateAddress(new PublicKey(wallet), new PublicKey(config.vault)).toBase58() : null;
-    if (!this.store.setDelegate(wallet, delegate)) return;
+    const before = this.store.wallets().find((w) => w.address === wallet);
+    const asked = !!before && disarmingNow(before, this.now());
+    if (!this.store.setDelegate(wallet, delegate, config?.vault)) return;
     const profile = this.accounts.profileOf(wallet);
-    if (profile) void this.opts.notice?.(profile, config
-      ? `The wallet ${wallet.slice(0, 4)}..${wallet.slice(-4)} is set up for rescue into the Lamport Vault ${config.vault.slice(0, 4)}..${config.vault.slice(-4)}. If that was not you, or that is not your vault, someone else has the key to that wallet.`
-      : `The wallet ${wallet.slice(0, 4)}..${wallet.slice(-4)} is no longer set up for rescue. If that was not you, someone else has the key to that wallet.`).catch(() => undefined);
+    if (!profile) return;
+    if (config) {
+      void this.opts.notice?.(profile, `The wallet ${wallet.slice(0, 4)}..${wallet.slice(-4)} is set up for rescue into the Lamport Vault ${config.vault.slice(0, 4)}..${config.vault.slice(-4)}. If that was not you, or that is not your vault, someone else has the key to that wallet.`).catch(() => undefined);
+      return;
+    }
+    if (asked) {
+      void this.opts.notice?.(profile, `The wallet ${wallet.slice(0, 4)}..${wallet.slice(-4)} is no longer set up for rescue. If that was not you, someone else has the key to that wallet.`).catch(() => undefined);
+      return;
+    }
+    // Closed, and not from the Sentinel page: only the wallet's own key can do that, and nothing can rescue the
+    // wallet from here on. For a thief it is the move that comes before the rest. An alert, not a notice.
+    const sentence = "This wallet's rescue setup was closed, and not from the Sentinel page. Nothing can rescue it now. If that was not you, someone else has this wallet's key: move what is left to a new wallet.";
+    const event: StoredEvent = { wallet, signature: "", slot: 0, at: this.now(), level: "urgent", signals: ["rescue_closed"], sentence, rescueWorthy: false };
+    this.store.addEvent(event);
+    void Promise.resolve(this.opts.notify?.(wallet, sentence)).then((sent) => { if ((sent as { delivered?: number } | undefined)?.delivered === 0 && event.id) this.store.markUndelivered(event.id); }).catch(() => undefined);
   }
 
   /**
@@ -183,31 +210,37 @@ export class Rescue {
     const config = await this.config(wallet);
     const holdings = await holdingsOf(this.rpc, wallet);
     const owner = new PublicKey(wallet);
-    const planned = config ? new Set(planRescue(holdings, owner, new PublicKey(config.vault)).map((h) => h.address)) : new Set<string>();
+    // what a rescue would move: approved for this vault, movable, and with a token account waiting for it in the vault
+    const approved = config ? planRescue(holdings, owner, new PublicKey(config.vault)) : [];
+    const there = config && approved.length ? await vaultAccountsThere(this.rpc, new PublicKey(config.vault), approved) : new Set<string>();
+    const planned = new Set(approved.filter((h) => there.has(h.address)).map((h) => h.address));
     this.note(wallet, config);
     return {
       armed: !!config, vault: config?.vault ?? null, rescuers: config ? config.rescuers.kind : null,
       covered: holdings.filter((h) => planned.has(h.address)).map(view),
-      uncovered: holdings.filter((h) => h.amount > 0n && !planned.has(h.address)).map((h) => ({ ...view(h), why: h.frozen ? "frozen" as const : "not set up" as const })),
+      uncovered: holdings.filter((h) => h.amount > 0n && !planned.has(h.address)).map((h) => ({ ...view(h), why: h.frozen ? "frozen" as const : h.unmovable ? "cannot be moved" as const : "not set up" as const })),
     };
   }
 
-  private async transactions(payer: PublicKey, instructions: TransactionInstruction[], first: TransactionInstruction[] = []): Promise<string[]> {
+  private async transactions(payer: PublicKey, instructions: TransactionInstruction[], first: TransactionInstruction[] = [], per = APPROVALS_PER_TRANSACTION): Promise<string[]> {
+    if (instructions.length === 0 && first.length === 0) return [];
     const blockhash = String((await this.rpc.call("getLatestBlockhash", [{ commitment: "confirmed" }]))?.value?.blockhash);
     const out: string[] = [];
     const batches: TransactionInstruction[][] = [];
-    for (let i = 0; i < instructions.length; i += APPROVALS_PER_TRANSACTION) batches.push(instructions.slice(i, i + APPROVALS_PER_TRANSACTION));
+    for (let i = 0; i < instructions.length; i += per) batches.push(instructions.slice(i, i + per));
     if (first.length > 0) { if (batches.length === 0) batches.push([]); batches[0] = [...first, ...batches[0]!]; }
     for (const batch of batches) out.push(Buffer.from(new Transaction({ feePayer: payer, recentBlockhash: blockhash }).add(...batch).serialize({ requireAllSignatures: false, verifySignatures: false })).toString("base64"));
     return out;
   }
 
   /**
-   * The transactions that set a wallet up for rescue into `vault`, unsigned, for the owner's wallet to sign:
-   * the config naming the vault when there is none yet, and an approval for each token account that holds
-   * something and is not set up, the biggest first. Nothing in them moves anything.
+   * The transactions that set a wallet up for rescue into `vault`, unsigned, for the owner's wallet to sign.
+   * First the vault's own token account for each token, where the vault has none (the owner pays for those,
+   * so that the key that rescues never does); then the config naming the vault when there is none yet, and
+   * an approval for each token account that holds something and is not set up, the biggest first. Nothing in
+   * them moves a token.
    */
-  async arm(profile: string, wallet: unknown, vault: unknown): Promise<{ ok: true; transactions: string[]; accounts: number; vault: string; delegate: string } | Refusal> {
+  async arm(profile: string, wallet: unknown, vault: unknown): Promise<{ ok: true; transactions: string[]; accounts: number; /** How many token accounts it makes in the vault. */ makes: number; vault: string; delegate: string } | Refusal> {
     const may = this.may(profile, wallet);
     if (!may.ok) return may;
     if (typeof vault !== "string" || !ADDRESS.test(vault)) return no(400, "that is not an address.");
@@ -217,16 +250,25 @@ export class Rescue {
       const checked = checkVault(vault, await this.account(vault));
       if (!checked.ok) return no(400, checked.why);
       const config = await this.config(may.wallet);
-      if (config && config.vault !== vault) return no(409, `this wallet is already set up for another vault (${config.vault.slice(0, 4)}..${config.vault.slice(-4)}). Take that setup away first; pointing it at another vault is a separate step with a waiting time.`);
+      if (config && config.vault !== vault) return no(409, `this wallet is already set up for another vault (${config.vault.slice(0, 4)}..${config.vault.slice(-4)}). Take that setup away first, then set it up for the other.`);
       const owner = new PublicKey(may.wallet), to = new PublicKey(vault);
       const delegate = delegateAddress(owner, to).toBase58();
-      const todo = (await holdingsOf(this.rpc, may.wallet))
-        .filter((h) => h.amount > 0n && !h.frozen && !(h.delegate === delegate && h.delegatedAmount > 0n))
+      // what could be rescued at all: it holds something, is not frozen, and is of a token a plain transfer moves
+      const movable = (await holdingsOf(this.rpc, may.wallet)).filter((h) => h.amount > 0n && !h.frozen && !h.unmovable);
+      const there = movable.length ? await vaultAccountsThere(this.rpc, to, movable) : new Set<string>();
+      const isApproved = (h: Holding) => h.delegate === delegate && h.delegatedAmount > 0n;
+      const todo = movable.filter((h) => !isApproved(h) || !there.has(h.address))
         .sort((a, b) => Number(b.amount) / 10 ** b.decimals - Number(a.amount) / 10 ** a.decimals).slice(0, MOST_ARMED_AT_ONCE);
-      const approvals = todo.map((h) => approveForRescue({ owner, source: new PublicKey(h.address), mint: new PublicKey(h.mint), decimals: h.decimals, vault: to, tokenProgram: new PublicKey(h.tokenProgram) }));
+      // two token accounts of one mint share the vault's one account for it
+      const mints = new Map(todo.filter((h) => !there.has(h.address)).map((h) => [`${h.tokenProgram}:${h.mint}`, h]));
+      const creates = [...mints.values()].map((h) => createVaultTokenAccount(owner, to, new PublicKey(h.mint), new PublicKey(h.tokenProgram)));
+      const approvals = todo.filter((h) => !isApproved(h)).map((h) => approveForRescue({ owner, source: new PublicKey(h.address), mint: new PublicKey(h.mint), decimals: h.decimals, vault: to, tokenProgram: new PublicKey(h.tokenProgram) }));
       // for the next half hour the watcher takes approvals to this address for the setup asked for here
-      if (!config || approvals.length > 0) this.store.expectRescueChange(may.wallet, delegate, this.now() + CHANGE_SECONDS);
-      return { ok: true, transactions: await this.transactions(owner, approvals, config ? [] : [initConfig(owner, to)]), accounts: todo.length, vault, delegate };
+      if (!config || approvals.length > 0) this.store.expectRescueChange(may.wallet, delegate, this.now() + CHANGE_SECONDS, vault);
+      // Each kind in transactions of its own. Warden reads a setup by its exact shape (src/sentinel.ts): the
+      // config with approvals and nothing else beside it, and approvals alone.
+      const transactions = [...(await this.transactions(owner, creates, [], CREATES_PER_TRANSACTION)), ...(await this.transactions(owner, approvals, config ? [] : [initConfig(owner, to)]))];
+      return { ok: true, transactions, accounts: todo.length, makes: creates.length, vault, delegate };
     } catch { return no(502, "the chain could not be read just now. Try again in a minute."); }
   }
 
@@ -257,7 +299,7 @@ export class Rescue {
    * A rescue, now. Whoever is signed in to the profile may ask: the worst that asking can do is put the
    * owner's tokens in the owner's vault. What was moved is put on record and said on the profile's channels.
    */
-  async rescue(profile: string, wallet: unknown, by: "owner" | "sentinel" = "owner"): Promise<{ ok: true; vault: string; moved: number; failed: number; signatures: string[] } | Refusal> {
+  async rescue(profile: string, wallet: unknown, by: "owner" | "sentinel" = "owner"): Promise<{ ok: true; vault: string; moved: number; failed: number; gone: number; signatures: string[] } | Refusal> {
     const may = this.may(profile, wallet);
     if (!may.ok) return may;
     if (!this.rescuer) return no(501, "rescue is not switched on here.");
@@ -270,34 +312,50 @@ export class Rescue {
     if (now - (this.last.get(may.wallet) ?? -Infinity) < RESCUE_AGAIN_SECONDS) return no(429, "a rescue of this wallet was asked for a moment ago. Give it a minute.");
     this.busy.add(may.wallet);
     try {
-      const tried = new Set<string>(), signatures: string[] = [];
-      let left = new Set<string>(), vault = "";
-      // A transaction that did not go through is sent once more: each try plans from the chain as it then is,
-      // so the second holds only what the first left behind.
+      const tried = new Set<string>(), moved = new Set<string>(), signatures: string[] = [];
+      const unsure: { signature: string; accounts: string[] }[] = [];
+      let vault = "";
+      // Sent, and whatever that leaves behind is sent once more, one account to a transaction: a token that
+      // refuses to move fails every account riding beside it, and must not be able to hold the others back.
+      // Each try plans from the chain as it then is.
       for (let attempt = 0; attempt < RESCUE_TRIES; attempt++) {
         let result: Awaited<ReturnType<Rescuer["rescue"]>>;
-        try { result = await this.rescuer.rescue(may.wallet); } catch { if (attempt === 0) return no(502, "the chain could not be reached, so nothing was moved. Try again."); break; }
+        try { result = await this.rescuer.rescue(may.wallet, attempt === 0 ? {} : { perTransaction: 1 }); } catch { if (attempt === 0) return no(502, "the chain could not be reached, so nothing was moved. Try again."); break; }
         if (!result.ok) { if (attempt === 0) return no(409, result.why); break; }
         vault = result.vault;
-        for (const s of result.steps) for (const a of s.accounts) tried.add(a);
-        signatures.push(...result.steps.flatMap((s) => (s.ok && s.signature ? [s.signature] : [])));
-        left = new Set(result.steps.filter((s) => !s.ok).flatMap((s) => s.accounts));
-        if (left.size === 0) break;
+        let failed = 0;
+        for (const s of result.steps) {
+          for (const a of s.accounts) tried.add(a);
+          if (s.ok) { for (const a of s.accounts) moved.add(a); if (s.signature && !signatures.includes(s.signature)) signatures.push(s.signature); }
+          else { failed += s.accounts.length; if (s.signature) unsure.push({ signature: s.signature, accounts: s.accounts }); }
+        }
+        if (failed === 0) break;
       }
-      this.last.set(may.wallet, now);
-      // What is said to be still in the wallet is what the chain says is: a transaction that was given up on can have landed all the same.
-      if (left.size > 0) {
-        try { const holding = new Set((await holdingsOf(this.rpc, may.wallet)).filter((h) => h.amount > 0n).map((h) => h.address)); for (const a of [...left]) if (!holding.has(a)) left.delete(a); } catch { /* then it is said as the transactions left it */ }
+      // A transaction that was given up on can have landed all the same: the chain is asked, and only its
+      // word makes an account one that was moved.
+      for (const u of unsure) {
+        if (u.accounts.every((a) => moved.has(a))) continue;
+        const landed = await Promise.resolve(this.rescuer.landed?.(u.signature)).catch(() => false);
+        if (landed) { for (const a of u.accounts) moved.add(a); if (!signatures.includes(u.signature)) signatures.push(u.signature); }
       }
-      const failed = left.size, moved = tried.size - failed;
+      // Of the rest, what still holds its tokens could not be moved. What is empty was emptied by something
+      // else first, and is said as that: in a theft, an empty account is not a rescued one.
+      const rest = [...tried].filter((a) => !moved.has(a));
+      let holding = new Set(rest);
+      if (rest.length > 0) {
+        try { holding = new Set((await holdingsOf(this.rpc, may.wallet)).filter((h) => h.amount > 0n).map((h) => h.address)); } catch { /* then all of the rest is said to be still there, which is the careful reading */ }
+      }
+      const failed = rest.filter((a) => holding.has(a)).length, gone = rest.length - failed;
+      // the minute before another runs from a rescue that did what it could; one that left something behind can be asked for again at once
+      if (moved.size > 0 && failed === 0) this.last.set(may.wallet, now);
       if (tried.size > 0) {
-        const sentence = `${by === "sentinel" ? "After the alert before this one, " : ""}${rescuedSentence(moved, failed, vault)}`;
+        const sentence = `${by === "sentinel" ? "After the alert before this one, " : ""}${rescuedSentence(moved.size, failed, vault, gone)}`;
         const event: StoredEvent = { wallet: may.wallet, signature: signatures[0] ?? "", slot: 0, at: now, level: "urgent", signals: ["rescued"], sentence, rescueWorthy: false };
         this.store.addEvent(event);
         const sent = await this.opts.notify?.(may.wallet, sentence).catch(() => null) as { delivered?: number } | null | undefined;
         if (sent && sent.delivered === 0 && event.id) this.store.markUndelivered(event.id);
       }
-      return { ok: true, vault, moved, failed, signatures };
+      return { ok: true, vault, moved: moved.size, failed, gone, signatures };
     } finally { this.busy.delete(may.wallet); }
   }
 

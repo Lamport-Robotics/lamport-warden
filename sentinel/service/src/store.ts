@@ -18,17 +18,22 @@ export interface WatchedWallet {
   address: string;
   /** The delegate the wallet approved for Sentinel, when it is armed. */
   sentinelDelegate?: string;
+  /** The vault that setup names: where a rescue of this wallet goes, and how one is told from a taking. */
+  sentinelVault?: string;
   /**
    * What the owner asked for on the Sentinel page a moment ago, until the chain shows it: a setup for rescue
    * (approvals to `delegate` are then that setup, not a stranger's), or taking the setup away (`delegate`
    * null: the permissions going is then the owner's doing).
    */
-  rescueChange?: { delegate: string | null; until: number };
+  rescueChange?: { delegate: string | null; vault?: string; until: number };
 }
 
 /** The address whose approvals and movements are rescue's, for this wallet, now. */
 export const rescueDelegateOf = (w: WatchedWallet, now: number): string | undefined =>
   w.sentinelDelegate ?? (w.rescueChange && w.rescueChange.until > now && w.rescueChange.delegate ? w.rescueChange.delegate : undefined);
+/** The vault a rescue of this wallet goes to, as far as is known now. */
+export const rescueVaultOf = (w: WatchedWallet, now: number): string | undefined =>
+  w.sentinelDelegate ? w.sentinelVault : w.rescueChange && w.rescueChange.until > now && w.rescueChange.delegate ? w.rescueChange.vault : undefined;
 /** True while the owner is taking the rescue setup away through the page. */
 export const disarmingNow = (w: WatchedWallet, now: number): boolean => !!w.rescueChange && w.rescueChange.until > now && w.rescueChange.delegate === null;
 
@@ -210,18 +215,19 @@ export class MemoryStore implements Store {
    * Notes which address, if any, the wallet has approved for Sentinel's rescue (rescue.ts reads it from the
    * chain). The watcher takes what that address moves for a rescue and not for a theft. True when it changed.
    */
-  setDelegate(address: string, delegate: string | null): boolean {
+  setDelegate(address: string, delegate: string | null, vault?: string): boolean {
     const w = this.data.wallets.find((x) => x.address === address);
-    if (!w || (w.sentinelDelegate ?? null) === delegate) return false;
-    if (delegate) w.sentinelDelegate = delegate; else delete w.sentinelDelegate;
+    if (!w || ((w.sentinelDelegate ?? null) === delegate && (!delegate || w.sentinelVault === vault))) return false;
+    const changed = (w.sentinelDelegate ?? null) !== delegate;
+    if (delegate) { w.sentinelDelegate = delegate; if (vault) w.sentinelVault = vault; else delete w.sentinelVault; } else { delete w.sentinelDelegate; delete w.sentinelVault; }
     this.persist();
-    return true;
+    return changed;
   }
   /** Notes what the owner asked for on the page (see `rescueChange`), good until `until`. */
-  expectRescueChange(address: string, delegate: string | null, until: number): void {
+  expectRescueChange(address: string, delegate: string | null, until: number, vault?: string): void {
     const w = this.data.wallets.find((x) => x.address === address);
     if (!w) return;
-    w.rescueChange = { delegate, until };
+    w.rescueChange = { delegate, ...(delegate && vault ? { vault } : {}), until };
     this.persist();
   }
   /** Stops reading a wallet without forgetting it: its record and alerts stay for when it is watched again. */

@@ -470,9 +470,9 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
         store.setDelegate(wallet, mine ? delegate : null);
         return mine ? { armed: true, vault: VAULT, rescuers: "lamport" as const, covered: tokens, uncovered: [] } : { armed: false, vault: null, rescuers: null, covered: [], uncovered: wallet === W1 ? tokens.map((t) => ({ ...t, why: "not set up" as const })) : [] };
       },
-      arm: async (who, wallet, vault) => { asked.push(["arm", who, wallet, vault]); return vault === VAULT ? { ok: true, transactions: [Buffer.from(setup).toString("base64")], accounts: 2, vault: VAULT, delegate } : { ok: false, status: 400, why: "that address is not a Lamport Vault." }; },
+      arm: async (who, wallet, vault) => { asked.push(["arm", who, wallet, vault]); return vault === VAULT ? { ok: true, transactions: [Buffer.from(setup).toString("base64")], accounts: 2, makes: 0, vault: VAULT, delegate } : { ok: false, status: 400, why: "that address is not a Lamport Vault." }; },
       disarm: async (who, wallet) => { asked.push(["disarm", who, wallet]); return { ok: true, transactions: [Buffer.from(revokes).toString("base64"), Buffer.from(takeAway).toString("base64")] }; },
-      rescue: async (who, wallet) => { asked.push(["rescue", who, wallet]); return { ok: true, vault: VAULT, moved: 2, failed: 0, signatures: ["sig"] }; },
+      rescue: async (who, wallet) => { asked.push(["rescue", who, wallet]); return { ok: true, vault: VAULT, moved: 2, failed: 0, gone: 0, signatures: ["sig"] }; },
     };
     await page.reload();
     const section = page.locator("#rescueSection");
@@ -502,7 +502,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     await build.click();
     await expect.poll(() => panel.innerText(), { timeout: 8000 }).toContain("1 transaction to sign.");
     expect(asked.at(-1)).toEqual(["arm", profile, W1, VAULT]);
-    expect(await panel.innerText()).toContain(`It names the vault ${short(VAULT)} and gives the rescue program permission on 2 token accounts. Nothing in it moves anything.`);
+    expect(await panel.innerText()).toContain(`It names the vault ${short(VAULT)} and gives the rescue program permission on 2 token accounts. Nothing in it moves a token.`);
     // the vault Warden will name is shown in full, so that the owner can hold the two side by side
     expect(await panel.locator("code.addr").innerText()).toBe(VAULT);
 

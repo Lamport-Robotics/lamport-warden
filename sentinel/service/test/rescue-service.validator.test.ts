@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { Accounts } from "../src/accounts.js";
-import { PROGRAM, TOKEN, TOKEN_2022, delegateAddress, initRescuerSet, vaultTokenAddress } from "../src/program.js";
+import { ASSOCIATED_TOKEN, PROGRAM, TOKEN, TOKEN_2022, delegateAddress, initRescuerSet, vaultTokenAddress } from "../src/program.js";
 import { LAMPORT_VAULT_PROGRAM, NOT_ON_CHAIN, RESCUE_AGAIN_SECONDS, Rescue, checkVault, rescuedSentence } from "../src/rescue.js";
 import { Rescuer } from "../src/rescuer.js";
 import { HttpRpc } from "../src/rpc.js";
@@ -106,11 +106,11 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
   /** What the owner's wallet does with the transactions the service built: signs each, and sends it. */
   const signAll = async (transactions: string[]) => { for (const t of transactions) { const tx = Transaction.from(Buffer.from(t, "base64")); tx.sign(owner); await sendRaw(tx.serialize()); } };
   const rent = (space: number): Promise<number> => rpc.call("getMinimumBalanceForRentExemption", [space]);
-  const tokenFor = async (name: string, amount: bigint, program = TOKEN) => {
+  const tokenFor = async (name: string, amount: bigint, program = TOKEN, freezer?: PublicKey) => {
     const mint = Keypair.generate(), account = Keypair.generate();
     await send([authority, mint, account],
       SystemProgram.createAccount({ fromPubkey: authority.publicKey, newAccountPubkey: mint.publicKey, lamports: await rent(82), space: 82, programId: program }),
-      new TransactionInstruction({ programId: program, keys: [{ pubkey: mint.publicKey, isSigner: false, isWritable: true }], data: Buffer.concat([Buffer.from([20, 6]), authority.publicKey.toBuffer(), Buffer.from([0])]) }),
+      new TransactionInstruction({ programId: program, keys: [{ pubkey: mint.publicKey, isSigner: false, isWritable: true }], data: Buffer.concat([Buffer.from([20, 6]), authority.publicKey.toBuffer(), freezer ? Buffer.concat([Buffer.from([1]), freezer.toBuffer()]) : Buffer.from([0])]) }),
       SystemProgram.createAccount({ fromPubkey: authority.publicKey, newAccountPubkey: account.publicKey, lamports: await rent(165), space: 165, programId: program }),
       new TransactionInstruction({ programId: program, keys: [{ pubkey: account.publicKey, isSigner: false, isWritable: true }, { pubkey: mint.publicKey, isSigner: false, isWritable: false }], data: Buffer.concat([Buffer.from([18]), owner.publicKey.toBuffer()]) }),
       ...(amount > 0n ? [new TransactionInstruction({ programId: program, keys: [{ pubkey: mint.publicKey, isSigner: false, isWritable: true }, { pubkey: account.publicKey, isSigner: false, isWritable: true }, { pubkey: authority.publicKey, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([7]), u64(amount)]) })] : []),
@@ -210,10 +210,11 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
   it("builds the setup, the owner's wallet signs it, and the chain then says the wallet is armed", async () => {
     const built = await rescue.arm(profile, W, vaultA.address.toBase58());
     if (!built.ok) throw new Error(built.why);
-    expect(built).toMatchObject({ accounts: 2, vault: vaultA.address.toBase58() });
-    expect(built.transactions).toHaveLength(1);
-    // one instruction names the vault; the others are approvals; nothing in it moves anything
-    const tx = Transaction.from(Buffer.from(built.transactions[0]!, "base64"));
+    expect(built).toMatchObject({ accounts: 2, makes: 2, vault: vaultA.address.toBase58() });
+    expect(built.transactions).toHaveLength(2);
+    // first the vault's own token accounts, which the owner pays for; then one instruction that names the vault, and the approvals. Nothing in them moves a token.
+    expect(Transaction.from(Buffer.from(built.transactions[0]!, "base64")).instructions.map((ix) => ix.programId.toBase58())).toEqual([ASSOCIATED_TOKEN.toBase58(), ASSOCIATED_TOKEN.toBase58()]);
+    const tx = Transaction.from(Buffer.from(built.transactions[1]!, "base64"));
     expect(tx.instructions.map((ix) => ix.programId.toBase58()).sort()).toEqual([PROGRAM.toBase58(), TOKEN.toBase58(), TOKEN_2022.toBase58()].sort());
     await signAll(built.transactions);
     expect(await balance(held.usdc!.account)).toBe(250_000_000n);
@@ -250,6 +251,8 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     expect(await balance(held.usdc!.account)).toBe(0n);
     expect(await balance(vaultTokenAddress(vaultA.address, held.usdc!.mint))).toBe(250_000_000n);
     expect(await balance(vaultTokenAddress(vaultA.address, held.t22!.mint, TOKEN_2022))).toBe(7_000_000n);
+    // the key that rescues paid for two transactions and for no account: nobody can make it pay for one
+    expect((await rescue.keyStanding())!.lamports).toBeGreaterThan(5_000_000_000 - 200_000);
     const said = rescuedSentence(2, 0, vaultA.address.toBase58());
     expect(told).toEqual([said]);
     expect(said).toBe(`Sentinel moved 2 of this wallet's token accounts into your Lamport Vault (${vaultA.address.toBase58().slice(0, 4)}..${vaultA.address.toBase58().slice(-4)}). Only your vault's key can move what is there now. SOL is not moved by a rescue.`);
@@ -316,6 +319,39 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     expect(await rescue.after({ ...alarm[0]!, rescueWorthy: false })).toBe(false);
     // what was not set up is where the thief left it, and the page says so
     expect((await rescue.status(W)).uncovered.map((u) => [u.account, u.amount, u.why])).toEqual([[held.prey!.account.toBase58(), "500000000", "not set up"]]);
+  }, 240_000);
+
+  it("one token that will not move does not hold back the ones beside it", async () => {
+    // Anyone can put a token of their own making into a wallet, and its maker can freeze the place it would be
+    // rescued to. Sent beside two good accounts it fails the transaction all three ride in. What the first try
+    // leaves is sent again one account to a transaction: the two go, and only the one stays where it was.
+    accounts.setAutoRescue(profile, false);
+    await tokenFor("good1", 300n);
+    await tokenFor("good2", 200n);
+    await tokenFor("poison", 100n, TOKEN, stranger.publicKey);
+    const built = await rescue.arm(profile, W, vaultA.address.toBase58());
+    if (!built.ok) throw new Error(built.why);
+    // (the token the thief was at is covered now too: setting it up puts Sentinel's permission where the thief's was)
+    expect(built).toMatchObject({ accounts: 4, makes: 4 });
+    await signAll(built.transactions);
+    expect((await rescue.status(W)).covered.map((c) => c.account).sort()).toEqual([held.good1!.account, held.good2!.account, held.poison!.account, held.prey!.account].map((a) => a.toBase58()).sort());
+    expect((await rpc.call("getAccountInfo", [held.prey!.account.toBase58(), { encoding: "jsonParsed", commitment: "confirmed" }])).value.data.parsed.info.delegate).toBe(delegateAddress(owner.publicKey, vaultA.address).toBase58());
+    await send([stranger], new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: vaultTokenAddress(vaultA.address, held.poison!.mint), isSigner: false, isWritable: true }, { pubkey: held.poison!.mint, isSigner: false, isWritable: false }, { pubkey: stranger.publicKey, isSigner: true, isWritable: false }], data: Buffer.from([10]) })); // FreezeAccount
+    now += RESCUE_AGAIN_SECONDS;
+    const r = await rescue.rescue(profile, W);
+    if (!r.ok) throw new Error(r.why);
+    expect(r).toMatchObject({ moved: 3, failed: 1, gone: 0 });
+    expect(await balance(vaultTokenAddress(vaultA.address, held.good1!.mint))).toBe(300n);
+    expect(await balance(vaultTokenAddress(vaultA.address, held.good2!.mint))).toBe(200n);
+    expect(await balance(vaultTokenAddress(vaultA.address, held.prey!.mint))).toBe(500_000_000n);
+    expect(await balance(held.poison!.account)).toBe(100n);
+    expect(told.at(-1)).toBe(rescuedSentence(3, 1, vaultA.address.toBase58()));
+    expect(told.at(-1)).toContain("1 could not be moved and is still in the wallet.");
+    // The watcher has nothing to say of the rescue. (This test makes in a minute the deposits a wallet makes in
+    // a year: each setup pays the network for the vault's token accounts, and four such payments within ten
+    // minutes is something the watcher does remark on, truthfully. It is not about the rescue.)
+    const after = (await watch()).filter((e) => e.level !== "info" && !e.signals.includes("burst"));
+    expect(after).toEqual([]);
   }, 240_000);
 
   it("the setup is taken away by the owner signing it away: approvals revoked, the config closed, and the channels told", async () => {

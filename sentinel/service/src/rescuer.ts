@@ -1,14 +1,15 @@
 /**
- * The rescuer: moves what an owner armed into that owner's own vault. It runs apart from the watcher, with
- * the one key this service has, and that key can do one thing: ask the rescue program to move an armed
- * token account's balance to the vault the owner configured. The program computes the destination; nothing
- * here chooses it.
+ * The rescuer: moves what an owner armed into that owner's own vault. It holds the one key this service
+ * has, and that key can do one thing: ask the rescue program to move an armed token account's balance to
+ * the vault the owner configured. The program computes the destination; nothing here chooses it. (Today it
+ * runs inside the service's own process, with the key in the service's settings and an RPC client of its
+ * own, so that a rescue never waits behind the watcher's reading. A process of its own is the next step.)
  *
  * Before sending anything it reads the chain: is the wallet armed, for which vault, and is this key one
  * that may act for it. A key that may not is told so here, instead of paying fees to be refused there.
  */
 import { Keypair, PublicKey, Transaction, type TransactionInstruction } from "@solana/web3.js";
-import { PROGRAM, TOKEN, TOKEN_2022, configAddress, planRescue, rescueInstructions, rescuerSetAddress, type Holding } from "./program.js";
+import { PROGRAM, TOKEN, TOKEN_2022, configAddress, planRescue, rescueInstructions, rescuerSetAddress, vaultTokenAddress, type Holding } from "./program.js";
 import type { Rpc } from "./rpc.js";
 
 export interface Config { owner: string; vault: string; pendingVault: string | null; rescuers: { kind: "lamport" } | { kind: "own"; key: string } }
@@ -46,13 +47,33 @@ export async function holdingsOf(rpc: Rpc, owner: string): Promise<Holding[]> {
       const info = entry?.account?.data?.parsed?.info;
       if (!info || typeof entry.pubkey !== "string" || typeof info.mint !== "string") continue;
       const amount = BigInt(info.tokenAmount?.amount ?? "0");
+      // what the token program says of the account itself: a token that is not transferable, or that calls its issuer's program on a transfer
+      const marks: string[] = Array.isArray(info.extensions) ? info.extensions.map((e: any) => String(e?.extension ?? "")) : [];
       out.push({
         address: entry.pubkey, mint: info.mint, tokenProgram: program.toBase58(), amount, decimals: Number(info.tokenAmount?.decimals ?? 0),
         delegate: typeof info.delegate === "string" ? info.delegate : null, delegatedAmount: BigInt(info.delegatedAmount?.amount ?? "0"), frozen: info.state === "frozen",
+        ...(marks.includes("nonTransferableAccount") || marks.includes("transferHookAccount") ? { unmovable: true } : {}),
       });
     }
   }
   return out;
+}
+
+/**
+ * Which of these holdings the vault already has a token account for: the only ones a rescue is sent for.
+ * The rescue program would make a missing one and have the rescuer pay for it; a vault's owner can close the
+ * vault and take that payment, so a rescuer that paid could be emptied by anyone who armed many small accounts.
+ * The owner makes them at setup instead (program.ts, `createVaultTokenAccount`).
+ */
+export async function vaultAccountsThere(rpc: Rpc, vault: PublicKey, holdings: Holding[]): Promise<Set<string>> {
+  const there = new Set<string>();
+  for (let i = 0; i < holdings.length; i += 100) {
+    const some = holdings.slice(i, i + 100);
+    const res = await rpc.call("getMultipleAccounts", [some.map((h) => vaultTokenAddress(vault, new PublicKey(h.mint), new PublicKey(h.tokenProgram)).toBase58()), { encoding: "base64", commitment: "confirmed", dataSlice: { offset: 0, length: 0 } }]);
+    if (!Array.isArray(res?.value) || res.value.length !== some.length) throw new Error("the vault's token accounts could not be read");
+    some.forEach((h, j) => { if (res.value[j] && String(res.value[j].owner) === h.tokenProgram) there.add(h.address); });
+  }
+  return there;
 }
 
 export interface RescueStep { accounts: string[]; signature: string | null; ok: boolean; why?: string }
@@ -114,18 +135,29 @@ export class Rescuer {
     }
   }
 
+  /** Whether a transaction this key sent is on the chain and did what it was sent to do. False when it failed, or cannot be found. */
+  async landed(signature: string): Promise<boolean> {
+    const status = (await this.rpc.call("getSignatureStatuses", [[signature], { searchTransactionHistory: true }]))?.value?.[0];
+    return !!status && !status.err && (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized");
+  }
+
   /**
    * Moves every armed token account of this wallet into its vault. Each transaction is its own step in the
    * answer, with its signature, so that the owner can be shown exactly what was moved and what was not.
+   * `perTransaction`: how many accounts ride in one transaction (three unless said). One that the token
+   * refuses fails every account beside it, so whatever a first try leaves behind is sent again one by one.
    */
-  async rescue(owner: string): Promise<RescueResult> {
+  async rescue(owner: string, opts: { perTransaction?: number } = {}): Promise<RescueResult> {
     const standing = await this.standing(owner);
     if (!standing.ok) return standing;
     const ownerKey = new PublicKey(owner), vault = new PublicKey(standing.config.vault);
-    const plan = planRescue(await holdingsOf(this.rpc, owner), ownerKey, vault);
+    const armed = planRescue(await holdingsOf(this.rpc, owner), ownerKey, vault);
+    // only into token accounts the vault already has: this key pays for a transaction, never for an account
+    const there = armed.length ? await vaultAccountsThere(this.rpc, vault, armed) : new Set<string>();
+    const plan = armed.filter((h) => there.has(h.address));
     if (plan.length === 0) return { ok: true, vault: standing.config.vault, steps: [] };
     const blockhash: string = (await this.rpc.call("getLatestBlockhash", [{ commitment: "confirmed" }]))?.value?.blockhash;
-    const batches = rescueInstructions(plan, { rescuer: this.signer.publicKey, owner: ownerKey, vault, viaSet: standing.viaSet, microLamportsPerUnit: this.opts.microLamportsPerUnit });
+    const batches = rescueInstructions(plan, { rescuer: this.signer.publicKey, owner: ownerKey, vault, viaSet: standing.viaSet, microLamportsPerUnit: this.opts.microLamportsPerUnit, ...(opts.perTransaction ? { perTransaction: opts.perTransaction } : {}) });
     // all of them at once: a rescue is a race, and each transaction stands on its own
     const steps = await Promise.all(batches.map(async (instructions): Promise<RescueStep> => {
       const accounts = instructions.slice(2).map((ix) => ix.keys[6]!.pubkey.toBase58());

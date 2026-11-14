@@ -5,14 +5,14 @@
  * is what every RPC offers, is easy to reason about after an outage (the cursor says exactly what was not yet
  * read), and is enough to measure the rules against real wallets.
  *
- * It holds no key. When the rules say a rescue is warranted it says so in the event; acting on that is the
- * rescuer's job, in another process, with another key.
+ * It holds no key. When the rules say a rescue is warranted it says so in the event and hands the event on
+ * (`onRaised`); acting on it is rescue's job (rescue.ts), with the rescuer's key.
  */
 import { Baseline } from "./baseline.js";
 import { fromRpc, signersOf, tokenDeltasOf, type ObservedTx } from "./observed.js";
 import type { Rpc } from "./rpc.js";
 import { BurstWindow, assessBehind, assessTaken, assessTokenAccount, assessTransaction, assessUnexplainedLoss, assessWalletAccount, without, type Assessment, type Level, type TokenAccountState, type WatchContext } from "./signals.js";
-import { disarmingNow, rescueDelegateOf, type Store, type StoredEvent, type WalletRecord, type WatchedWallet } from "./store.js";
+import { disarmingNow, rescueDelegateOf, rescueVaultOf, type Store, type StoredEvent, type WalletRecord, type WatchedWallet } from "./store.js";
 
 /** How many of a wallet's token accounts are kept and compared. */
 export const MAX_TOKEN_ACCOUNTS = 1000;
@@ -420,7 +420,7 @@ export class Watcher {
         if (!tx.failed && !signersOf(tx).includes(wallet)) others = true;
         if (this.told(wallet, tx.signature)) continue;
         // whoever it names: one the wallet signed is the wallet's own, and the rule says nothing of it
-        const event = await this.raise(wallet, assessTaken(tx, { wallet, sentinelDelegate: rescueDelegateOf(w, this.now()), tokenAccounts: before, trustedTakers: trusted, ownRescues: this.opts.ownRescues }), tx);
+        const event = await this.raise(wallet, assessTaken(tx, { wallet, sentinelDelegate: rescueDelegateOf(w, this.now()), rescueVault: rescueVaultOf(w, this.now()), tokenAccounts: before, trustedTakers: trusted, ownRescues: this.opts.ownRescues }), tx);
         if (event) raised.push(event);
       }
       if (explained()) { adopt(); continue; }
@@ -513,7 +513,7 @@ export class Watcher {
     }
     const baseline = Baseline.from(record.baseline);
     const raised: StoredEvent[] = [];
-    const ctxBase: Omit<WatchContext, "ownerSigned"> = { wallet, baseline, sentinelDelegate: rescueDelegateOf(w, this.now()), disarming: disarmingNow(w, this.now()), ownRescues: this.opts.ownRescues, drainers: this.opts.drainers ?? new Set(), reviewedPrograms: this.opts.reviewedPrograms, window: this.windows.get(wallet) ?? this.windows.set(wallet, new BurstWindow()).get(wallet)!, tokenAccounts: before, trustedTakers: new Set(record.trustedTakers ?? []) };
+    const ctxBase: Omit<WatchContext, "ownerSigned"> = { wallet, baseline, sentinelDelegate: rescueDelegateOf(w, this.now()), rescueVault: rescueVaultOf(w, this.now()), disarming: disarmingNow(w, this.now()), ownRescues: this.opts.ownRescues, drainers: this.opts.drainers ?? new Set(), reviewedPrograms: this.opts.reviewedPrograms, window: this.windows.get(wallet) ?? this.windows.set(wallet, new BurstWindow()).get(wallet)!, tokenAccounts: before, trustedTakers: new Set(record.trustedTakers ?? []) };
 
     let somethingNew = false, listUnread = false, accountsRead = false;
     if (record.cursor === null && record.baseline === null) {
