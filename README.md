@@ -47,6 +47,11 @@ Solflare freezes `window.solflare` and its place on the window, so nothing can b
 that calls that object directly reaches Solflare without Warden. When Warden meets a door like that on a page,
 the settings page lists it.
 
+Phantom and Backpack answer a request made at their Wallet Standard door by handing it to their own older
+object, and Warden stands at both. It asks once: a request the owner has let through may be met one more
+time on its way to the wallet, the same kind and the same bytes, and is not asked about again. A copy a page
+sends through the other door itself is a second request, and is asked about (`guarded` in `src/intercept.ts`).
+
 Sign-in requests (Sign In With Solana) are read too. A sign-in to the site that asks goes through without a
 prompt. One that would sign you in to a different site is blocked: that is a page collecting a sign-in to use
 somewhere else as you.

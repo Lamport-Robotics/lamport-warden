@@ -84,20 +84,64 @@ export function signInBytes(input: any): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(pick));
 }
 
+/**
+ * Requests the owner has let through that the wallet is still working on, as how many times each may yet be
+ * met again. Phantom's and Backpack's Wallet Standard wallets answer a signing call by calling their own
+ * injected provider (`this.#provider.signTransaction(...)`), and Warden stands in front of both doors: asked
+ * at each, the owner was shown one request twice, and a payment was counted twice.
+ *
+ * So a request that is on its way to the wallet may be met once more, the same kind and the same bytes, and
+ * is let through without a second question. Once: the wallet passes a request on a single time, and a page
+ * that sends a copy of its own through another door is asked about it like any other request.
+ */
+const onTheirWay = new WeakMap<Guard, Map<string, object[]>>();
+const HEX = "0123456789abcdef";
+/** What makes two requests the same one. Null for a request Warden cannot read: that is asked about every time. */
+function sameAs(r: GuardRequest): string | null {
+  if (r.kind === "opaque" || r.bytes.length === 0) return null;
+  let out = `${r.kind}:`;
+  for (const b of r.bytes) out += HEX[b >> 4]! + HEX[b & 15]!;
+  return out;
+}
+
 async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Promise<T>): Promise<T> {
-  const tickets: Ticket[] = [];
+  let going = onTheirWay.get(guard);
+  if (!going) { going = new Map(); onTheirWay.set(guard, going); }
+  const passes = going;
+  const keys = reqs.map(sameAs);
+  /** null: this one was already answered, at the door the wallet was first asked through */
+  const tickets: (Ticket | null)[] = [];
   try {
-    for (const r of reqs) tickets.push(await guard(r)); // one at a time: the owner reads one request at a time
+    for (const [i, r] of reqs.entries()) { // one at a time: the owner reads one request at a time
+      const waiting = keys[i] ? passes.get(keys[i]!) : undefined;
+      if (waiting?.length) { waiting.shift(); tickets.push(null); continue; }
+      tickets.push(await guard(r));
+    }
   } catch (e) {
-    for (const t of tickets) t.done(false);
+    for (const t of tickets) t?.done(false);
     throw e;
   }
+  // each request asked about here may be met once more while the wallet works on it
+  const mine: [string, object][] = [];
+  keys.forEach((k, i) => { if (k !== null && tickets[i] !== null) mine.push([k, {}]); });
+  for (const [k, pass] of mine) { const list = passes.get(k); if (list) list.push(pass); else passes.set(k, [pass]); }
+  const settle = () => {
+    for (const [k, pass] of mine) {
+      const list = passes.get(k);
+      if (!list) continue;
+      const at = list.indexOf(pass);
+      if (at >= 0) list.splice(at, 1);
+      if (list.length === 0) passes.delete(k);
+    }
+  };
   try {
     const out = await call();
-    reqs.forEach((r, i) => tickets[i]!.done(true, r.kind === "tx" ? signaturesOf(out, i, reqs.length) : undefined));
+    settle();
+    reqs.forEach((r, i) => tickets[i]?.done(true, r.kind === "tx" ? signaturesOf(out, i, reqs.length) : undefined));
     return out;
   } catch (e) {
-    for (const t of tickets) t.done(false);
+    settle();
+    for (const t of tickets) t?.done(false);
     throw e;
   }
 }

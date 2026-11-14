@@ -392,3 +392,106 @@ describe("older injected providers", () => {
     expect(messageToTransaction(v1)).toEqual(Uint8Array.of(0x81, 1, 0, 0, 9, 9, ...new Array(64).fill(0)));
   });
 });
+
+describe("a wallet whose Wallet Standard door answers by calling its own injected provider", () => {
+  // Phantom 26.38 and Backpack 0.10 are written this way (read from the shipped extensions): the feature
+  // rebuilds the transaction and calls `this.#provider.signTransaction(...)`, a public method Warden also guards.
+  const txOf = (bytes: Uint8Array) => ({ version: 0, message: { serialize: () => Uint8Array.of(0) }, serialize: () => bytes });
+  function both(decide?: (r: GuardRequest) => boolean, alter: (b: Uint8Array) => Uint8Array = (b) => b) {
+    const r = recorder(decide);
+    const calls: string[] = [];
+    let hold: Promise<void> | null = null;
+    const provider: any = {
+      isPhantom: true,
+      publicKey: { toBase58: () => account.address },
+      signTransaction: async (t: any) => { calls.push("provider.signTransaction"); if (hold) await hold; return t; },
+      signAllTransactions: async (ts: any[]) => { calls.push("provider.signAllTransactions"); return ts; },
+      signAndSendTransaction: async (_t: any) => { calls.push("provider.signAndSendTransaction"); return { signature: "sig" }; },
+      signMessage: async (_m: Uint8Array) => { calls.push("provider.signMessage"); return { signature: new Uint8Array(64) }; },
+    };
+    const wallet: any = {
+      name: "Nested", version: "1.0.0", accounts: [account],
+      features: {
+        "solana:signTransaction": { version: "1.0.0", signTransaction: async (...inputs: any[]) => (inputs.length === 1
+          ? [{ signedTransaction: (await provider.signTransaction(txOf(alter(inputs[0].transaction)))).serialize() }]
+          : (await provider.signAllTransactions(inputs.map((i) => txOf(i.transaction)))).map((t: any) => ({ signedTransaction: t.serialize() }))) },
+        "solana:signAndSendTransaction": { version: "1.0.0", signAndSendTransaction: async (...inputs: any[]) => { const out = []; for (const i of inputs) { await provider.signAndSendTransaction(txOf(i.transaction)); out.push({ signature: new Uint8Array(64) }); } return out; } },
+        "solana:signMessage": { version: "1.0.0", signMessage: async (...inputs: any[]) => { const out = []; for (const i of inputs) { const { signature } = await provider.signMessage(i.message); out.push({ signedMessage: i.message, signature }); } return out; } },
+      },
+    };
+    const win: Record<string, any> = { solana: provider };
+    installLegacyHook(win, r.guard);
+    expect(patchStandardWalletInPlace(wallet, r.guard)).toBe(true);
+    return { r, calls, wallet, win, holdFor: (p: Promise<void>) => { hold = p; } };
+  }
+
+  it("asks once, at the door the site used, and reports once that it was signed", async () => {
+    const { r, calls, wallet } = both();
+    await wallet.features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(1, 2, 3) });
+    await wallet.features["solana:signAndSendTransaction"].signAndSendTransaction({ account, transaction: Uint8Array.of(4, 5) });
+    await wallet.features["solana:signMessage"].signMessage({ account, message: Uint8Array.of(9) });
+    expect(r.asked.map((a) => [a.kind, [...a.bytes]])).toEqual([["tx", [1, 2, 3]], ["tx", [4, 5]], ["msg", [9]]]);
+    expect(r.done).toEqual([true, true, true]);
+    // and every one of them reached the wallet's provider
+    expect(calls).toEqual(["provider.signTransaction", "provider.signAndSendTransaction", "provider.signMessage"]);
+  });
+
+  it("asks once for each transaction of a batch the wallet hands on as a batch", async () => {
+    const { r, calls, wallet } = both();
+    await wallet.features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(1) }, { account, transaction: Uint8Array.of(2) }, { account, transaction: Uint8Array.of(1) });
+    expect(r.asked.map((a) => [...a.bytes])).toEqual([[1], [2], [1]]);
+    expect(calls).toEqual(["provider.signAllTransactions"]);
+    expect(r.done).toEqual([true, true, true]);
+  });
+
+  it("asks again when what reaches the provider is not what the owner was shown", async () => {
+    // a wallet (or something standing in it) that hands on different bytes has made a different request
+    const { r, wallet } = both(undefined, (b) => Uint8Array.of(...b, 7));
+    await wallet.features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(1, 2, 3) });
+    expect(r.asked.map((a) => [...a.bytes])).toEqual([[1, 2, 3], [1, 2, 3, 7]]);
+  });
+
+  it("still asks about a copy the page sends through the other door itself", async () => {
+    const { r, calls, wallet, win, holdFor } = both();
+    let release!: () => void;
+    holdFor(new Promise<void>((done) => { release = done; }));
+    const first = wallet.features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(1, 2, 3) });
+    await new Promise((done) => setTimeout(done, 5));
+    // the wallet is working on it (its own window is open, say): one question so far, and the wallet handed it on once
+    expect(r.asked).toHaveLength(1);
+    expect(calls).toEqual(["provider.signTransaction"]);
+    // the page now sends the same bytes straight to the provider: that is a second request, and it is asked about
+    const copy = win.solana.signTransaction(txOf(Uint8Array.of(1, 2, 3)));
+    await new Promise((done) => setTimeout(done, 5));
+    expect(r.asked).toHaveLength(2);
+    release();
+    await Promise.all([first, copy]);
+    expect(r.done).toEqual([true, true]);
+  });
+
+  it("asks afresh once the wallet has answered: the same bytes later are a new request", async () => {
+    const { r, wallet, win } = both();
+    await wallet.features["solana:signMessage"].signMessage({ account, message: Uint8Array.of(9) });
+    await win.solana.signMessage(Uint8Array.of(9));
+    await wallet.features["solana:signMessage"].signMessage({ account, message: Uint8Array.of(9) });
+    expect(r.asked).toHaveLength(3);
+  });
+
+  it("and a request refused at the first door never reaches the second, or the wallet", async () => {
+    const { r, calls, wallet } = both(() => false);
+    await expect(wallet.features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(1) })).rejects.toBeInstanceOf(WardenRejected);
+    expect(r.asked).toHaveLength(1);
+    expect(calls).toEqual([]);
+  });
+
+  it("asks at both doors about a request it cannot read: nothing says two of those are the same", async () => {
+    const r = recorder();
+    const provider: any = { publicKey: { toBase58: () => account.address }, signTransaction: async (t: any) => t };
+    const wallet: any = { name: "Nested", version: "1.0.0", accounts: [account], features: { "solana:signTransaction": { version: "1.0.0", signTransaction: async (..._inputs: any[]) => { await provider.signTransaction({ serialize: () => { throw new Error("cannot"); } }); return [{ signedTransaction: new Uint8Array(0) }]; } } } };
+    installLegacyHook({ solana: provider }, r.guard);
+    patchStandardWalletInPlace(wallet, r.guard);
+    await wallet.features["solana:signTransaction"].signTransaction({ account, transaction: new Uint8Array(0) });
+    expect(r.asked.map((a) => a.kind)).toEqual(["tx", "tx"]);
+    expect(r.asked.every((a) => a.bytes.length === 0)).toBe(true);
+  });
+});
