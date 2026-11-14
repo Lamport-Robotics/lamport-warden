@@ -99,3 +99,35 @@ it("4: the practice page, with a request stopped", async () => {
     await plain.close();
   }
 }, 60_000);
+
+it("5: a site that asked a decoy for everything, caught before it saw the wallet", async () => {
+  // A site this wallet has not met (?fresh=1), with the experiment on and a decoy that holds 12 SOL and 900 USDC.
+  const TOKEN = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), ASSOCIATED = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"), USDC = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+  const decoy = person(33), thief = person(34);
+  const ata = (of: PublicKey) => PublicKey.findProgramAddressSync([of.toBytes(), TOKEN.toBytes(), USDC.toBytes()], ASSOCIATED)[0];
+  const u64 = (n: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(n); return b; };
+  site.setHoldings(decoy.toBase58(), 12_000_000_000, [{ account: ata(decoy).toBase58(), mint: USDC.toBase58(), amount: "900000000", decimals: 6 }]);
+  await store({ rpcUrl: `${site.origin}/rpc`, simulate: false, decoyFirst: true, decoyAddress: decoy.toBase58() });
+  const everything = [...new Transaction({ feePayer: decoy, recentBlockhash: BLOCKHASH }).add(
+    SystemProgram.transfer({ fromPubkey: decoy, toPubkey: thief, lamports: 11_990_000_000n }),
+    new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: ata(decoy), isSigner: false, isWritable: true }, { pubkey: USDC, isSigner: false, isWritable: false }, { pubkey: ata(thief), isSigner: false, isWritable: true }, { pubkey: decoy, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([12]), u64(900_000_000n), Buffer.from([6])]) }),
+  ).serialize({ requireAllSignatures: false, verifySignatures: false })];
+  try {
+    const page = await browser.ctx.newPage();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto(`${site.origin}/?only=phantom&fresh=1`);
+    await page.waitForFunction(() => !!(window as any).__app);
+    await page.evaluate(DRESS);
+    const prompt = await Prompt.on(page);
+    await page.evaluate(() => (window as any).__app.connect("c", "standard:FixturePhantom"));
+    await page.waitForFunction(() => (window as any).__results.c !== "pending");
+    await page.evaluate(([t]) => (window as any).__app.start("s", "standard:FixturePhantom", "tx", t), [everything] as const);
+    await prompt.text(8000);
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: join(out, "5-decoy-caught.png") });
+    await page.close();
+  } finally {
+    await worker().evaluate(() => chrome.storage.local.remove(["decoyFirst", "decoyAddress", "decoyPassed", "decoySalt"]));
+  }
+});
+
