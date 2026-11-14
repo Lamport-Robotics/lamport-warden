@@ -755,6 +755,22 @@ refuses to build for mainnet until the vault has a mainnet address to pin, and f
 because the devnet faucet no longer answers the command line. No outside firm has audited either program,
 and Lamport holds the key that can change the rescue program; rescue's terms say both.
 
+What switching it on takes, in order. None of it is done, and each step is a decision of whoever owns the
+programs, not something a deploy of this repository does:
+
+1. Lamport Vault on the network, at an address that will not change.
+2. That address in the rescue program (`LAMPORT_VAULT_PROGRAM_ID` in `sentinel/program`; a mainnet build is
+   refused by the compiler until there is one), the program built, its 27 tests run, and the program
+   deployed under the id in `declare_id!`. Whoever holds its upgrade authority can change where a rescue
+   goes: decide before deploying whether that is a multisig, a key kept offline, or nobody (the program made
+   final).
+3. `init_rescuer_set`, signed by the upgrade authority, naming an admin and the rescuer keys (four at most).
+4. A rescuer key for the service: made on the server, never elsewhere, added to that set, given a little
+   SOL, and put in the service's root-only settings as `SENTINEL_RESCUER_KEY`.
+5. Restart the service. Within ten minutes the page shows the Rescue section to whoever is signed in; from
+   then on the first sentence of the terms page about rescue ("not on Solana mainnet yet") is out of date
+   and wants changing with it, along with `PRO_NOT_YET` in `plans.ts`.
+
 What rescue does not do: SOL (the rescue program moves tokens only; Warden already knows the shape of a
 pre-signed transfer to the vault, and nothing here makes one), pointing a set-up wallet at another vault
 from the page (the program has it, with a waiting time), and an owner's own rescuer key (the program has

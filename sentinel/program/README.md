@@ -101,5 +101,7 @@ the destination check gone the fuzz test finds a case that pays the thief.
 
 ## Not in this folder yet
 
-No deployment, no IDL (that needs the Anchor CLI; the tests do not), no service, no arming page, no change to
-the extension. The program keypair for the id above is not in the repo.
+No deployment and no IDL (that needs the Anchor CLI; the tests do not). The program keypair for the id above
+is not in the repo. The service that sets a wallet up and carries a rescue out, and the page for it, are in
+`sentinel/service` and `sentinel/web`; `sentinel/service/README.md` ("Rescue, so far") says how they use
+this program and what it takes to switch rescue on.
