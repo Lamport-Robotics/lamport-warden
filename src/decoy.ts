@@ -46,23 +46,6 @@ const MEMO = new Set(["MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", "Memo1UhkJR
 /** Programs whose every instruction the engine reads: a transaction made only of these hides nothing. */
 const PLAIN = new Set([SYSTEM, TOKEN, TOKEN_2022, ASSOCIATED, COMPUTE_BUDGET, ...MEMO]);
 
-const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-
-/**
- * The decoy of the practice page. Its holdings exist nowhere: the practice page is connected to no chain,
- * and its pretend thief is told that whatever connects holds exactly this. On any other site a decoy has to
- * be a real address with real holdings, or a thief that looks it up would see an empty wallet and walk away.
- *
- * The address is a hash of the words "Lamport Warden practice decoy", walked forward to the nearest point on
- * the curve, so that it looks like any wallet's and nobody has a key for it (test/decoy.test.ts works it out
- * again). The token account is that address's own USDC account.
- */
-export const PRACTICE_DECOY: Decoy = {
-  address: "4rH9zYo9TKjBRvmxovoyKYYE9oHQoUwtTQc8d7wP3iNh",
-  lamports: 310_000_000_000n,
-  tokens: [{ mint: USDC, account: "F2uYrsWw8yiRzfcunczfQaHWdapA4T94AQ9zzR9xaj4E", amount: 40_000_000_000n, decimals: 6 }],
-};
-
 /** How much of a holding counts as "nearly all of it". */
 const NEARLY_ALL = 9n; // tenths
 

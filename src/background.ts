@@ -13,7 +13,7 @@ import { reportOwnSignature } from "./report.js";
 import { LINK_PREFIX, fromSentinelPage, linkFrom, linkKey, readPageAsk, type PageAnswer } from "./sentinel-link.js";
 import { TableReader, readAccount } from "./rpc.js";
 import { configAddress, vaultOfConfig } from "./sentinel.js";
-import { PASSED_ON_WORDS, PRACTICE_DECOY, decoyVerdict, judgeDecoy, readHoldings, type Decoy } from "./decoy.js";
+import { PASSED_ON_WORDS, decoyVerdict, judgeDecoy, readHoldings, type Decoy } from "./decoy.js";
 import type { DecoyAskedReply, DecoyFirstReply } from "./messages.js";
 import { KEYS, settingsFrom } from "./settings.js";
 import { Simulator } from "./simulate.js";
@@ -81,8 +81,6 @@ async function tellSentinel(judged: Judged, txBytes: Uint8Array, sigs: string[])
 
 // ---- decoy first (decoy.ts): an experiment, off unless the owner turned it on and named a decoy
 
-/** The practice page's pretend thief: always shown the practice decoy, so that the idea can be tried with nothing at stake. */
-const PRACTICE_THIEF = `${ARMING_ORIGIN}/try/thief/`;
 const PASSED = "decoyPassed";
 /**
  * A site that passed is kept as a mark worked out from its address and a number made up for this browser,
@@ -104,7 +102,6 @@ const holdings = new Map<string, { at: number; held: Pick<Decoy, "lamports" | "t
 /** The decoy this page is to be shown first, or null: a site that already passed, Lamport's own pages, and any page when it is off. */
 async function decoyFor(origin: string, url: string, frameId: number | undefined): Promise<Decoy | null> {
   if (frameId !== 0) return null;
-  if (url.startsWith(PRACTICE_THIEF)) return PRACTICE_DECOY;
   const s = await settings();
   const web = origin.startsWith("https://") || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
   if (!s.decoyFirst || !s.decoyAddress || !web || origin === ARMING_ORIGIN) return null;
@@ -126,7 +123,7 @@ async function decoyAsked(req: WireRequest, origin: string, url: string, frameId
     try { tables = await reader.forMessage(splitTransaction(bytes).messageBytes, (await settings()).rpcUrl); } catch { /* read without them */ }
     finding = judgeDecoy(bytes, decoy, tables);
   }
-  if (!finding.caught && !url.startsWith(PRACTICE_THIEF)) {
+  if (!finding.caught) {
     const stored = (await chrome.storage.local.get(PASSED))[PASSED];
     const passed: Record<string, string> = stored && typeof stored === "object" ? { ...(stored as Record<string, string>) } : {};
     passed[await markOf(origin)] = new Date().toISOString().slice(0, 10);
