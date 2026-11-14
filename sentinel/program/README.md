@@ -99,6 +99,14 @@ because this program never calls it.
 Each check in the program was removed in turn and the tests run again: every removal fails tests, and with
 the destination check gone the fuzz test finds a case that pays the thief.
 
+## Who can change it
+
+Everything above is what this program does. Whoever holds its upgrade authority can deploy another in its
+place, and a program at this address signs for every delegate address every owner has approved, without
+limit and without an end date. So "they cannot decide where" holds for a rescuer, and holds for everyone
+only once the upgrade authority is a multisig with a waiting time, or nobody. That has to be settled before
+this is deployed where tokens are worth something; `sentinel/service/README.md` has the order of the steps.
+
 ## Not in this folder yet
 
 No deployment and no IDL (that needs the Anchor CLI; the tests do not). The program keypair for the id above

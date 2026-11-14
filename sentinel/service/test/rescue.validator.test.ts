@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { PROGRAM, TOKEN, approveForRescue, configAddress, delegateAddress, initConfig, initRescuerSet, proposeVault, setRescuers, vaultTokenAddress } from "../src/program.js";
+import { PROGRAM, TOKEN, approveForRescue, configAddress, createVaultTokenAccount, delegateAddress, initConfig, initRescuerSet, proposeVault, setRescuers, vaultTokenAddress } from "../src/program.js";
 import { Rescuer, holdingsOf, readConfig, readRescuerSet } from "../src/rescuer.js";
 import { HttpRpc } from "../src/rpc.js";
 
@@ -129,14 +129,16 @@ describe.skipIf(!onPath || !existsSync(SO))("a rescue on a local validator, thro
     const set = await rpc.call("getAccountInfo", [PublicKey.findProgramAddressSync([new TextEncoder().encode("rescuers")], PROGRAM)[0].toBase58(), { encoding: "base64", commitment: "confirmed" }]);
     expect(readRescuerSet(Buffer.from(set.value.data[0], "base64"))).toEqual([lamportRescuer.publicKey.toBase58()]);
 
-    // arming: the owner names the vault, then lets Sentinel's delegate for that vault move each token account
+    // arming: the owner names the vault, makes the vault's own token account for each token (a rescue goes only
+    // into ones that exist, so that the key that rescues never pays for one), and lets Sentinel's delegate for
+    // that vault move each token account
     const usdc = await tokenFor(owner, 250_000_000n), bonk = await tokenFor(owner, 9_000_000_000n, 5), dust = await tokenFor(owner, 1n);
     const unarmed = await tokenFor(owner, 77_000_000n);
     Object.assign(accounts, { usdc: usdc.account, bonk: bonk.account, dust: dust.account, unarmed: unarmed.account, usdcMint: usdc.mint, bonkMint: bonk.mint, dustMint: dust.mint, unarmedMint: unarmed.mint });
     await send([owner], initConfig(owner.publicKey, vaultA.address),
-      approveForRescue({ owner: owner.publicKey, source: usdc.account, mint: usdc.mint, decimals: 6, vault: vaultA.address }),
-      approveForRescue({ owner: owner.publicKey, source: bonk.account, mint: bonk.mint, decimals: 5, vault: vaultA.address }),
-      approveForRescue({ owner: owner.publicKey, source: dust.account, mint: dust.mint, decimals: 6, vault: vaultA.address }));
+      createVaultTokenAccount(owner.publicKey, vaultA.address, usdc.mint), approveForRescue({ owner: owner.publicKey, source: usdc.account, mint: usdc.mint, decimals: 6, vault: vaultA.address }),
+      createVaultTokenAccount(owner.publicKey, vaultA.address, bonk.mint), approveForRescue({ owner: owner.publicKey, source: bonk.account, mint: bonk.mint, decimals: 5, vault: vaultA.address }),
+      createVaultTokenAccount(owner.publicKey, vaultA.address, dust.mint), approveForRescue({ owner: owner.publicKey, source: dust.account, mint: dust.mint, decimals: 6, vault: vaultA.address }));
     const stored = await rpc.call("getAccountInfo", [configAddress(owner.publicKey).toBase58(), { encoding: "base64", commitment: "confirmed" }]);
     expect(readConfig(Buffer.from(stored.value.data[0], "base64"))).toEqual({ owner: owner.publicKey.toBase58(), vault: vaultA.address.toBase58(), pendingVault: null, rescuers: { kind: "lamport" } });
     const holdings = await holdingsOf(rpc, owner.publicKey.toBase58());
@@ -175,7 +177,7 @@ describe.skipIf(!onPath || !existsSync(SO))("a rescue on a local validator, thro
 
   it("an owner who chose a key of their own is rescued by that key, and no longer by Lamport's", async () => {
     const more = await tokenFor(owner, 5_000_000n);
-    await send([owner], setRescuers(owner.publicKey, { kind: "own", key: ownRescuer.publicKey }), approveForRescue({ owner: owner.publicKey, source: more.account, mint: more.mint, decimals: 6, vault: vaultA.address }));
+    await send([owner], setRescuers(owner.publicKey, { kind: "own", key: ownRescuer.publicKey }), createVaultTokenAccount(owner.publicKey, vaultA.address, more.mint), approveForRescue({ owner: owner.publicKey, source: more.account, mint: more.mint, decimals: 6, vault: vaultA.address }));
     expect(await new Rescuer(rpc, lamportRescuer, quick).rescue(owner.publicKey.toBase58())).toEqual({ ok: false, why: "this wallet chose a rescuer key of its own, and this is not it." });
     expect(await balance(more.account)).toBe(5_000_000n);
     const result = await new Rescuer(rpc, ownRescuer, quick).rescue(owner.publicKey.toBase58());
@@ -183,14 +185,14 @@ describe.skipIf(!onPath || !existsSync(SO))("a rescue on a local validator, thro
     expect(await balance(vaultTokenAddress(vaultA.address, more.mint))).toBe(5_000_000n);
     // the owner can always rescue themselves
     const again = await tokenFor(owner, 3n);
-    await send([owner], approveForRescue({ owner: owner.publicKey, source: again.account, mint: again.mint, decimals: 6, vault: vaultA.address }));
+    await send([owner], createVaultTokenAccount(owner.publicKey, vaultA.address, again.mint), approveForRescue({ owner: owner.publicKey, source: again.account, mint: again.mint, decimals: 6, vault: vaultA.address }));
     expect(await new Rescuer(rpc, owner, quick).rescue(owner.publicKey.toBase58())).toMatchObject({ ok: true, steps: [{ ok: true }] });
     expect(await balance(vaultTokenAddress(vaultA.address, again.mint))).toBe(3n);
   }, 120_000);
 
   it("a proposed change of vault changes nothing yet: a rescue still goes to the vault that is configured", async () => {
     const t = await tokenFor(owner, 42n);
-    await send([owner], proposeVault(owner.publicKey, vaultB.address), approveForRescue({ owner: owner.publicKey, source: t.account, mint: t.mint, decimals: 6, vault: vaultA.address }));
+    await send([owner], proposeVault(owner.publicKey, vaultB.address), createVaultTokenAccount(owner.publicKey, vaultA.address, t.mint), approveForRescue({ owner: owner.publicKey, source: t.account, mint: t.mint, decimals: 6, vault: vaultA.address }));
     const stored = await rpc.call("getAccountInfo", [configAddress(owner.publicKey).toBase58(), { encoding: "base64", commitment: "confirmed" }]);
     expect(readConfig(Buffer.from(stored.value.data[0], "base64"))).toMatchObject({ vault: vaultA.address.toBase58(), pendingVault: vaultB.address.toBase58(), rescuers: { kind: "own", key: ownRescuer.publicKey.toBase58() } });
     expect(await new Rescuer(rpc, ownRescuer, quick).rescue(owner.publicKey.toBase58())).toMatchObject({ ok: true, vault: vaultA.address.toBase58(), steps: [{ ok: true }] });
