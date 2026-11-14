@@ -78,3 +78,20 @@ export class TableReader {
     return out;
   }
 }
+
+/**
+ * Reads one account, for the one question Warden asks about Sentinel: which vault a wallet's setup names
+ * (sentinel.ts, `vaultOfConfig`). Null when it is not on the chain; an error when the RPC could not say.
+ */
+export async function readAccount(address: string, rpcUrl: string, fetchImpl: FetchLike, timeoutMs = 4000): Promise<{ owner: string; data: Uint8Array } | null> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(rpcUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [address, { encoding: "base64", commitment: "confirmed" }] }), signal: ctl.signal });
+    if (!res.ok) throw new Error("the RPC did not answer");
+    const result = (await res.json())?.result;
+    if (!result || !("value" in result)) throw new Error("the RPC gave no answer");
+    const data = result.value?.data?.[0];
+    return result.value && typeof data === "string" ? { owner: String(result.value.owner), data: Uint8Array.from(atob(data), (c) => c.charCodeAt(0)) } : null;
+  } finally { clearTimeout(timer); }
+}

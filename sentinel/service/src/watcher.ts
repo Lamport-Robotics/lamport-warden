@@ -251,6 +251,14 @@ export class Watcher {
   }
 
   /** Whether the owner was already told of a taking in this transaction. It can be come upon twice: in the wallet's list and in a token account's. */
+  /**
+   * The rescues that are this service's own, for a wallet: the ones it has just sent, and the ones on record
+   * (a rescue's other transactions are kept with its alert, so that a restart does not make strangers of them).
+   */
+  private ownRescues(wallet: string): { has(signature: string): boolean } {
+    return { has: (signature) => this.opts.ownRescues?.has(signature) === true || this.store.events(wallet).some((e) => e.signals.includes("rescued") && (e.signature === signature || e.also?.includes(signature) === true)) };
+  }
+
   private told(wallet: string, signature: string, kind: "taken_by_permission" | "rescued" | null = null): boolean {
     return this.store.events(wallet).some((e) => e.signature === signature && (kind ? e.signals.includes(kind) : e.signals.includes("taken_by_permission") || e.signals.includes("rescued")));
   }
@@ -297,14 +305,15 @@ export class Watcher {
     const takers = [...new Set(a.signals.flatMap((s) => s.takers ?? []))];
     const event: StoredEvent = { wallet, signature: tx?.signature ?? "", slot: tx?.slot ?? 0, at: tx?.blockTime ?? this.now(), level: a.level, signals: a.signals.map((s) => s.kind), sentence: a.sentence, rescueWorthy: a.rescueWorthy, ...(takers.length > 0 ? { takers } : {}) };
     this.store.addEvent(event);
+    // Handed on at once, before the owner is told: telling can take seconds a channel, and what acts on an
+    // alert (a rescue) is in a race. Whatever hangs here must not stop the watching.
+    try { this.opts.onRaised?.(event); } catch { /* its own affair */ }
     // Info is for the Sentinel page; the others go to the owner. A notifier that fails must not stop the watching.
     if (a.level !== "info") {
       const sent = await this.notifier.notify(wallet, a.level, a.sentence).catch(() => ({ delivered: 0, failed: 1 }));
       // nobody was told: the alert says so on the page, which is now the only place it is
       if (sent && sent.delivered === 0 && event.id) this.store.markUndelivered?.(event.id);
     }
-    // whatever hangs here must not stop the watching either
-    try { this.opts.onRaised?.(event); } catch { /* its own affair */ }
     return event;
   }
 
@@ -420,7 +429,7 @@ export class Watcher {
         if (!tx.failed && !signersOf(tx).includes(wallet)) others = true;
         if (this.told(wallet, tx.signature)) continue;
         // whoever it names: one the wallet signed is the wallet's own, and the rule says nothing of it
-        const event = await this.raise(wallet, assessTaken(tx, { wallet, sentinelDelegate: rescueDelegateOf(w, this.now()), rescueVault: rescueVaultOf(w, this.now()), tokenAccounts: before, trustedTakers: trusted, ownRescues: this.opts.ownRescues }), tx);
+        const event = await this.raise(wallet, assessTaken(tx, { wallet, sentinelDelegate: rescueDelegateOf(w, this.now()), rescueVault: rescueVaultOf(w, this.now()), tokenAccounts: before, trustedTakers: trusted, ownRescues: this.ownRescues(wallet) }), tx);
         if (event) raised.push(event);
       }
       if (explained()) { adopt(); continue; }
@@ -513,7 +522,7 @@ export class Watcher {
     }
     const baseline = Baseline.from(record.baseline);
     const raised: StoredEvent[] = [];
-    const ctxBase: Omit<WatchContext, "ownerSigned"> = { wallet, baseline, sentinelDelegate: rescueDelegateOf(w, this.now()), rescueVault: rescueVaultOf(w, this.now()), disarming: disarmingNow(w, this.now()), ownRescues: this.opts.ownRescues, drainers: this.opts.drainers ?? new Set(), reviewedPrograms: this.opts.reviewedPrograms, window: this.windows.get(wallet) ?? this.windows.set(wallet, new BurstWindow()).get(wallet)!, tokenAccounts: before, trustedTakers: new Set(record.trustedTakers ?? []) };
+    const ctxBase: Omit<WatchContext, "ownerSigned"> = { wallet, baseline, sentinelDelegate: rescueDelegateOf(w, this.now()), rescueVault: rescueVaultOf(w, this.now()), disarming: disarmingNow(w, this.now()), ownRescues: this.ownRescues(wallet), drainers: this.opts.drainers ?? new Set(), reviewedPrograms: this.opts.reviewedPrograms, window: this.windows.get(wallet) ?? this.windows.set(wallet, new BurstWindow()).get(wallet)!, tokenAccounts: before, trustedTakers: new Set(record.trustedTakers ?? []) };
 
     let somethingNew = false, listUnread = false, accountsRead = false;
     if (record.cursor === null && record.baseline === null) {

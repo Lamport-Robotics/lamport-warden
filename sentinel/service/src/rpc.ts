@@ -1,10 +1,11 @@
 /** A Solana JSON-RPC endpoint, as far as the watcher uses one. */
 export interface Rpc {
   /**
+   * @param opts.first      true for what nothing else may hold up (a rescue): it goes before all that is waiting
    * @param opts.background true for work that can wait (reading a new wallet's history): it is let through
    *                        only when nothing that cannot wait is asking for the same kind of call
    */
-  call(method: string, params: unknown[], opts?: { background?: boolean }): Promise<any>;
+  call(method: string, params: unknown[], opts?: { background?: boolean; first?: boolean }): Promise<any>;
 }
 
 export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{ ok: boolean; status: number; json(): Promise<any>; headers?: { get(name: string): string | null } }>;
@@ -33,12 +34,17 @@ export const PUBLIC_RPC_PACE: Pace = { heavyPer10s: 9, lightPer10s: 35 };
  */
 class Lane {
   private nextAt = 0;
-  private waiting: { go: () => void; background: boolean }[] = [];
+  private waiting: { go: () => void; background: boolean; first?: boolean }[] = [];
   private running = false;
   constructor(private everyMs: number, private clock: () => number, private sleep: (ms: number) => Promise<void>) {}
 
-  turn(background = false): Promise<void> {
-    return new Promise((go) => { this.waiting.push({ go, background }); void this.run(); });
+  /** `first`: ahead of everyone already waiting, behind only others that asked to be first. */
+  turn(background = false, first = false): Promise<void> {
+    return new Promise((go) => {
+      if (first) { const at = this.waiting.findIndex((w) => !w.first); this.waiting.splice(at < 0 ? this.waiting.length : at, 0, { go, background: false, first: true }); }
+      else this.waiting.push({ go, background });
+      void this.run();
+    });
   }
 
   /** The RPC said to stay away for a while: nobody of this kind starts before then. */
@@ -93,11 +99,11 @@ export class HttpRpc implements Rpc {
   /** How many of one rationed call this may start in a minute, or null when it is not paced. */
   get heavyPerMinute(): number | null { return this.opts.pace?.heavyPer10s ? this.opts.pace.heavyPer10s * 6 : null; }
 
-  async call(method: string, params: unknown[], opts: { background?: boolean } = {}): Promise<any> {
+  async call(method: string, params: unknown[], opts: { background?: boolean; first?: boolean } = {}): Promise<any> {
     const { timeoutMs = 10_000, retries = 4, waitMs = 500 } = this.opts;
     const lane = this.laneFor(method);
     for (let attempt = 0; ; attempt++) {
-      await lane?.turn(opts.background === true);
+      await lane?.turn(opts.background === true, opts.first === true);
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), timeoutMs);
       try {

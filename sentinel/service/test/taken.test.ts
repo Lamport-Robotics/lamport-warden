@@ -422,9 +422,25 @@ describe("tokens taken through a permission the wallet gave earlier", () => {
     const s = await watched((c) => { mine = c.account(wallet.publicKey, usdc(100), { delegate: SD }); theirs = c.account(thief, 0); c.account(key(91), 0); }, { sentinelDelegate: SD, sentinelVault: key(91).toBase58(), ownRescues: new Set() });
     const signature = s.chain.transfer(thief, [[mine, theirs, usdc(100)]]);
     const r = await s.round();
-    expect(r.raised.map((e) => [e.signals, e.level, e.signature, e.rescueWorthy])).toEqual([[["taken_by_permission"], "urgent", signature, true]]);
-    expect(r.raised[0]!.sentence).toContain("100 USDC left your wallet in a transaction your wallet did not sign.");
-    expect(r.raised[0]!.sentence).not.toContain("rescue");
+    // Urgent, and said as a taking. Sentinel's own address on the account is not named as what let it happen:
+    // nobody but the rescue program signs for that. With no other permission on record it was a power the
+    // token itself gives someone, which is no reason to move everything else (anyone can stage it, with a
+    // token of their own making).
+    expect(r.raised.map((e) => [e.signals, e.level, e.signature, e.rescueWorthy, e.takers])).toEqual([[["taken_by_permission"], "urgent", signature, false, undefined]]);
+    expect(r.raised[0]!.sentence).toBe(`100 USDC left your wallet in a transaction your wallet did not sign. ${short(thief.toBase58())} signed it.`);
+  });
+
+  it("tokens taken under a permission the wallet gave are reason to rescue the rest; tokens their issuer took back are not", async () => {
+    // What a drainer does: the wallet approved it once, and it comes back for what the approval covers. And
+    // what anyone can do to any wallet: send it a token they made, and take it back.
+    let approved = "", junk = "", theirs = "";
+    const s = await watched((c) => { approved = c.account(wallet.publicKey, usdc(100), { delegate: thief.toBase58() }); junk = c.account(wallet.publicKey, usdc(5)); theirs = c.account(thief, 0); });
+    s.chain.transfer(thief, [[junk, theirs, usdc(1)]]);
+    const back = (await s.round()).raised;
+    expect(back.map((e) => [e.signals, e.level, e.rescueWorthy])).toEqual([[["taken_by_permission"], "urgent", false]]);
+    s.chain.transfer(thief, [[approved, theirs, usdc(40)]]);
+    const drained = (await s.round()).raised;
+    expect(drained.map((e) => [e.signals, e.level, e.rescueWorthy, e.takers])).toEqual([[["taken_by_permission"], "urgent", true, [thief.toBase58()]]]);
   });
 
   it("waits for an RPC that is behind, and tells the owner when the transaction shows", async () => {
@@ -912,7 +928,7 @@ describe("the sentence", () => {
     // and is said as a taking, with everything a taking sets off.
     for (const ctx of [{ rescueVault: key(91).toBase58() }, {}]) {
       const robbed = assessTaken(all.tx, { wallet: W, sentinelDelegate: SD, tokenAccounts: all.onRecord, ...ctx });
-      expect([robbed.level, robbed.signals.map((s) => s.kind), robbed.rescueWorthy]).toEqual(["urgent", ["taken_by_permission"], true]);
+      expect([robbed.level, robbed.signals.map((s) => s.kind), robbed.rescueWorthy, robbed.signals[0]!.takers]).toEqual(["urgent", ["taken_by_permission"], false, undefined]);
     }
     // someone else's delegate that happens to be on an unarmed wallet is not excused
     expect(assessTaken(all.tx, { wallet: W, tokenAccounts: all.onRecord }).level).toBe("urgent");

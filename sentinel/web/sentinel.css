@@ -104,3 +104,5 @@ a.ref:hover { border-bottom-color: var(--bone); color: var(--bone); }
 .setup code.addr { overflow-wrap: anywhere; font-size: 13px; }
 .setup > button.small { margin-top: 14px; }
 input[type="checkbox"] { accent-color: var(--bone); margin-right: 6px; }
+.setup .pick { margin: 12px 0 4px; }
+.setup .pick label { padding: 4px 0; font-size: 14px; overflow-wrap: anywhere; }

@@ -135,6 +135,14 @@ export class Accounts {
     this.enforce(profile);
   }
 
+  /** Notes that rescue's terms were agreed to, the first time they are. */
+  agreeRescueTerms(profile: string, at: number): void {
+    const p = this.profile(profile);
+    if (!p || p.rescueTermsAt) return;
+    p.rescueTermsAt = at;
+    this.store.flush();
+  }
+
   /** Whether a rescue may be started without the owner asking (rescue.ts). True when it changed. */
   setAutoRescue(profile: string, on: boolean): boolean {
     const p = this.profile(profile);

@@ -65,6 +65,8 @@ export const PREPAID_MONTHS: readonly number[] = [1, 3, 12];
 
 /** An amount in an asset's smallest units as a wallet shows it: no trailing zeros. */
 export function decimal(units: bigint, decimals: number): string {
+  // a token that is not divided at all (most collectibles): the count is the amount
+  if (decimals <= 0) return units.toString();
   const s = units.toString().padStart(decimals + 1, "0");
   const whole = s.slice(0, -decimals), frac = s.slice(-decimals).replace(/0+$/, "");
   return frac ? `${whole}.${frac}` : whole;

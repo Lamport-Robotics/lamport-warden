@@ -233,7 +233,7 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     expect(noticed).toHaveLength(1);
 
     const s = await rescue.status(W);
-    expect(s).toMatchObject({ armed: true, vault: vaultA.address.toBase58(), rescuers: "lamport", uncovered: [] });
+    expect(s).toMatchObject({ armed: true, ours: true, vault: vaultA.address.toBase58(), rescuers: "lamport", uncovered: [] });
     expect(s.covered.map((c) => c.account).sort()).toEqual([held.usdc!.account.toBase58(), held.t22!.account.toBase58()].sort());
     // the watcher now knows which address a rescue of this wallet is signed by, and the owner's channels heard of the setup
     expect(store.wallets()[0]!.sentinelDelegate).toBe(delegateAddress(owner.publicKey, vaultA.address).toBase58());
@@ -251,6 +251,8 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     expect(await balance(held.usdc!.account)).toBe(0n);
     expect(await balance(vaultTokenAddress(vaultA.address, held.usdc!.mint))).toBe(250_000_000n);
     expect(await balance(vaultTokenAddress(vaultA.address, held.t22!.mint, TOKEN_2022))).toBe(7_000_000n);
+    // told to rescue into another vault than the one the chain's setup names, the rescuer does nothing
+    expect(await rescuer.rescue(W, { vault: vaultB.address.toBase58() })).toEqual({ ok: false, why: "this wallet's setup on the chain names another vault than the one asked for on the Sentinel page." });
     // the key that rescues paid for two transactions and for no account: nobody can make it pay for one
     expect((await rescue.keyStanding())!.lamports).toBeGreaterThan(5_000_000_000 - 200_000);
     const said = rescuedSentence(2, 0, vaultA.address.toBase58());
@@ -311,7 +313,7 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     expect(lastUnasked).toEqual([true]);
     expect(await balance(held.late!.account)).toBe(0n);
     expect(await balance(vaultTokenAddress(vaultA.address, held.late!.mint))).toBe(42n);
-    expect(told.at(-1)).toBe(`After the alert before this one, ${rescuedSentence(1, 0, vaultA.address.toBase58())}`);
+    expect(told.at(-1)).toBe(`An alert about this wallet set off a rescue. ${rescuedSentence(1, 0, vaultA.address.toBase58())}`);
     // and the watcher, reading that rescue in its turn, adds nothing to it
     expect(await watch()).toEqual([]);
     // an alert that is not reason enough moves nothing, switched on or not
@@ -376,7 +378,9 @@ describe.skipIf(!onPath || !existsSync(SO))("rescue through the service, on a lo
     expect(store.wallets()[0]!.sentinelDelegate).toBeUndefined();
     expect(noticed.at(-1)).toContain("is no longer set up for rescue");
     now += RESCUE_AGAIN_SECONDS;
-    expect(await rescue.rescue(profile, W)).toEqual({ ok: false, status: 409, why: "this wallet is not armed." });
+    // with the setup gone at the owner's asking, there is no vault Sentinel was asked to use
+    expect(await rescue.rescue(profile, W)).toMatchObject({ ok: false, status: 409 });
+    expect(store.wallets()[0]!.rescueWanted).toBeUndefined();
     expect(await rescue.disarm(profile, W)).toMatchObject({ ok: false, status: 409 });
     // without a rescuer key the service still shows how a wallet stands, and says it cannot rescue
     const keyless = new Rescue(rpc, null, accounts, store);

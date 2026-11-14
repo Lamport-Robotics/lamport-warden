@@ -17,7 +17,7 @@ import { verifyStripeSignature, type Billing } from "./billing.js";
 import type { Prepaid } from "./prepaid.js";
 import { LINK_SECONDS, type LinkCodes } from "./telegram.js";
 import { addressBytes, looksLikeSignature } from "./crypto.js";
-import { autoRescueNotice, channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, takerTrustedNotice, walletRemovedNotice } from "./notices.js";
+import { autoRescueNotice, channelAddedNotice, channelRemovedNotice, reportLinkedNotice, rescueAskedNotice, rescueTakeAwayAskedNotice, signedInNotice, takerTrustedNotice, walletRemovedNotice } from "./notices.js";
 import { NOT_ON_CHAIN, type Rescue } from "./rescue.js";
 import { NonceBook, verifySignIn } from "./signin.js";
 import type { MemoryStore, StoredEvent } from "./store.js";
@@ -341,10 +341,23 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
         if (!limiter.allow(`rescue-look:${session}`, 40, 600, t)) return SLOW_DOWN;
         try { return ok(await deps.rescue.status(wallet)); } catch { return no(502, "the chain could not be read just now. Try again in a minute."); }
       }
-      if (req.method === "POST" && (what === "arm" || what === "disarm")) {
-        if (!limiter.allow(`rescue-setup:${session}`, 20, 600, t)) return SLOW_DOWN;
-        const r = what === "arm" ? await deps.rescue.arm(session, wallet, field(req.body, "vault")) : await deps.rescue.disarm(session, wallet);
-        return r.ok ? ok(r) : no(r.status, r.why);
+      if (req.method === "POST" && what === "arm") {
+        // rescue has terms of its own, and nothing is built for anyone who has not said yes to them
+        if (field(req.body, "agreed") !== true) return no(400, "rescue's terms have to be agreed to first.");
+        if (!limiter.allow(`rescue-setup:${session}`, 40, 600, t)) return SLOW_DOWN;
+        const r = await deps.rescue.arm(session, wallet, field(req.body, "vault"), field(req.body, "accounts"));
+        if (!r.ok) return no(r.status, r.why);
+        accounts.agreeRescueTerms(session, t);
+        // Asking is what makes the watcher take this setup for the owner's own, so the owner hears that it was asked.
+        if (r.asked) notice(session, rescueAskedNotice(wallet, r.vault, who!.wallet));
+        return ok(r);
+      }
+      if (req.method === "POST" && what === "disarm") {
+        if (!limiter.allow(`rescue-setup:${session}`, 40, 600, t)) return SLOW_DOWN;
+        const r = await deps.rescue.disarm(session, wallet);
+        if (!r.ok) return no(r.status, r.why);
+        if (r.asked) notice(session, rescueTakeAwayAskedNotice(wallet, who!.wallet));
+        return ok(r);
       }
       if (req.method === "POST" && what === "now") {
         if (!limiter.allow(`rescue-now:${session}`, 10, 600, t)) return SLOW_DOWN;
@@ -365,7 +378,8 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
         if (!limiter.allow(`rescue-now:${session}`, 10, 600, t)) return SLOW_DOWN;
         const r = await deps.rescue.rescue(session, event.wallet);
         if (!r.ok) return no(r.status, r.why);
-        store.answer(event.id!, "rescue");
+        // answered with a rescue only when one happened: when nothing was moved the alert is as open as it was
+        if (r.moved > 0) store.answer(event.id!, "rescue");
         return ok(r);
       }
       if (answer !== "this_was_me" && answer !== "ignore") return no(400, "the answer is this_was_me, rescue or ignore.");

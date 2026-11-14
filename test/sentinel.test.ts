@@ -63,8 +63,8 @@ describe("arming, on the Sentinel page", () => {
     const v = await ask(setup, ARMING_ORIGIN);
     expect(v.level).toBe("confirm");
     expect(v.confirm).toEqual({ kind: "last4", expect: V.vault.slice(-4) });
-    expect(v.sentence).toBe(`Sets up Warden Sentinel for this wallet. In a rescue, your tokens can go only to the Lamport Vault ${V.vault.slice(0, 4)}…${V.vault.slice(-4)}. It arms 2 token accounts. Changing that vault later takes 72 hours.`);
-    expect((await ask(tx([ix("init_config_with_delay_24h")]), ARMING_ORIGIN)).sentence).toMatch(/takes 24 hours\.$/);
+    expect(v.sentence).toBe(`Sets up Warden Sentinel for this wallet. In a rescue, your tokens can go only to the Lamport Vault ${V.vault.slice(0, 4)}…${V.vault.slice(-4)}. It arms 2 token accounts. Changing that vault later takes 72 hours, or closing this setup and making another.`);
+    expect((await ask(tx([ix("init_config_with_delay_24h")]), ARMING_ORIGIN)).sentence).toMatch(/takes 24 hours, or closing this setup and making another\.$/);
 
     // the approval alone, anywhere, is what the engine exists to stop
     const bare = await ask(tx([ix("approve_checked")]), ELSEWHERE);

@@ -24,8 +24,8 @@ Warden does not keep the sites you visit or the requests it read.
 
 ## What leaves your browser
 
-Two kinds of request go to the Solana RPC chosen on the settings page. By default that is the public RPC at
-`api.mainnet-beta.solana.com`; it can be your own, or turned off. A third goes to Lamport, and only if you
+Three kinds of request go to the Solana RPC chosen on the settings page. By default that is the public RPC at
+`api.mainnet-beta.solana.com`; it can be your own, or turned off. A fourth goes to Lamport, and only if you
 turn it on.
 
 1. **Reading lookup tables.** When a transaction names its accounts through a table stored on chain, Warden
@@ -34,8 +34,12 @@ turn it on.
 2. **Simulation, only if you turn it on.** For a transaction that calls a program Warden cannot read, Warden
    sends the unsigned transaction and the list of accounts it writes to the RPC, which runs it and answers
    with the result. The transaction names your wallet. This is off until you turn it on.
+3. **Reading a rescue setup, on the Sentinel page only.** When the Sentinel page asks your wallet to cover
+   tokens for rescue and this browser has no memory of that wallet's setup, Warden asks the RPC for the
+   setup's account, to see which vault it names. The RPC receives that account's address, which is worked
+   out from your wallet's address, and your IP address.
 
-3. **Telling Sentinel a signature was yours, only if you turn it on.** Sentinel is Lamport's watching
+4. **Telling Sentinel a signature was yours, only if you turn it on.** Sentinel is Lamport's watching
    service. It sees only the chain, so it cannot tell a payment you made from one a thief made with your key.
    With "Tell Sentinel which signatures were mine" on, when a wallet you linked on the Sentinel page signs a
    transaction you let through, Warden sends the Sentinel service at `warden.lamportrobotics.com` that

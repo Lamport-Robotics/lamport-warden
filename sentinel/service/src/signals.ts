@@ -28,6 +28,10 @@ export type SignalKind =
   | "rescued"
   // the wallet's rescue setup was closed, and not from the Sentinel page (rescue.ts)
   | "rescue_closed"
+  // the wallet was set up for rescue into a vault nobody asked for on the Sentinel page (rescue.ts)
+  | "rescue_foreign"
+  // a rescue that an alert set off could not be carried out (rescue.ts)
+  | "rescue_failed"
   | "inbound_from_drainer" | "inbound_from_lookalike"
   // not about the wallet but about the watching of it (blindness.ts)
   | "watch_stopped" | "watch_resumed";
@@ -42,6 +46,8 @@ export interface Signal {
   sentence: string;
   /** For a taking: whose permissions it went under. What "this was me" from the owner makes familiar. */
   takers?: string[];
+  /** True for something that is told at its full level and is still no reason to rescue the wallet unasked. */
+  noRescue?: boolean;
 }
 
 const SYSTEM = "11111111111111111111111111111111";
@@ -146,8 +152,8 @@ function finish(signals: Signal[], oddHour: boolean, ownerSigned: boolean): Asse
     level: out.length ? out[0]!.level : null,
     signals: out,
     sentence: out[0]?.sentence ?? "",
-    // a rescue that has happened is not a reason for another
-    rescueWorthy: out.some((s) => s.level === "urgent" && s.byTable && !s.soft && s.kind !== "rescued"),
+    // a rescue that has happened is not a reason for another, and neither is something only a token's issuer could have done
+    rescueWorthy: out.some((s) => s.level === "urgent" && s.byTable && !s.soft && !s.noRescue && s.kind !== "rescued"),
   };
 }
 
@@ -316,7 +322,8 @@ function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, 
   if (losses.length === 0) return null;
   const what = listed(losses.slice(0, 3).map((l) => fmtToken(l.lost, l.mint, { decimals: l.decimals })), Math.max(0, losses.length - 3));
   const start = `${what} left your wallet in a transaction your wallet did not sign.`;
-  const delegates = [...new Set(losses.map((l) => permitted(l.account)).filter((d): d is string => !!d))];
+  // (Sentinel's own address on an account is not what let anybody take from it: only the rescue program signs for it)
+  const delegates = [...new Set(losses.map((l) => permitted(l.account)).filter((d): d is string => !!d && d !== ctx.sentinelDelegate))];
   const signer = signers[0] ?? null;
   let rest: string;
   if (delegates.length === 1 && signers.includes(delegates[0]!)) rest = ` ${short(delegates[0]!)} did it, using a permission to spend that your wallet gave it at some earlier time. Whatever that permission still covers can go the same way until your wallet revokes it.`;
@@ -331,7 +338,10 @@ function takenSignal(tx: ObservedTx, signers: string[], ctx: Pick<WatchContext, 
   // Only the owner saying so makes it ordinary: "this was me" on an earlier taking under the same permission.
   const familiar = delegates.length > 0 && delegates.every((d) => ctx.trustedTakers?.has(d));
   if (familiar) rest += " You have said that what this permission takes is your doing.";
-  return { ...signal("taken_by_permission", familiar ? "info" : "urgent", false, start + rest), ...(delegates.length > 0 ? { takers: delegates } : {}) };
+  // With no permission on record it was a power the token itself gives someone (its issuer taking back what
+  // it sent, most often). The owner hears of it all the same. It is no reason to move everything else: the
+  // power reaches that one token, and anyone can send a wallet such a token and take it back at will.
+  return { ...signal("taken_by_permission", familiar ? "info" : "urgent", false, start + rest), ...(delegates.length > 0 ? { takers: delegates } : { noRescue: true }) };
 }
 
 /**
@@ -377,7 +387,8 @@ export function without(a: Assessment, kind: SignalKind): Assessment {
  */
 export function assessUnexplainedLoss(before: TokenAccountState, missing: bigint, hidden = false): Assessment {
   const what = fmtToken(missing, before.mint, before.decimals !== undefined ? { decimals: before.decimals } : undefined);
-  if (hidden) return finish([signal("unexplained_loss", "urgent", false, `${what} left your wallet and your wallet's own transactions do not account for it. So many transactions were sent to your wallet or to that account at the same time that Sentinel could not read them all, which is a way to hide one. If anyone holds a permission to spend from that account, revoke it.`)], false, false);
+  // rescue-worthy only when somebody held a permission on that account: without one, a stranger with a token of their own making could stage this
+  if (hidden) return finish([{ ...signal("unexplained_loss", "urgent", false, `${what} left your wallet and your wallet's own transactions do not account for it. So many transactions were sent to your wallet or to that account at the same time that Sentinel could not read them all, which is a way to hide one. If anyone holds a permission to spend from that account, revoke it.`), ...(before.delegate ? {} : { noRescue: true }) }], false, false);
   return finish([signal("unexplained_loss", "alert", false, `${what} left your wallet and Sentinel could not find the transaction that moved it. Your wallet's own transactions do not account for it. Look at the account's recent activity.`)], false, false);
 }
 
@@ -407,7 +418,8 @@ export function assessWalletAccount(ownerProgramBefore: string, ownerProgramAfte
 export { looksAlike };
 
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-function b58(bytes: Uint8Array): string {
+/** Bytes as Solana writes addresses and signatures. */
+export function b58(bytes: Uint8Array): string {
   let n = 0n;
   for (const x of bytes) n = n * 256n + BigInt(x);
   let out = "";

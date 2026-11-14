@@ -58,7 +58,7 @@
  *                              is move the tokens they set up into the vault they named. It pays the fee of each
  *                              rescue, so it has to hold a little SOL. Without it nothing here can move anything.
  *   SENTINEL_RESCUE_RPC_URL    an RPC for sending rescues, when it should not be SENTINEL_RPC_URL. Either way a
- *                              rescue has an RPC client of its own and never waits behind the watcher's reading.
+ *                              rescue's calls go ahead of the watcher's reading and never wait behind it.
  */
 import { join } from "node:path";
 import { Accounts, cleanTarget, type ReadBudget } from "./accounts.js";
@@ -453,9 +453,10 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   const passesPerMinute = cfg.rpcPace.heavyPer10s ? cfg.rpcPace.heavyPer10s * 6 * 0.4 : Infinity;
   const fullEverySeconds = () => Math.max(600, Math.ceil(store.wallets().length / passesPerMinute) * 60);
   // Rescue: shown and set up wherever the two programs are on this chain; carried out only with a key.
-  // The key that rescues asks the chain through a client of its own: a rescue is a race, and must not stand
-  // in line behind the reading of every other wallet.
-  const rescuer = cfg.rescuerKey ? new Rescuer(new HttpRpc(cfg.rescueRpcUrl ?? cfg.rpcUrl, undefined, { pace: cfg.rpcPace }), Keypair.fromSecretKey(cfg.rescuerKey)) : null;
+  // The key that rescues asks the chain ahead of everything else that is waiting (rescuer.ts): a rescue is a
+  // race, and must not stand in line behind the reading of every other wallet. Through the same client, so
+  // that one RPC is still asked at one pace; through another when it was given an RPC of its own.
+  const rescuer = cfg.rescuerKey ? new Rescuer(cfg.rescueRpcUrl ? new HttpRpc(cfg.rescueRpcUrl) : rpc, Keypair.fromSecretKey(cfg.rescuerKey)) : null;
   const rescue = new Rescue(rpc, rescuer, accounts, store, {
     notify: (wallet, sentence) => notifier.notify(wallet, "urgent", sentence),
     notice: (profile, sentence) => notifier.notice(profile, sentence),
@@ -499,10 +500,13 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   // Every five minutes, where rescue can work at all: which wallets are set up for it is read from the chain,
   // so that a setup made or taken away anywhere is noticed and its owner told. And the key that rescues is
   // looked at: one that cannot pay for a rescue, or is not among Lamport's rescuers, rescues nothing.
+  let resumed = false;
   const stopRescueSync = startRounds(async () => {
     if (!(await rescue.available())) return;
-    await rescue.sync(store.wallets().map((w) => w.address));
     const key = await rescue.keyStanding();
+    // once, after starting: an alert that was reason for a rescue just before the service went down is acted on now
+    if (!resumed) { resumed = true; const n = await rescue.resume(); if (n) console.error(`sentinel: ${n} rescue(s) picked up after the restart`); }
+    await rescue.sync(store.wallets().map((w) => w.address));
     if (key && !key.amongRescuers) void ops.say("The key Sentinel rescues with is not among Lamport's rescuers on the chain. No rescue it sends will be accepted until it is added to them.", "rescuer-not-listed", 6 * 3600);
     if (key && key.lamports < 20_000_000) void ops.say(`The key Sentinel rescues with holds ${(key.lamports / 1e9).toFixed(3)} SOL. It pays the fee of every rescue, and for the vault's token accounts the first time: send it some before it runs out.`, "rescuer-low", 6 * 3600);
   }, 300);

@@ -6,7 +6,7 @@ import "../src/polyfill.js";
 import { describe, it, expect } from "vitest";
 import { AddressLookupTableAccount, Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import { judge, recordSigned, type Store } from "../src/judge.js";
-import { TableReader, tablesNeeded, type FetchLike } from "../src/rpc.js";
+import { TableReader, readAccount, tablesNeeded, type FetchLike } from "../src/rpc.js";
 import { cleanOrigin, cleanRpcUrl, settingsFrom, DEFAULTS } from "../src/settings.js";
 import { splitTransaction } from "../pincer1/daemon/src/tx/parse.js";
 import type { MemoryState } from "../pincer1/daemon/src/warden/index.js";
@@ -153,5 +153,18 @@ describe("settings", () => {
     expect(cleanOrigin("app.example.com")).toBe("https://app.example.com");
     expect(cleanOrigin("https://app.example.com/some/page?x=1")).toBe("https://app.example.com");
     expect(cleanOrigin("")).toBeNull();
+  });
+
+  it("reads one account for the Sentinel page: what is there, nothing, or that the RPC could not say", async () => {
+    const asked: any[] = [];
+    const answering = (result: unknown, ok = true): FetchLike => async (_url, init) => { asked.push(JSON.parse(init.body)); return { ok, json: async () => ({ result }) }; };
+    const data = Buffer.from([1, 2, 3]).toString("base64");
+    expect(await readAccount("Addr", RPC, answering({ value: { owner: "Prog", data: [data, "base64"] } }))).toEqual({ owner: "Prog", data: Uint8Array.from([1, 2, 3]) });
+    expect(asked[0]).toMatchObject({ method: "getAccountInfo", params: ["Addr", { encoding: "base64", commitment: "confirmed" }] });
+    // not on the chain is an answer; no answer is not
+    expect(await readAccount("Addr", RPC, answering({ value: null }))).toBeNull();
+    await expect(readAccount("Addr", RPC, answering(undefined))).rejects.toThrow();
+    await expect(readAccount("Addr", RPC, answering({ value: null }, false))).rejects.toThrow();
+    await expect(readAccount("Addr", RPC, async () => { throw new Error("offline"); })).rejects.toThrow();
   });
 });

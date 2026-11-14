@@ -333,6 +333,10 @@ describe("the arithmetic", () => {
     expect(decimal(193_973_879n, 9)).toBe("0.193973879");
     expect(decimal(1_500_000_000n, 9)).toBe("1.5");
     expect(decimal(1n, 6)).toBe("0.000001");
+    // a token with no decimal places is its count, not a fraction
+    expect(decimal(1_000_000_000n, 0)).toBe("1000000000");
+    expect(decimal(1n, 0)).toBe("1");
+    expect(decimal(0n, 0)).toBe("0");
   });
 });
 

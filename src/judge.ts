@@ -7,7 +7,7 @@
 import { PublicKey } from "@solana/web3.js";
 import { OwnerMemory, checkMessage, checkTransaction, recordConfirmed, type MemoryState, type WardenVerdict } from "../pincer1/daemon/src/warden/index.js";
 import { parseAnyMessage, splitTransaction, type ParsedTx } from "../pincer1/daemon/src/tx/parse.js";
-import { readSentinel, sentinelStateFrom, type SentinelState } from "./sentinel.js";
+import { approvalsFromArmingPage, readSentinel, sentinelStateFrom, type SentinelState } from "./sentinel.js";
 import { tablesNeeded, type Tables } from "./rpc.js";
 import { READ_IN_FULL, wordsFor, type Simulated } from "./simulate.js";
 
@@ -38,12 +38,17 @@ export type TableSource = (messageBytes: Uint8Array) => Promise<Tables>;
  * asked, and nothing is said about it. A failure to get an answer is different, and the owner is told.
  */
 export type SimulationSource = (txBytes: Uint8Array, messageBytes: Uint8Array, owner: string, tables: Tables) => Promise<Simulated | null>;
-export interface Sources { tables?: TableSource; simulate?: SimulationSource }
+/**
+ * The vault an owner's Sentinel setup names on the chain, or null when they have none. Asked only when the
+ * Sentinel page hands over token approvals and this browser has no memory of that wallet's setup.
+ */
+export type SentinelSource = (owner: string) => Promise<string | null>;
+export interface Sources { tables?: TableSource; simulate?: SimulationSource; sentinelVault?: SentinelSource }
 
 const ACK = { kind: "acknowledge", expect: "I understand" } as const;
 
 export async function judge(req: JudgeRequest, origin: string, store: Store, sources: Sources = {}): Promise<Judged> {
-  const { tables, simulate } = sources;
+  const { tables, simulate, sentinelVault } = sources;
   if (req.kind === "opaque") {
     return { verdict: { level: "confirm", sentence: "This site asked your wallet to sign something in a form I can't read, so I can't tell you what it does.", reasons: ["the signing request is not in a form I know."], confirm: ACK }, owner: req.owner, kind: "opaque" };
   }
@@ -67,7 +72,15 @@ export async function judge(req: JudgeRequest, origin: string, store: Store, sou
   let decoded: ParsedTx | null = null;
   try { decoded = parseAnyMessage(messageBytes, { owner: req.owner, lookupTables }); } catch { decoded = null; }
   if (decoded && decoded.signers.includes(req.owner)) {
-    const sentinel = readSentinel(decoded, req.owner, origin, sentinelStateFrom(await store.sentinel?.(req.owner)));
+    let state = sentinelStateFrom(await store.sentinel?.(req.owner));
+    let unseen = false;
+    // Approvals from the Sentinel page, and nothing here remembers a setup: it may have been made in another
+    // browser. The chain says which vault it names, and the owner is then asked to check that vault here too.
+    if (!state && sentinelVault && approvalsFromArmingPage(decoded, req.owner, origin)) {
+      const vault = await sentinelVault(req.owner).catch(() => null);
+      if (vault) { state = { vault }; unseen = true; }
+    }
+    const sentinel = readSentinel(decoded, req.owner, origin, state, { unseen });
     if (sentinel.kind === "verdict") return { verdict: sentinel.verdict, owner: req.owner, kind: "tx", sentinelAfter: sentinel.after };
   }
   let verdict = checkTransaction({ bytes: messageBytes, owner: req.owner, memory, origin, privacyRings: "explain", lookupTables });

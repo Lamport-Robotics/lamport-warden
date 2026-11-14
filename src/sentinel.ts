@@ -17,7 +17,9 @@
  *     cannot know whose vault it is, so the owner retypes the end of its address, even on the arming page.
  *
  * The delegate is ["delegate", owner, vault] (sentinel/program/README.md). The vault comes from the
- * init_config in the same transaction, or from what this browser saw the owner set up before.
+ * init_config in the same transaction, or from what this browser saw the owner set up before. A browser that
+ * saw nothing (the wallet was set up from another one) reads the setup from the chain, and then asks for the
+ * end of the vault's address again, as it does at setup: it is the first time this browser has shown it.
  *
  * This lives in the extension, not in the engine, so the engine pinned from Pincer1 does not move.
  */
@@ -104,13 +106,37 @@ function approvalOf(ix: ParsedInstruction, owner: string): { delegate: string; a
   return { delegate, amount };
 }
 
+/**
+ * True for a request from the arming page that is token approvals and nothing else: the one request whose
+ * meaning depends on a setup this browser may never have seen, and for which the chain is worth asking.
+ */
+export function approvalsFromArmingPage(parsed: ParsedTx, owner: string, origin: string): boolean {
+  if (origin !== ARMING_ORIGIN || parsed.unresolvedLookups) return false;
+  const rest = parsed.instructions.filter((i) => i.program !== COMPUTE_BUDGET);
+  return rest.length > 0 && rest.every((i) => approvalOf(i, owner) !== null);
+}
+
+/**
+ * The vault an owner's Sentinel setup names, from the bytes of the account at their config address. Null for
+ * anything that is not that owner's setup: the account has to be the Sentinel program's, and has to name the
+ * owner it is being read for.
+ */
+export function vaultOfConfig(account: { owner: string; data: Uint8Array } | null, owner: string): string | null {
+  // 8 discriminator, version, bump, owner, vault
+  if (!account || account.owner !== SENTINEL_PROGRAM || account.data.length < 74) return null;
+  try {
+    if (new PublicKey(account.data.subarray(10, 42)).toBase58() !== owner) return null;
+    return new PublicKey(account.data.subarray(42, 74)).toBase58();
+  } catch { return null; }
+}
+
 const block = (sentence: string, reason: string, parsed: ParsedTx): SentinelReading => ({ kind: "verdict", verdict: { level: "block", sentence, reasons: [reason], parsed } });
 
 /**
  * Reads a transaction for Sentinel's shapes. `state` is what this browser remembers of the owner's setup.
  * The verdict it returns replaces the engine's.
  */
-export function readSentinel(parsed: ParsedTx, owner: string, origin: string, state: SentinelState | undefined): SentinelReading {
+export function readSentinel(parsed: ParsedTx, owner: string, origin: string, state: SentinelState | undefined, opts: { /** `state` was read from the chain a moment ago, and this browser never showed its owner that vault. */ unseen?: boolean } = {}): SentinelReading {
   const fromArmingPage = origin === ARMING_ORIGIN;
   const calls = parsed.instructions.filter((i) => i.program === SENTINEL_PROGRAM);
   const rest = parsed.instructions.filter((i) => i.program !== SENTINEL_PROGRAM && i.program !== COMPUTE_BUDGET);
@@ -136,6 +162,19 @@ export function readSentinel(parsed: ParsedTx, owner: string, origin: string, st
     if (!state) return { kind: "none" };
     const delegate = delegateAddress(owner, state.vault);
     if (rest.length > 0 && onlyApprovals && approvals.every((a) => a!.delegate === delegate)) {
+      if (opts.unseen) {
+        return {
+          kind: "verdict",
+          after: { vault: state.vault },
+          verdict: {
+            level: "confirm",
+            sentence: `Arms ${plural(rest.length, "token account", "token accounts")} for Warden Sentinel: it may move them into the Lamport Vault ${short(state.vault)}, and nowhere else. That is the vault this wallet's Sentinel setup names; this browser has not shown it to you before.`,
+            reasons: ["whoever holds that vault's 24 words receives every rescue. Check the address against your own vault before you continue."],
+            confirm: { kind: "last4", expect: last4(state.vault) },
+            parsed,
+          },
+        };
+      }
       return { kind: "verdict", verdict: { level: "explain", sentence: `Arms ${plural(rest.length, "token account", "token accounts")} for Warden Sentinel: it may move them into your Lamport Vault ${short(state.vault)}, and nowhere else.`, reasons: [], parsed } };
     }
     return ladderRung(parsed, rest, owner, state);
@@ -180,7 +219,7 @@ export function readSentinel(parsed: ParsedTx, owner: string, origin: string, st
       after: { vault },
       verdict: {
         level: "confirm",
-        sentence: `Sets up Warden Sentinel for this wallet. In a rescue, your tokens can go only to the Lamport Vault ${short(vault)}.${armed} Changing that vault later takes ${hours} hours.`,
+        sentence: `Sets up Warden Sentinel for this wallet. In a rescue, your tokens can go only to the Lamport Vault ${short(vault)}.${armed} Changing that vault later takes ${hours} hours, or closing this setup and making another.`,
         reasons: ["whoever holds that vault's 24 words receives every rescue. Check the address against your own vault before you continue."],
         confirm: { kind: "last4", expect: last4(vault) },
         parsed,

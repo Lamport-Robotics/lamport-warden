@@ -82,7 +82,7 @@ stricter. A transaction made only of instructions Warden reads in full is never 
 | `src/overlay.ts` | isolated | The prompt, in a closed shadow root in the browser's top layer. A click counts only when the browser marks it as a person's, and Continue only when the browser reports the button was on screen, uncovered and unaltered. |
 | `src/background.ts` | the extension's worker | The engine, the history, the lookup-table call. Keeps nothing between messages it could not lose. |
 | `src/judge.ts` | worker | Request in, verdict out; records a signed send. Pure, tested in Node. |
-| `src/rpc.ts` | worker | Reads lookup tables, and only accounts the lookup table program owns. |
+| `src/rpc.ts` | worker | Reads lookup tables, and only accounts the lookup table program owns; and one account for the Sentinel page (a wallet's rescue setup, when this browser has not seen it). |
 | `src/simulate.ts` | worker | Asks the RPC what a transaction would do, and reads the wallet's accounts before and after. |
 | `src/options.ts` | settings page | The RPC, simulation, the sites allowed to ask for Privacy Rings keys, and what Warden remembers. |
 | `src/channel.ts` | page and isolated | How the two halves on a page find each other without the page listening in. |
