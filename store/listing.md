@@ -7,15 +7,18 @@ Item ID: `dmlhclkglnpkdhidfjfgjfdjnblnalea`, created on 2026-11-13 from `lamport
 version that has Sentinel built in. That was 0.6.0; 0.6.1 added a welcome on first install and a link to the
 practice page; 0.7.0's settings page describes the plans as they now are (alerts in seconds on Pro) and goes
 with the published terms at warden.lamportrobotics.com/terms/; 0.7.1 reads a wallet's rescue setup from the
-chain when the Sentinel page asks it to cover tokens in a browser that never saw the setup; 0.7.2 asks
+chain when the Sentinel page asks it to cover tokens in a browser that never saw the setup; 0.7.2 asked
 once about a request that Phantom or Backpack hands from one of its doors to the other (0.7.1 and earlier
-asked twice, and counted such a payment twice); the current one is 0.8.0, which adds a decoy first: an
-experiment, off unless turned on.
+asked twice, and counted such a payment twice), and in doing so let a page get a request to the wallet
+unasked; **0.7.2 must not be submitted.** 0.7.3 lets a request through a second time only for the same
+account, and reads whose request it is from the wallet and not from the page. The current one is 0.8.0,
+which adds a decoy first: an experiment, off unless turned on.
 
 **Before submitting 0.8.0:** `LAMPORT_DECOYS` in `src/defaults.ts` is empty, so a decoy is shown only to
 somebody who names an address themselves. The description below says only that a site "is handed a decoy's
 address". If the list is still empty when this is submitted, add to that paragraph that the address is one
-the user names in the settings.
+the user names in the settings. (0.7.3 is the version to submit if the decoy is not ready: package it from
+`main`.)
 
 To submit 0.8.0:
 

@@ -136,16 +136,22 @@ export function signInBytes(input: any): Uint8Array {
  * injected provider (`this.#provider.signTransaction(...)`), and Warden stands in front of both doors: asked
  * at each, the owner was shown one request twice, and a payment was counted twice.
  *
- * So a request that is on its way to the wallet may be met once more, the same kind and the same bytes, and
- * is let through without a second question. Once: the wallet passes a request on a single time, and a page
- * that sends a copy of its own through another door is asked about it like any other request.
+ * So a request that is on its way to the wallet may be met once more, and is let through without a second
+ * question. Once: the wallet passes a request on a single time, and a page that sends a copy of its own
+ * through another door is asked about it like any other request.
+ *
+ * "The same request" is the same kind, the same bytes and the same account. The account matters as much as
+ * the bytes: what a transaction does is read from the side of the account that signs it, so the same bytes
+ * asked of another account are another question with another answer. A page can make a wallet of its own,
+ * have it "asked" to sign a transaction as an account of the page's (which reads as harmless: nothing leaves
+ * that account), and then send those bytes to the real wallet. That is not the request that was answered.
  */
 const onTheirWay = new WeakMap<Guard, Map<string, object[]>>();
 const HEX = "0123456789abcdef";
 /** What makes two requests the same one. Null for a request Warden cannot read: that is asked about every time. */
 function sameAs(r: GuardRequest): string | null {
   if (r.kind === "opaque" || r.bytes.length === 0) return null;
-  let out = `${r.kind}:`;
+  let out = `${r.kind}:${r.owner}:`;
   for (const b of r.bytes) out += HEX[b >> 4]! + HEX[b & 15]!;
   return out;
 }
@@ -351,7 +357,21 @@ function standIn<T extends object>(real: T, override: (prop: PropertyKey, value:
 
 interface StandardWallet { features: Record<string, any>; [k: string]: any }
 
-const account = (i: any) => String(i?.account?.address ?? "");
+/** The account a page says it is asking. */
+const named = (i: any) => String(i?.account?.address ?? "");
+
+/**
+ * Whose request this is. A page names an account when it asks, and it can name any: one of its own, say, so
+ * that a transaction which empties the wallet's account reads as one that leaves "its" account alone. So the
+ * page's word is taken only when the wallet lists that account as its own. Otherwise the request is read as
+ * the wallet's own account's, which is the only key this wallet could sign with. A wallet that lists nobody
+ * is not connected, and the page's word is all there is.
+ */
+function ownerAt(wallet: any, said: string): string {
+  let listed: string[] = [];
+  try { listed = Array.from(wallet?.accounts ?? [], (a: any) => String(a?.address ?? "")).filter((a) => a !== ""); } catch { /* a list that cannot be read lists nobody */ }
+  return listed.length === 0 || listed.includes(said) ? said : listed[0]!;
+}
 
 /** The decoy as a Wallet Standard account of this wallet: its address, and the chains and features the wallet's own accounts have. */
 function decoyAccount(address: string, publicKey: Uint8Array, wallet: any): { address: string } {
@@ -484,7 +504,7 @@ function decoyEvents(feature: any, d: DecoyCtx): any {
 }
 
 /** One Solana signing feature with its method asking the guard first; any other feature as it is. */
-function guardFeature(name: string, feature: any, guard: Guard, d?: DecoyCtx): any {
+function guardFeature(name: string, feature: any, guard: Guard, wallet: any, d?: DecoyCtx): any {
   if (!feature || typeof feature !== "object") return feature;
   if (d && name === "standard:connect") return decoyConnect(feature, d);
   if (d && name === "standard:events") return decoyEvents(feature, d);
@@ -493,25 +513,29 @@ function guardFeature(name: string, feature: any, guard: Guard, d?: DecoyCtx): a
   const original = feature[method];
   if (typeof original !== "function" || ours.has(original)) return feature;
   let fn: AnyFn;
-  const tx = (inputs: any[]) => inputs.map((i) => ({ kind: "tx" as const, bytes: toBytes(i?.transaction), owner: account(i) }));
-  const msg = (inputs: any[]) => inputs.map((i) => ({ kind: "msg" as const, bytes: toBytes(i?.message), owner: account(i) }));
-  // sign-in may be called with no input at all: the wallet then signs in to the site it is on
-  const signin = (inputs: any[]) => (inputs.length ? inputs : [undefined]).map((i) => ({ kind: "signin" as const, bytes: signInBytes(i), owner: typeof i?.address === "string" ? i.address : "" }));
+  const tx = (inputs: any[]) => inputs.map((i) => ({ kind: "tx" as const, bytes: toBytes(i?.transaction), owner: ownerAt(wallet, named(i)) }));
+  const msg = (inputs: any[]) => inputs.map((i) => ({ kind: "msg" as const, bytes: toBytes(i?.message), owner: ownerAt(wallet, named(i)) }));
+  // Sign-in may be called with no input at all: the wallet then signs in to the site it is on. It is the
+  // wallet's own account that signs in, whatever address the request carries (that address is in what is read).
+  const signin = (inputs: any[]) => (inputs.length ? inputs : [undefined]).map((i) => ({ kind: "signin" as const, bytes: signInBytes(i), owner: ownerAt(wallet, "") }));
   const reqs = name === SIGN_TX || name === SIGN_SEND ? tx : name === SIGN_MSG || name === SIGN_OFFCHAIN ? msg : name === SIGN_IN ? signin : null;
   if (!reqs) return feature;
   fn = (...inputs: any[]) => viaDecoy(d, reqs(inputs), () => guarded(guard, reqs(inputs), () => original.apply(feature, inputs)));
   ours.add(fn);
-  const out = { ...feature, [method]: fn };
+  // a copy with the feature's own getters still getters: Backpack's `supportedTransactionVersions` is one, and changes when the wallet has finished loading
+  const own = Object.getOwnPropertyDescriptors(feature);
+  own[method] = { value: fn, writable: true, enumerable: true, configurable: true };
+  const out = Object.defineProperties({}, own);
   return Object.isFrozen(feature) ? Object.freeze(out) : out;
 }
 
 /** The wallet's features with the signing ones guarded. The same features object always gives the same answer. */
-function guardFeatures(features: any, guard: Guard, cache: WeakMap<object, object>, d?: DecoyCtx): any {
+function guardFeatures(features: any, guard: Guard, cache: WeakMap<object, object>, wallet: any, d?: DecoyCtx): any {
   if (!features || typeof features !== "object") return features;
   const cached = cache.get(features);
   if (cached) return cached;
   const out: Record<string, any> = {};
-  for (const k of Object.keys(features)) out[k] = guardFeature(k, features[k], guard, d);
+  for (const k of Object.keys(features)) out[k] = guardFeature(k, features[k], guard, wallet, d);
   const done = Object.isFrozen(features) ? Object.freeze(out) : out;
   cache.set(features, done);
   cache.set(done, done); // handed back to us, it is already guarded
@@ -527,7 +551,7 @@ export function wrapStandardWallet<W extends StandardWallet>(wallet: W, guard: G
   // a stand-in answers for everything, the list of accounts included, so the decoy can always go first here
   const d: DecoyCtx | undefined = gate ? standardDoor(gate, wallet, () => true) : undefined;
   return standIn(wallet, (prop, value) => {
-    if (prop === "features" && value && typeof value === "object") return guardFeatures(value, guard, cache, d);
+    if (prop === "features" && value && typeof value === "object") return guardFeatures(value, guard, cache, wallet, d);
     if (prop === "accounts" && d && d.state.phase === "decoy") return Object.freeze([d.state.account]);
     return undefined;
   });
@@ -605,15 +629,15 @@ export function patchStandardWalletInPlace(wallet: any, guard: Guard, gate?: Dec
     if (desc.get) {
       const get = desc.get;
       if (patchedGetters.has(get)) { patchedWallets.add(wallet); return true; } // another instance of a class already done
-      const guardedGet = function (this: any) { return guardFeatures(get.call(this), guard, cache, decoys.get(this)); };
+      const guardedGet = function (this: any) { return guardFeatures(get.call(this), guard, cache, this, decoys.get(this)); };
       patchedGetters.add(guardedGet);
       if (holder !== wallet && Object.isExtensible(wallet)) Object.defineProperty(wallet, "features", { get: guardedGet, set: desc.set, enumerable: desc.enumerable, configurable: true });
       else if (desc.configurable) Object.defineProperty(holder, "features", { ...desc, get: guardedGet });
       else return false;
     } else if (holder === wallet && (desc.writable || desc.configurable)) {
-      Object.defineProperty(wallet, "features", { ...desc, value: guardFeatures(desc.value, guard, cache, decoys.get(wallet)) });
+      Object.defineProperty(wallet, "features", { ...desc, value: guardFeatures(desc.value, guard, cache, wallet, decoys.get(wallet)) });
     } else if (holder !== wallet && Object.isExtensible(wallet)) {
-      Object.defineProperty(wallet, "features", { value: guardFeatures(desc.value, guard, cache, decoys.get(wallet)), writable: true, enumerable: true, configurable: true });
+      Object.defineProperty(wallet, "features", { value: guardFeatures(desc.value, guard, cache, wallet, decoys.get(wallet)), writable: true, enumerable: true, configurable: true });
     } else {
       // a frozen wallet with frozen features: the methods inside may still be open
       const features = desc.value;
@@ -624,7 +648,7 @@ export function patchStandardWalletInPlace(wallet: any, guard: Guard, gate?: Dec
         if (!feature || typeof feature[method] !== "function" || ours.has(feature[method])) continue;
         const d = Object.getOwnPropertyDescriptor(feature, method);
         if (!d || !(d.writable || d.configurable)) return false;
-        Object.defineProperty(feature, method, { ...d, value: guardFeature(name, feature, guard)[method] });
+        Object.defineProperty(feature, method, { ...d, value: guardFeature(name, feature, guard, wallet)[method] });
       }
     }
     patchedWallets.add(wallet);
