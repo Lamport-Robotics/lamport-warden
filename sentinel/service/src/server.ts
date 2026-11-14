@@ -14,6 +14,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { Accounts, type Refusal } from "./accounts.js";
 import { PLANS } from "./plans.js";
 import { verifyStripeSignature, type Billing } from "./billing.js";
+import type { Prepaid } from "./prepaid.js";
 import { LINK_SECONDS, type LinkCodes } from "./telegram.js";
 import { addressBytes, looksLikeSignature } from "./crypto.js";
 import { channelAddedNotice, channelRemovedNotice, reportLinkedNotice, signedInNotice, takerTrustedNotice, walletRemovedNotice } from "./notices.js";
@@ -56,6 +57,8 @@ export interface ApiDeps {
    * (notices.ts). The addresses are taken when it is called, so a notice about a removal is called for first.
    */
   notice?: (profile: string, sentence: string, opts?: { quiet?: boolean }) => Promise<void>;
+  /** Paying for the plan ahead in USDC or SOL (prepaid.ts). Absent: the plan is paid by card only. */
+  prepaid?: Pick<Prepaid, "offer" | "quote" | "check" | "transaction">;
   /** The Telegram bot, when the service has one: its name, and the codes that tie a chat to a profile. Absent: Telegram is not offered. */
   telegram?: { username: string; codes: Pick<LinkCodes, "issue"> };
   /** How many new profiles one network may start in a day (default 5). */
@@ -276,7 +279,29 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       return r.ok ? ok() : no(r.status, r.why);
     }
 
-    if (route === "GET /billing") return ok(deps.billing ? await deps.billing.api.quote(session) : { enabled: false });
+    if (route === "GET /billing") {
+      if (!deps.billing) return ok({ enabled: false });
+      const quote = await deps.billing.api.quote(session);
+      // paying ahead in USDC or SOL is offered to whoever the card is offered to, and not beside a card plan
+      return ok({ ...quote, crypto: deps.prepaid && quote.checkoutOpen && !quote.subscribed ? deps.prepaid.offer() : null });
+    }
+    if (route === "POST /billing/crypto/quote" || route === "POST /billing/crypto/check" || route === "POST /billing/crypto/transaction") {
+      if (!deps.prepaid) return no(404, "the plan cannot be paid in USDC or SOL here.");
+      if (route.endsWith("quote")) {
+        // a quote is kept for a week: a few an hour is as many as anyone deciding how to pay needs
+        if (!limiter.allow(`quote:${session}`, 6, 3600, t)) return SLOW_DOWN;
+        const r = await deps.prepaid.quote(session, field(req.body, "asset"), field(req.body, "months"));
+        return r.ok ? ok(r.quote, 201) : no(r.status, r.why);
+      }
+      // each look costs calls the RPC rations: the page asks every few seconds for a couple of minutes, and no more
+      if (!limiter.allow(`paid:${session}`, 40, 600, t)) return SLOW_DOWN;
+      if (route.endsWith("transaction")) {
+        const made = await deps.prepaid.transaction(session, field(req.body, "reference"), field(req.body, "payer"));
+        return made.ok ? ok({ transaction: made.transaction }) : no(made.status, made.why);
+      }
+      const r = await deps.prepaid.check(session, field(req.body, "reference"));
+      return r.ok ? ok(r.result) : no(r.status, r.why);
+    }
     if (route === "POST /billing/checkout" || route === "POST /billing/portal") {
       if (!deps.billing) return no(404, "there is no paid plan here.");
       if (!limiter.allow(`billing:${session}`, 10, 600, t)) return SLOW_DOWN;

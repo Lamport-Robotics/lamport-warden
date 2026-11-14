@@ -85,3 +85,10 @@ a.ref:hover { border-bottom-color: var(--bone); color: var(--bone); }
 .foot nav { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-left: auto; }
 .foot a:hover { color: var(--bone); }
 @media (max-width: 640px) { .plans { grid-template-columns: minmax(0, 1fr); } .foot nav { margin-left: 0; } .nav { gap: 16px; } }
+
+/* paying ahead: the amount, the address, and the wallets that can pay it */
+.plan .ahead { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.plan .ahead select, .plan .ahead input { font: inherit; font-size: 14px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
+.plan .ahead input { width: 100%; margin-top: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.plan .ahead .quote { margin-top: 10px; }
+.plan .ahead code.addr { overflow-wrap: anywhere; font-size: 13px; }

@@ -16,13 +16,14 @@ import { createServer as createHttps, type Server } from "node:https";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import type { Page } from "playwright";
-import { WARDEN, launch, type Browser } from "./harness.js";
+import { Prompt, WARDEN, launch, type Browser } from "./harness.js";
+import { USDC_MINT, paymentInstruction } from "../../sentinel/service/src/prepaid.js";
 import { Accounts } from "../../sentinel/service/src/accounts.js";
 import { Billing, Stripe, type BillingConfig, type StripeFetch } from "../../sentinel/service/src/billing.js";
 import { LAMPORT_MINT, telegramLinking } from "../../sentinel/service/src/main.js";
-import { PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, purchaseTerms, renewalTerms } from "../../sentinel/service/src/plans.js";
+import { PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, prepaidTerms, purchaseTerms, renewalTerms } from "../../sentinel/service/src/plans.js";
 import type { Rpc } from "../../sentinel/service/src/rpc.js";
 import { listen, type ApiDeps } from "../../sentinel/service/src/server.js";
 import { LinkCodes, answer, linkedTo } from "../../sentinel/service/src/telegram.js";
@@ -56,6 +57,8 @@ const WALLET = `(() => {
     features: {
       "standard:connect": { version: "1.0.0", connect: async () => ({ accounts: [keys[window.__account].account] }) },
       "standard:events": { version: "1.0.0", on: () => () => {} },
+      // a payment handed to the wallet: what it was given is kept for the test to look at, and nothing is sent anywhere
+      "solana:signAndSendTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signAndSendTransaction: async ({ transaction, chain }) => { window.__sent = { bytes: Array.from(transaction), chain }; return [{ signature: new Uint8Array(64) }]; } },
       "solana:signIn": { version: "1.0.0", signIn: async (input) => {
         const account = keys[window.__account].account;
         const lines = [input.domain + " wants you to sign in with your Solana account:", account.address, "", input.statement, "", "Nonce: " + input.nonce, "Issued At: " + input.issuedAt];
@@ -293,6 +296,55 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     expect(terms[0]).toBe("$10 is charged to your card today, and again every month until you cancel. Stripe takes the payment; Sentinel never sees the card.");
     expect(terms[1]).toContain("Cancel any time from this page.");
     expect(terms[2]).toContain("$10 a month while they hold 250,000 $LAMPORT between them, $15 otherwise.");
+
+    // Paying ahead in USDC or SOL is not on the page while the service does not take it
+    expect(await page.locator("#plans .ahead").count()).toBe(0);
+    // It does: the amount is asked of the service, shown with the address and what paying ahead means, and
+    // the wallet in this browser is handed the payment the service built.
+    const PAY_TO = "74A7zaiS6xyRTKjFFbVwyViQvG2zHTcX1JjmT9EkUp4A", REFERENCE = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+    const asked: unknown[][] = [];
+    let paidUntil: number | null = null;
+    // the payment as the service builds one: 30 USDC from this wallet to Lamport's address, naming the quote
+    const payment = new Transaction({ feePayer: new PublicKey(W1), recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" })
+      .add(paymentInstruction({ payer: new PublicKey(W1), payTo: new PublicKey(PAY_TO), asset: "USDC", units: 30_000_000n, mint: new PublicKey(USDC_MINT), reference: new PublicKey(REFERENCE) }))
+      .serialize({ requireAllSignatures: false, verifySignatures: false });
+    apiDeps.prepaid = {
+      offer: () => ({ payTo: PAY_TO, assets: ["USDC", "SOL"], months: [1, 3, 12] }),
+      quote: async (_profile, asset, months) => { asked.push(["quote", asset, months]); return { ok: true, quote: { reference: REFERENCE, payTo: PAY_TO, asset: asset as "USDC", units: "30000000", decimals: 6, mint: null, months: months as number, cents: 3000, expiresAt: Math.floor(Date.now() / 1000) + 600, url: `solana:${PAY_TO}?amount=30&reference=${REFERENCE}` } }; },
+      transaction: async (_profile, reference, payer) => { asked.push(["transaction", reference, payer]); return { ok: true, transaction: Buffer.from(payment).toString("base64") }; },
+      check: async (_profile, reference) => { asked.push(["check", reference]); return { ok: true, result: paidUntil ? { status: "paid", until: paidUntil } : { status: "waiting" } }; },
+    };
+    await page.reload();
+    const ahead = page.locator("#plans .ahead");
+    await expect.poll(() => ahead.count(), { timeout: 10_000 }).toBe(1);
+    expect(await ahead.innerText()).toContain("Or pay ahead, with no card, in");
+    await ahead.getByLabel("For how long").selectOption("3");
+    await ahead.getByRole("button", { name: "Show the amount" }).click();
+    await expect.poll(() => ahead.locator(".quote").innerText().catch(() => ""), { timeout: 8000 }).toContain("Send exactly 30 USDC to");
+    expect(asked[0]).toEqual(["quote", "USDC", 3]);
+    expect(await ahead.locator(".quote code.addr").innerText()).toBe(PAY_TO);
+    expect(await ahead.locator(".quote ul.terms li").allInnerTexts()).toEqual(prepaidTerms(3000, 3));
+    expect(await ahead.getByLabel("Payment request").inputValue()).toBe(`solana:${PAY_TO}?amount=30&reference=${REFERENCE}`);
+    // the wallet pays: it is given exactly what the service built, for mainnet, and the page then asks the service whether it arrived
+    paidUntil = Math.floor(Date.UTC(2027, 1, 13, 12) / 1000);
+    await ahead.getByRole("button", { name: "Pay with TestWallet" }).click();
+    // Warden is in this browser, and Sentinel's own payment gets no pass: it is read and said like any other
+    // before the wallet is asked.
+    const warden = await Prompt.on(page);
+    const held = await warden.text(10_000);
+    expect(held?.tag).toBe("Lamport Warden · Before you sign");
+    expect(held?.sentence).toContain("30 USDC");
+    expect(await page.evaluate(() => (window as any).__sent ?? null)).toBeNull(); // the wallet has not been asked yet
+    await warden.click("Continue to wallet");
+    await expect.poll(async () => (await page.evaluate(() => (window as any).__sent ?? null)) ?? `not sent; the page says: ${await page.locator("#notice").innerText().catch(() => "")}`, { timeout: 8000 }).toEqual({ bytes: Array.from(payment), chain: "solana:mainnet" });
+    expect(asked.find((a) => a[0] === "transaction")).toEqual(["transaction", REFERENCE, W1]);
+    await expect.poll(() => page.locator("#notice").innerText(), { timeout: 10_000 }).toBe("Paid. Your plan runs until 13 February 2027.");
+    expect(asked.some((a) => a[0] === "check" && a[1] === REFERENCE)).toBe(true);
+    // (the stand-in changed nothing: the story goes on with the card)
+    delete apiDeps.prepaid;
+    await page.reload();
+    await expect.poll(() => start.isVisible(), { timeout: 10_000 }).toBe(true);
+    expect(await page.locator("#plans .ahead").count()).toBe(0);
     await start.click();
     await page.waitForURL(/^https:\/\/checkout\.stripe\.com\//, { timeout: 10_000 });
     const profile = accounts.profileOf(W1)!;

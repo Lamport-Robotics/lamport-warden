@@ -47,6 +47,17 @@ export const planStartedNotice = (wallets: number, seconds: number, push = false
 export const planEndedNotice = (wallets: number, pausedNow: number): string =>
   `This profile's Sentinel plan has ended, so it is on the free plan again: ${wallets} wallets, read every minute, alerts to one ntfy channel.${pausedNow > 0 ? ` ${pausedNow} of its wallets ${pausedNow === 1 ? "is" : "are"} no longer watched.` : ""}`;
 
+// ---- months paid for ahead, in USDC or SOL
+
+export const prepaidStartedNotice = (until: number, wallets: number, seconds: number, push = false): string =>
+  `${planStartedNotice(wallets, seconds, push)} It is paid until ${dayOf(until)} and does not renew by itself.`;
+
+export const prepaidExtendedNotice = (until: number): string =>
+  `A payment for this profile's Sentinel plan arrived. It is now paid until ${dayOf(until)}, and does not renew by itself.`;
+
+export const prepaidEndingNotice = (until: number): string =>
+  `This profile's Sentinel plan is paid until ${dayOf(until)} and does not renew by itself. To keep it, pay again on the Sentinel page before then. After that day the profile is on the free plan, and nothing is deleted.`;
+
 /** A day as it is written in a sentence, in UTC so that the service and the reader mean the same day. */
 export const dayOf = (unix: number): string => new Date(unix * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
 

@@ -7,7 +7,7 @@
  */
 import { getWallets } from "@wallet-standard/app";
 import { PAGE_ASKS, WARDEN_ANSWERS, type PageAnswer, type PageAsk } from "../../../src/sentinel-link.js";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, paceText, purchaseTerms, renewalTerms } from "../../service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, decimal, paceText, prepaidTerms, purchaseTerms, renewalTerms } from "../../service/src/plans.js";
 import { dayOf } from "../../service/src/notices.js";
 import { LINK_STATEMENT, SIGN_IN_STATEMENT, signInText } from "../../service/src/signin-text.js";
 
@@ -17,7 +17,8 @@ const SESSION = "sentinel.session";
 interface WalletRow { address: string; armed: boolean; reporting: boolean; paused: boolean; lastReadAt: number | null }
 interface Me { profile: { id: string; tier: "watch" | "pro" }; wallets: WalletRow[]; channels: { id: string; kind: "ntfy" | "discord" | "slack" | "telegram"; hint: string; active: boolean; lastDeliveredAt: number | null; failing: { since: number; why: string } | null }[]; limits: { wallets: number; channels: number; kinds: string[]; pollSeconds: number; push?: boolean } }
 interface Alert { id: string; wallet: string; at: number | null; level: "info" | "alert" | "urgent"; signals: string[]; sentence: string; answer: string | null; undelivered?: boolean }
-type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null };
+type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null; paidUntil?: number | null; crypto?: { payTo: string; assets: ("USDC" | "SOL")[]; months: number[] } | null };
+type PayQuote = { reference: string; payTo: string; asset: "USDC" | "SOL"; units: string; decimals: number; months: number; cents: number; expiresAt: number; url: string };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -239,6 +240,86 @@ function render(): void {
   plans(mine);
 }
 
+/**
+ * Paying ahead in USDC or SOL. The amount comes from the service, with an address that marks the payment as
+ * this profile's; it can be paid from a wallet in this browser or from any other, and the service finds it
+ * on the chain. Nothing is taken on this page's word.
+ */
+function payAhead(offer: NonNullable<Extract<Plan, { enabled: true }>["crypto"]>, lead: string): HTMLElement {
+  const box = el("div", "", "ahead");
+  const asset = el("select"), months = el("select");
+  asset.setAttribute("aria-label", "Pay in");
+  months.setAttribute("aria-label", "For how long");
+  for (const a of offer.assets) { const o = el("option", a); o.value = a; asset.append(o); }
+  for (const m of offer.months) { const o = el("option", m === 1 ? "1 month" : `${m} months`); o.value = String(m); months.append(o); }
+  const show = el("button", "Show the amount");
+  const pick = el("p", `${lead} `, "soft");
+  pick.append(asset, document.createTextNode(" for "), months, document.createTextNode(" "), show);
+  const out = el("div", "", "quote");
+  out.hidden = true;
+  show.addEventListener("click", async () => {
+    show.disabled = true;
+    const r = await call("POST", "/billing/crypto/quote", { asset: asset.value, months: Number(months.value) });
+    show.disabled = false;
+    if (r.status !== 201 || typeof r.body?.reference !== "string") { say(String(r.body?.error ?? "That did not work."), true); return; }
+    quoted(out, r.body as PayQuote);
+  });
+  box.append(pick, out);
+  return box;
+}
+
+function quoted(out: HTMLElement, q: PayQuote): void {
+  const amount = `${decimal(BigInt(q.units), q.decimals)} ${q.asset}`;
+  const to = el("code", q.payTo, "addr");
+  const line = el("p", `Send exactly ${amount} to `, "plain");
+  line.append(to);
+  const terms = el("ul", "", "terms");
+  terms.append(...prepaidTerms(q.cents, q.months).map((t) => el("li", t)));
+  if (q.asset === "SOL") terms.append(el("li", `This price in SOL holds for ten minutes, until ${new Date(q.expiresAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Paid later than that, it is not counted: ask for the amount again.`));
+  const status = el("p", "", "soft");
+  const look = el("button", "I have paid: look for it", "small");
+  look.addEventListener("click", () => void watchFor(q, status, 1));
+  // a wallet in this browser can be handed the payment ready-made; any other wallet opens the request below
+  const pays = el("div", "", "choices");
+  for (const w of (registry.get() as unknown as AnyWallet[]).filter((x) => "standard:connect" in x.features && "solana:signAndSendTransaction" in x.features && x.chains.some((c) => c.startsWith("solana:")))) {
+    const b = el("button", `Pay with ${w.name}`, "solid");
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        const { accounts } = await w.features["standard:connect"].connect();
+        const account = accounts[0];
+        if (!account) throw new Error("the wallet gave no account");
+        const made = await call("POST", "/billing/crypto/transaction", { reference: q.reference, payer: account.address });
+        if (made.status !== 200 || typeof made.body?.transaction !== "string") { say(String(made.body?.error ?? "That did not work."), true); return; }
+        await w.features["solana:signAndSendTransaction"].signAndSendTransaction({ account, chain: "solana:mainnet", transaction: Uint8Array.from(atob(made.body.transaction), (c) => c.charCodeAt(0)) });
+        void watchFor(q, status, 36);
+      } catch { say("The wallet did not send it. Nothing was paid.", true); } finally { b.disabled = false; }
+    });
+    pays.append(b);
+  }
+  const phone = el("p", "From a wallet on a phone, open this payment request: ", "soft");
+  const request = el("input");
+  request.readOnly = true; request.value = q.url; request.setAttribute("aria-label", "Payment request"); request.addEventListener("focus", () => request.select());
+  phone.append(request);
+  out.replaceChildren(line, terms, pays, phone, look, status);
+  out.hidden = false;
+}
+
+/** Asks the service whether the payment has arrived, every five seconds, so many times. A payment counts when the chain has made it final, which takes about a quarter of a minute. */
+async function watchFor(q: PayQuote, status: HTMLElement, times: number): Promise<void> {
+  for (let i = 0; i < times; i++) {
+    status.textContent = "Looking for the payment on the chain…";
+    const r = await call("POST", "/billing/crypto/check", { reference: q.reference });
+    const s = r.status === 200 ? r.body?.status : null;
+    if (s === "paid") { status.textContent = ""; say(`Paid. Your plan runs until ${dayOf(Number(r.body.until))}.`); await refresh(); return; }
+    if (s === "short") { status.textContent = `A payment arrived that is short: ${decimal(BigInt(r.body.arrived), q.decimals)} ${q.asset} of ${decimal(BigInt(r.body.wanted), q.decimals)}. Nothing was started. Write to support@lamportrobotics.com from the Terms page to have it sent back, or send the full amount.`; return; }
+    if (s === "late") { status.textContent = "A payment arrived after this price in SOL had run out, so it was not counted. Write to support@lamportrobotics.com to have it sent back or counted."; return; }
+    if (r.status !== 200) { status.textContent = String(r.body?.error ?? "That could not be looked up just now."); return; }
+    if (i < times - 1) await new Promise((res) => setTimeout(res, 5000));
+  }
+  status.textContent = "Not there yet. A payment counts once the chain has made it final; look again in a minute.";
+}
+
 function plans(mine: Me): void {
   const paid = mine.profile.tier === "pro";
   const list = (items: readonly string[]) => { const ul = el("ul"); ul.append(...items.map((t) => el("li", t))); return ul; };
@@ -266,6 +347,10 @@ function plans(mine: Me): void {
       ? `Cancelled. The plan runs until ${dayOf(p.endsAt)} and does not renew: nothing more is charged. After that your profile is on Watch, and nothing is deleted.`
       : `${renewalTerms(p.cents, centsFull, centsHolder, p.holderMin)}${p.renewsAt ? ` The next bill is on ${dayOf(p.renewsAt)}.` : ""}`;
     pro.append(b, el("p", p.status === "past_due" ? "Your last payment did not go through. Stripe is trying the card again; change it before the plan lapses." : "This is your plan.", "soft"), el("p", standing, "soft"));
+  } else if (paid && p?.paidUntil) {
+    // paid ahead in USDC or SOL: said with its last day, and never as something that renews
+    pro.append(el("p", "This is your plan.", "soft"), el("p", `Paid until ${dayOf(p.paidUntil)}. It does not renew by itself: to keep it, pay again here before then. After that day your profile is on Watch, and nothing is deleted.`, "soft"));
+    if (p.crypto) pro.append(payAhead(p.crypto, "Add time, paid in"));
   } else if (paid) {
     // on Pro without a subscription of its own: a plan that was given, not bought
     pro.append(el("p", "This is your plan.", "soft"));
@@ -281,6 +366,7 @@ function plans(mine: Me): void {
     link.className = "ref";
     agree.append(link, ", which say the same and add how refunds work.");
     pro.append(b, terms, agree);
+    if (p.crypto) pro.append(payAhead(p.crypto, "Or pay ahead, with no card, in"));
   } else {
     pro.append(el("p", "Not on sale yet.", "soft"));
   }

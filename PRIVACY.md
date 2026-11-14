@@ -74,8 +74,10 @@ What it keeps, on that server:
   refused them.
 - Your sign-ins: each session as a hash, for seven days, with which of your wallets signed it in; and, for a
   wallet you linked to the extension, the hash of the token it reports with.
-- Your plan. If you pay: Stripe's ids for the customer and the subscription, the price, its status and its
-  dates. Not your card, your name or your email address: those are with Stripe and never reach Sentinel.
+- Your plan. If you pay by card: Stripe's ids for the customer and the subscription, the price, its status
+  and its dates. Not your card, your name or your email address: those are with Stripe and never reach
+  Sentinel. If you pay ahead in USDC or SOL: the amounts you were shown in the last week, and for each
+  payment the transaction, what it paid, for how many months, and when.
 
 It does not keep your IP address. The address a request comes from is held in memory for up to a day, to
 limit abuse, and is not written down; the web server in front of Sentinel keeps no access log. The Sentinel
@@ -92,7 +94,10 @@ Who else receives something:
 - Telegram, if you connect a chat. Telegram learns that your account spoke to Sentinel's bot, and sends the
   bot your Telegram name with the message. Sentinel keeps the chat's number, encrypted like any channel's
   address, and nothing else about the account.
-- Stripe, if you pay. It takes the payment under its own privacy policy. Sentinel gives Stripe a random id
+- Everyone, if you pay in USDC or SOL. A transfer on the chain is public: anyone can see that the wallet
+  you paid from paid Lamport's address, how much and when. It can be paid from a wallet that is not one you
+  have Sentinel watch.
+- Stripe, if you pay by card. It takes the payment under its own privacy policy. Sentinel gives Stripe a random id
   that stands for your profile, and learns from Stripe whether the plan is paid.
 
 Removing a wallet on the Sentinel page deletes what is kept about it. Removing the last one deletes the
