@@ -132,7 +132,7 @@ describe("rescue, where it is not", () => {
     s.chain.tokens.set(alice.address, [{ pubkey: tokenAccount(1), mint: mint(1), amount: "5", decimals: 0 }]);
     expect((await s.call("POST", `/v1/wallets/${alice.address}/rescue/arm`, { vault: VAULT.address }, a.session)).status).toBe(200);
     expect(await s.call("POST", `/v1/wallets/${alice.address}/rescue/now`, undefined, a.session)).toEqual({ status: 501, body: { error: "rescue is not switched on here." } });
-    expect(await s.call("POST", "/v1/rescue/auto", { on: true }, a.session)).toEqual({ status: 501, body: { error: NOT_ON_CHAIN } });
+    expect(await s.call("POST", "/v1/rescue/auto", { on: true }, a.session)).toEqual({ status: 501, body: { error: "rescue is not switched on here." } });
   });
 });
 
@@ -219,9 +219,11 @@ describe("rescue through the API", () => {
     const a = await s.signIn(alice);
     s.accounts.setTier(a.profile.id, "pro");
     s.chain.arm(alice.key, VAULT.address);
+    // two accounts go; a third is refused, is sent once more and refused again, and the chain shows it still holding
+    s.chain.tokens.set(alice.address, [{ pubkey: tokenAccount(3), mint: mint(3), amount: "5", decimals: 0 }]);
     const r = await s.call("POST", `/v1/wallets/${alice.address}/rescue/now`, undefined, a.session);
-    expect(r).toEqual({ status: 200, body: { ok: true, vault: VAULT.address, moved: 2, failed: 1, signatures: ["sig1"] } });
-    expect(s.rescued).toEqual([alice.address]);
+    expect(r).toEqual({ status: 200, body: { ok: true, vault: VAULT.address, moved: 2, failed: 1, signatures: ["sig1", "sig1"] } });
+    expect(s.rescued).toEqual([alice.address, alice.address]);
     const sentence = `Sentinel moved 2 of this wallet's token accounts into your Lamport Vault (${VAULT.address.slice(0, 4)}..${VAULT.address.slice(-4)}). 1 could not be moved and is still in the wallet. Only your vault's key can move what is there now. SOL is not moved by a rescue.`;
     expect(s.told).toEqual([[alice.address, sentence]]);
     const events = ((await s.call("GET", "/v1/events", undefined, a.session)).body as any).events;
@@ -239,16 +241,22 @@ describe("rescue through the API", () => {
     expect(s.told).toHaveLength(1);
     expect(s.store.events(alice.address).filter((e) => e.signals.includes("rescued"))).toHaveLength(1);
 
-    // a rescue the chain refused, or could not be asked for, is said as that and the alert stays unanswered
+    // A rescue the chain refused, or could not be asked for, is said as that and the alert stays unanswered.
+    // And it can be asked for again at once: nobody is made to wait a minute for a rescue that did not happen.
     s.tick(61);
     s.store.addEvent({ wallet: alice.address, signature: "sigU", slot: 2, at: s.now(), level: "urgent", signals: ["taken_by_permission"], sentence: "y", rescueWorthy: true });
     const second = s.store.events(alice.address).find((e) => e.signature === "sigU")!;
     s.answers({ ok: false, why: "this wallet is not armed." });
     expect(await s.call("POST", `/v1/events/${second.id}/answer`, { answer: "rescue" }, a.session)).toEqual({ status: 409, body: { error: "this wallet is not armed." } });
-    s.tick(61);
     s.answers(new Error("down"));
     expect(await s.call("POST", `/v1/events/${second.id}/answer`, { answer: "rescue" }, a.session)).toEqual({ status: 502, body: { error: "the chain could not be reached, so nothing was moved. Try again." } });
     expect(s.store.events(alice.address).find((e) => e.signature === "sigU")!.answer).toBeUndefined();
+    // a transaction that was given up on and landed all the same is not said to be still in the wallet
+    s.chain.tokens.set(alice.address, []);
+    s.answers({ ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(3)], signature: "sig9", ok: false, why: "not confirmed in time" }] });
+    expect((await s.call("POST", `/v1/events/${second.id}/answer`, { answer: "rescue" }, a.session)).body).toMatchObject({ moved: 1, failed: 0 });
+    expect(s.told.at(-1)![1]).toBe(`Sentinel moved 1 of this wallet's token account into your Lamport Vault (${VAULT.address.slice(0, 4)}..${VAULT.address.slice(-4)}). Only your vault's key can move what is there now. SOL is not moved by a rescue.`);
+    s.tick(61);
     // and it cannot be asked for without end
     let last = 0;
     for (let i = 0; i < 12; i++) last = (await s.call("POST", `/v1/wallets/${alice.address}/rescue/now`, undefined, a.session)).status;
@@ -265,6 +273,7 @@ describe("rescue through the API", () => {
     expect(s.store.wallets()[0]!.sentinelDelegate).toBe(delegate);
     s.noticed.length = 0;
     const alert = { wallet: alice.address, signature: "sigT", slot: 1, at: s.now(), level: "urgent" as const, signals: ["taken_by_permission" as const], sentence: "x", rescueWorthy: true };
+    s.answers({ ok: true, vault: VAULT.address, steps: [{ accounts: [tokenAccount(1), tokenAccount(2)], signature: "sig1", ok: true }] });
     expect(await s.rescue.after(alert)).toBe(false);
     expect(await s.call("POST", "/v1/rescue/auto", { on: "yes" }, a.session)).toMatchObject({ status: 400 });
     expect(await s.call("POST", "/v1/rescue/auto", { on: true }, a.session)).toEqual({ status: 200, body: { auto: true } });

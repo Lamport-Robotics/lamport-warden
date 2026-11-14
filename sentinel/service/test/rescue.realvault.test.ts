@@ -12,12 +12,13 @@
  * signs the tokens out of the vault to a new wallet.
  *
  * It needs the Lamport Vault repository beside this one (or `LAMPORT_VAULT_REPO`), with its SDK installed,
- * and a vault program: the one built there (`target/deploy/lamport_vault.so`, or `LAMPORT_VAULT_SO`), or,
- * with `LAMPORT_VAULT_FROM=devnet`, the one that is deployed on devnet, fetched as the validator starts.
- * Skipped when any of that is missing.
+ * and it is run only when asked for, by saying which vault program to use: `LAMPORT_VAULT_FROM=devnet` for
+ * the one that is deployed on devnet, fetched as the validator starts; `LAMPORT_VAULT_FROM=local` for the one
+ * built in that repository (`target/deploy/lamport_vault.so`, or `LAMPORT_VAULT_SO`). What happens to be
+ * built there may be another variant of the program, under another address, so it is not used unasked.
  *
- *   pnpm vitest run sentinel/service/test/rescue.realvault.test.ts
  *   LAMPORT_VAULT_FROM=devnet pnpm vitest run sentinel/service/test/rescue.realvault.test.ts
+ *   LAMPORT_VAULT_FROM=local pnpm vitest run sentinel/service/test/rescue.realvault.test.ts
  */
 import "../../../src/polyfill.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -41,7 +42,7 @@ const FROM_DEVNET = process.env.LAMPORT_VAULT_FROM === "devnet";
 const VAULT_SO = process.env.LAMPORT_VAULT_SO ?? join(VAULT_REPO, "target", "deploy", "lamport_vault.so");
 const LAMPORT_VAULT = new PublicKey("B7dNdVV8shrKgqx7A5JvBQBp7vsTyQTLrdAdeiLKwXqH");
 const onPath = (() => { try { execFileSync("solana-test-validator", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
-const ready = onPath && existsSync(SO) && existsSync(VAULT_SDK) && existsSync(LMS_SDK) && existsSync(join(VAULT_REPO, "sdk", "node_modules")) && (FROM_DEVNET || existsSync(VAULT_SO));
+const ready = onPath && existsSync(SO) && existsSync(VAULT_SDK) && existsSync(LMS_SDK) && existsSync(join(VAULT_REPO, "sdk", "node_modules")) && (FROM_DEVNET || (process.env.LAMPORT_VAULT_FROM === "local" && existsSync(VAULT_SO)));
 
 const seeded = (n: number) => Keypair.fromSeed(new Uint8Array(32).fill(n));
 const authority = seeded(51), owner = seeded(52), lamportRescuer = seeded(53), vaultPayer = seeded(54), safe = seeded(55);

@@ -326,7 +326,8 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       if (typeof on !== "boolean") return no(400, "say on: true or on: false.");
       // switching it off is never refused; switching it on needs the plan that has rescue, and a service that can rescue
       if (on && !PLANS[accounts.profile(session)!.tier].rescue) return no(403, "rescue comes with Pro.");
-      if (on && !(deps.rescue?.on && (await deps.rescue.available()))) return no(501, NOT_ON_CHAIN);
+      if (on && !(deps.rescue && (await deps.rescue.available()))) return no(501, NOT_ON_CHAIN);
+      if (on && !deps.rescue!.on) return no(501, "rescue is not switched on here.");
       if (!limiter.allow(`change:${session}`, 20, 3600, t)) return TOO_MANY_CHANGES;
       if (accounts.setAutoRescue(session, on)) notice(session, autoRescueNotice(on, who!.wallet));
       return ok({ auto: on });

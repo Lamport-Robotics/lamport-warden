@@ -501,6 +501,9 @@ other site can ride on it, and only that page's origin is allowed to read answer
 | `POST /channels`, `DELETE /channels/:id` | session | An ntfy topic to send alerts to. |
 | `GET /events`, `POST /events/:id/answer` | session | The alerts, and "this was me" or "ignore". |
 | `GET /billing`, `POST /billing/checkout`, `POST /billing/portal` | session | The price this profile would pay and its plan; a Stripe Checkout page; Stripe's page for the card and for cancelling. |
+| `GET /rescue`, `POST /rescue/auto` | session | Whether rescue can work here, whether the plan has it, and the profile's switch for rescue without asking. |
+| `GET /wallets/:address/rescue` | session | How that wallet stands on the chain: set up or not, for which vault, what a rescue would move. |
+| `POST /wallets/:address/rescue/arm`, `/disarm`, `/now` | session | The unsigned setup for a vault; the unsigned take-away; a rescue. |
 | `POST /stripe/webhook` | Stripe's signature | A subscription started, changed or ended. |
 | `POST /report` | a wallet's report token | The extension's "this signature was mine". |
 
@@ -702,15 +705,63 @@ for a Token-2022 token; that a vault whose key was rotated is still the same vau
 closed vault is sent nothing. It needs the Lamport Vault repository beside this one, so CI does not run it;
 it was run by hand on 2026-11-13 against the devnet program and all five passed.
 
-What rescue still lacks: a process and a key (nothing runs the rescuer yet), a way to arm a wallet on the
-page, SOL (the rescue program moves tokens only), and a chain to run on. Neither program is on mainnet: the
-vault is on devnet only, and its own README says not to put real money in it. Rescue cannot be offered
-before both are there, whatever else is ready. The program is not on devnet: the
-devnet faucet no longer answers the command line, so the deploy key
-(`BgWwL1UVqA8NNMwB68G8t7BuG9a7yR9WApfZrCgy3wBT`) needs about 4 test SOL from https://faucet.solana.com.
+`src/rescue.ts` is rescue as the service offers it, and `rescue-service.validator.test.ts` runs all of it
+on a local validator with the compiled program and the real watcher reading the same wallet:
+
+- **Looking.** How a wallet stands is read from the chain every time: whether it is set up, for which vault,
+  which token accounts a rescue would move now, and which hold something and would be left (not set up, or
+  frozen). Nothing is armed because the service says so.
+- **Setting up.** The service builds the transactions and signs nothing: one instruction that names the
+  owner's vault, and an approval of the rescue program's address for each token account that holds
+  something, six to a transaction, the biggest first. An address that is not a live Lamport Vault at its own
+  address is refused before anything is built, by the same four checks the program makes. The page shows
+  rescue's own terms (`RESCUE_TERMS` in `plans.ts`, the same lines as on the terms page) and will not build
+  a setup until they are ticked.
+- **Warden.** Warden reads Sentinel's requests by their exact shape and refuses anything else
+  (`src/sentinel.ts`), and asks for the last four characters of the vault before a setup goes to the wallet.
+  Every transaction the service builds is put to Warden's own reader in `rescue-api.test.ts`. That is why
+  taking a setup away is revokes first and the closing in a transaction of its own: Warden passes a closing
+  only when nothing is beside it.
+- **Rescuing.** `POST /wallets/:address/rescue/now`, or "rescue" as the answer to an alert. Whoever is
+  signed in to the profile may ask: the worst that asking can do is put the owner's tokens in the owner's
+  vault. Not twice in a minute for one wallet. What was moved, and what could not be, is put on record as a
+  `rescued` event and said on the profile's channels.
+- **Unasked.** Off unless the owner switches it on (`POST /rescue/auto`; the channels are told when it is
+  turned). Then an alert that is reason enough on its own (a hard signal that is Urgent by the table, never
+  one the hour raised) is followed by a rescue of that wallet at once. In the validator test a thief takes
+  tokens under a permission, the watcher raises `taken_by_permission`, and what was set up is in the vault
+  before the test looks again.
+- **The watcher beside it.** The owner's own setup is not an alert: for half an hour after it was asked for
+  on the page, approvals to that one address are taken for the setup (an unlimited approval to anyone else
+  is still an alert). Taking it away through the page is noted and is no alarm; Sentinel's permission going
+  from an account at any other time is Urgent, because that is a thief's first move. A rescue this service
+  sent is not called a taking and not said twice. A rescue somebody else started (another of Lamport's
+  rescuer keys, or the key an owner named) is said as one, Urgent, and is no reason for another.
+- **Kept in step.** Every five minutes the setup of every watched wallet is read from the chain, a hundred
+  to a call. A setup made or taken away anywhere, not only on the page, is noticed and the owner told: a
+  setup the owner did not make is a theft being prepared.
+
+The key: `SENTINEL_RESCUER_KEY`, in the service's root-only settings. Without it the service shows and
+builds and cannot move anything. With it, all that key can do to an owner is move the tokens they set up
+into the vault they named, at a time they did not choose. It pays the fee of each rescue and the rent of a
+vault's token account the first time, so it has to hold a little SOL; whoever runs the service is told
+when it runs low, and when the key is not among Lamport's rescuers on the chain.
+
+Where it is: nowhere yet. Rescue is offered by the page only when the rescue program and the Lamport Vault
+program are both on the chain the service reads, and on Solana mainnet neither is. The vault is on devnet
+only, and its own README says not to put real money in it. The rescue program is not deployed anywhere: it
+refuses to build for mainnet until the vault has a mainnet address to pin, and for devnet the deploy key
+(`BgWwL1UVqA8NNMwB68G8t7BuG9a7yR9WApfZrCgy3wBT`) needs about 4 test SOL from https://faucet.solana.com,
+because the devnet faucet no longer answers the command line. No outside firm has audited either program,
+and Lamport holds the key that can change the rescue program; rescue's terms say both.
+
+What rescue does not do: SOL (the rescue program moves tokens only; Warden already knows the shape of a
+pre-signed transfer to the vault, and nothing here makes one), pointing a set-up wallet at another vault
+from the page (the program has it, with a waiting time), and an owner's own rescuer key (the program has
+that too).
 
 ## Not here yet
 
-A process that runs the rescuer, arming on the page, the Pincer1 webhook, and alerts by email. Replaying real wallets' public history to count
+The Pincer1 webhook, and alerts by email. Replaying real wallets' public history to count
 false alerts needs an RPC that allows it (the public one refuses most `getTransaction` calls); a free Helius
 key is enough.

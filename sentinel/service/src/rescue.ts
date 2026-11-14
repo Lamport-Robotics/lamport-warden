@@ -30,6 +30,8 @@ export const MOST_ARMED_AT_ONCE = 40;
 const APPROVALS_PER_TRANSACTION = 6;
 /** How soon after one rescue of a wallet another may be asked for. */
 export const RESCUE_AGAIN_SECONDS = 60;
+/** How many times a rescue is sent in all: once, and once more for whatever the first left behind. */
+export const RESCUE_TRIES = 2;
 /** How long what the owner asked for on the page is taken for theirs by the watcher, while the chain catches up. */
 export const CHANGE_SECONDS = 30 * 60;
 /** What the page is told while rescue cannot work on the chain the service reads. */
@@ -77,6 +79,7 @@ export const rescuedSentence = (moved: number, failed: number, vault: string): s
 
 export class Rescue {
   private last = new Map<string, number>();
+  private busy = new Set<string>();
   private there: { ok: boolean; at: number } | null = null;
   private net: string | null = null;
   constructor(
@@ -260,22 +263,42 @@ export class Rescue {
     if (!this.rescuer) return no(501, "rescue is not switched on here.");
     if (!(await this.available())) return no(501, NOT_ON_CHAIN);
     const now = this.now();
+    // One at a time for a wallet, and not again within a minute of one that went through. One that did not go
+    // through (the chain could not be reached, the program refused) can be asked for again at once: the minute
+    // is there to stop the same rescue being sent twice, not to make an owner wait in an emergency.
+    if (this.busy.has(may.wallet)) return no(429, "a rescue of this wallet is under way.");
     if (now - (this.last.get(may.wallet) ?? -Infinity) < RESCUE_AGAIN_SECONDS) return no(429, "a rescue of this wallet was asked for a moment ago. Give it a minute.");
-    this.last.set(may.wallet, now);
-    let result: Awaited<ReturnType<Rescuer["rescue"]>>;
-    try { result = await this.rescuer.rescue(may.wallet); } catch { return no(502, "the chain could not be reached, so nothing was moved. Try again."); }
-    if (!result.ok) return no(409, result.why);
-    const moved = result.steps.filter((s) => s.ok).reduce((n, s) => n + s.accounts.length, 0);
-    const failed = result.steps.filter((s) => !s.ok).reduce((n, s) => n + s.accounts.length, 0);
-    const signatures = result.steps.flatMap((s) => (s.ok && s.signature ? [s.signature] : []));
-    if (moved + failed > 0) {
-      const sentence = `${by === "sentinel" ? "After the alert before this one, " : ""}${rescuedSentence(moved, failed, result.vault)}`;
-      const event: StoredEvent = { wallet: may.wallet, signature: signatures[0] ?? "", slot: 0, at: now, level: "urgent", signals: ["rescued"], sentence, rescueWorthy: false };
-      this.store.addEvent(event);
-      const sent = await this.opts.notify?.(may.wallet, sentence).catch(() => null) as { delivered?: number } | null | undefined;
-      if (sent && sent.delivered === 0 && event.id) this.store.markUndelivered(event.id);
-    }
-    return { ok: true, vault: result.vault, moved, failed, signatures };
+    this.busy.add(may.wallet);
+    try {
+      const tried = new Set<string>(), signatures: string[] = [];
+      let left = new Set<string>(), vault = "";
+      // A transaction that did not go through is sent once more: each try plans from the chain as it then is,
+      // so the second holds only what the first left behind.
+      for (let attempt = 0; attempt < RESCUE_TRIES; attempt++) {
+        let result: Awaited<ReturnType<Rescuer["rescue"]>>;
+        try { result = await this.rescuer.rescue(may.wallet); } catch { if (attempt === 0) return no(502, "the chain could not be reached, so nothing was moved. Try again."); break; }
+        if (!result.ok) { if (attempt === 0) return no(409, result.why); break; }
+        vault = result.vault;
+        for (const s of result.steps) for (const a of s.accounts) tried.add(a);
+        signatures.push(...result.steps.flatMap((s) => (s.ok && s.signature ? [s.signature] : [])));
+        left = new Set(result.steps.filter((s) => !s.ok).flatMap((s) => s.accounts));
+        if (left.size === 0) break;
+      }
+      this.last.set(may.wallet, now);
+      // What is said to be still in the wallet is what the chain says is: a transaction that was given up on can have landed all the same.
+      if (left.size > 0) {
+        try { const holding = new Set((await holdingsOf(this.rpc, may.wallet)).filter((h) => h.amount > 0n).map((h) => h.address)); for (const a of [...left]) if (!holding.has(a)) left.delete(a); } catch { /* then it is said as the transactions left it */ }
+      }
+      const failed = left.size, moved = tried.size - failed;
+      if (tried.size > 0) {
+        const sentence = `${by === "sentinel" ? "After the alert before this one, " : ""}${rescuedSentence(moved, failed, vault)}`;
+        const event: StoredEvent = { wallet: may.wallet, signature: signatures[0] ?? "", slot: 0, at: now, level: "urgent", signals: ["rescued"], sentence, rescueWorthy: false };
+        this.store.addEvent(event);
+        const sent = await this.opts.notify?.(may.wallet, sentence).catch(() => null) as { delivered?: number } | null | undefined;
+        if (sent && sent.delivered === 0 && event.id) this.store.markUndelivered(event.id);
+      }
+      return { ok: true, vault, moved, failed, signatures };
+    } finally { this.busy.delete(may.wallet); }
   }
 
   /**
