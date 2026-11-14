@@ -101,6 +101,33 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
       expect(await prompt.shown()).toBe(false);
     });
 
+    it("asks once when the wallet's Wallet Standard door hands the request on to its own injected provider", async (ctx) => {
+      // Phantom's Wallet Standard wallet answers a signing call by calling window.phantom.solana, and Warden
+      // stands in front of both. No wallet is set up here, so the provider is told it is connected: its Wallet
+      // Standard code then goes all the way to the provider, as it does for somebody who is signed in.
+      const door = wallet.guarded[0]!;
+      const connected = await page.evaluate((d) => {
+        const p = (window as any).phantom?.solana;
+        if (!p || !("_publicKey" in p) || typeof p.emit !== "function") return false;
+        const address = "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB";
+        p._publicKey = { toBase58: () => address, toString: () => address, toBytes: () => new Uint8Array(32).fill(7) };
+        p.emit("connect", p._publicKey);
+        return (window as any).__app.accounts(d).length === 1;
+      }, door);
+      if (!connected) { ctx.skip(); return; } // a wallet whose provider cannot be told so from the page
+      try {
+        await page.evaluate(([d, t]) => (window as any).__app.start("once", d, "msg", t), [door, text] as const);
+        expect((await prompt.text(6000))?.sentence).toContain("Sign in to the test shop");
+        await prompt.click("Continue to wallet");
+        // the request is on its way to the wallet through its second door: Warden has been answered, and says nothing more
+        await page.waitForTimeout(2500);
+        expect(await prompt.shown()).toBe(false);
+        expect(await page.evaluate(() => (window as any).__results.once)).not.toBe("WardenRejected");
+      } finally {
+        await page.evaluate(() => { const p = (window as any).phantom.solana; p._publicKey = null; p.emit("disconnect"); });
+      }
+    });
+
     it.each(wallet.gap)("known gap: %s goes to the wallet without Warden", async (door) => {
       await page.evaluate(([d, t]) => (window as any).__app.start(d, d, "msg", t), [door, text] as const);
       expect(await prompt.text(2000)).toBeNull(); // when this fails the gap has closed: move the door to `guarded`
