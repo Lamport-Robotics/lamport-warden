@@ -1,5 +1,6 @@
 /** The settings page. Everything is built with textContent: stored addresses and labels are never parsed as HTML. */
 import { DEFAULT_RPC, LAMPORT_DECOYS, PRACTICE_PAGE, SENTINEL_PAGE } from "./defaults.js";
+import { fromBase58 } from "./intercept.js";
 import { LINK_PREFIX, linkFrom } from "./sentinel-link.js";
 import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../sentinel/service/src/plans.js";
 import { KEYS, cleanAddress, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
@@ -36,6 +37,12 @@ async function load() {
   $<HTMLInputElement>("decoyFirst").checked = s.decoyFirst;
   $<HTMLInputElement>("decoyAddress").value = s.decoyAddress;
   $("decoyLamport").hidden = LAMPORT_DECOYS.length === 0;
+  // the marks themselves say nothing a person can read: how many there are is what there is to show
+  const kept = await chrome.storage.local.get(["decoyPassed", "decoyCaught"]);
+  const count = (v: unknown) => (v && typeof v === "object" ? Object.keys(v as object).length : 0);
+  const passed = count(kept.decoyPassed), caught = count(kept.decoyCaught);
+  $("decoySites").hidden = passed + caught === 0;
+  $("decoyCount").textContent = `Kept now: a mark for ${passed} ${passed === 1 ? "site" : "sites"} you went on to use, and for ${caught} that ${caught === 1 ? "was" : "were"} caught.`;
   if (s.decoyFirst && !s.decoyAddress && LAMPORT_DECOYS.length === 0) note("decoyNote", "On, and there is no decoy to show: give its address above. Until then every site is connected as always.", true);
   else if (s.decoyFirst && s.rpcUrl === "") note("decoyNote", "On. The RPC is turned off above, so Warden cannot ask what the decoy holds: a thief is then caught by what it asks for, and not by how much.", true);
 
@@ -162,18 +169,25 @@ $("decoyFirst").addEventListener("change", async () => {
   const on = $<HTMLInputElement>("decoyFirst").checked;
   await chrome.storage.local.set({ decoyFirst: on });
   // off, the record of which sites passed has no use: it is removed
-  if (!on) await chrome.storage.local.remove("decoyPassed");
-  note("decoyNote", on ? "On. A site you have not used is shown the decoy before your wallet." : "Off. Every site is connected to your wallet as always, and the record of which sites passed is removed.");
+  if (!on) await chrome.storage.local.remove(["decoyPassed", "decoyCaught"]);
+  note("decoyNote", on ? "On. A site you have not used is shown the decoy before your wallet." : "Off. Every site is connected to your wallet as always, and the marks of sites that passed or were caught are removed.");
   await load();
 });
 $("saveDecoy").addEventListener("click", async () => {
   const typed = $<HTMLInputElement>("decoyAddress").value.trim();
-  const address = cleanAddress(typed);
+  // an address is 32 bytes: text of the right length that does not decode to that would never be shown to anybody
+  const address = fromBase58(cleanAddress(typed))?.length === 32 ? cleanAddress(typed) : "";
   if (typed !== "" && !address) return note("decoyNote", "That is not an address.", true);
   // the sites that passed were judged against the old decoy: they are shown the new one once
   await chrome.storage.local.set({ decoyAddress: address });
   await chrome.storage.local.remove("decoyPassed");
   note("decoyNote", address ? "Saved." : LAMPORT_DECOYS.length ? "Removed. Sites are shown one of Lamport's decoys." : "Removed. There is no decoy to show.");
+  await load();
+});
+
+$("forgetDecoySites").addEventListener("click", async () => {
+  await chrome.storage.local.remove(["decoyPassed", "decoyCaught"]);
+  note("decoyNote", "Forgotten. Every site is shown the decoy first again.");
   await load();
 });
 

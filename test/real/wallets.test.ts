@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import type { Page } from "playwright";
-import { Prompt, WARDEN, launch, serve, settled, type Browser, type Site } from "../browser/harness.js";
+import { Notice, Prompt, WARDEN, launch, serve, settled, type Browser, type Site } from "../browser/harness.js";
 
 const dir = process.env.WALLETS_DIR || mkdtempSync(join(tmpdir(), "warden-wallets-"));
 
@@ -160,6 +160,10 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
         expect(await settled(fresh, "c", 10_000)).toBe(DECOY.toBase58());
         expect(await fresh.evaluate((d) => (window as any).__app.accounts(d), door)).toEqual([DECOY.toBase58()]);
         expect(browser.ctx.pages().length).toBe(pagesBefore);
+        // and the owner is told so, in a corner of the page, with the way to end it
+        const told = await (await Notice.on(fresh)).text(6000);
+        expect(told?.button).toBe("Use my wallet here");
+        expect(told?.text).toContain("This site is being shown a decoy wallet");
         await fresh.evaluate(([d, t]) => (window as any).__app.start("rob", d, "tx", t), [door, everything] as const);
         const warden = await Prompt.on(fresh);
         const caught = await warden.text(10_000);
@@ -172,7 +176,7 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
         console.log(`${wallet.name} ${version}: decoy shown and robbery caught`);
       } finally {
         await fresh.close();
-        await worker.evaluate(() => chrome.storage.local.remove(["decoyFirst", "decoyAddress", "decoyPassed"]));
+        await worker.evaluate(() => chrome.storage.local.remove(["decoyFirst", "decoyAddress", "decoyPassed", "decoyCaught"]));
       }
     });
 
@@ -185,6 +189,7 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
       await worker.evaluate(([rpcUrl, decoyAddress]) => chrome.storage.local.set({ decoyFirst: true, decoyAddress, rpcUrl }), [`${site.origin}/rpc`, DECOY.toBase58()] as const);
       try {
         for (const door of olderDoors) {
+          await worker.evaluate(() => chrome.storage.local.remove(["decoyPassed", "decoyCaught"]));
           const fresh = await browser.ctx.newPage();
           try {
             await fresh.goto(`${site.origin}/`);
@@ -216,7 +221,7 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
           } finally { await fresh.close(); }
         }
       } finally {
-        await worker.evaluate(() => chrome.storage.local.remove(["decoyFirst", "decoyAddress", "decoyPassed"]));
+        await worker.evaluate(() => chrome.storage.local.remove(["decoyFirst", "decoyAddress", "decoyPassed", "decoyCaught"]));
       }
     });
 

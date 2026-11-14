@@ -13,8 +13,8 @@ import { reportOwnSignature } from "./report.js";
 import { LINK_PREFIX, fromSentinelPage, linkFrom, linkKey, readPageAsk, type PageAnswer } from "./sentinel-link.js";
 import { TableReader, readAccount } from "./rpc.js";
 import { configAddress, vaultOfConfig } from "./sentinel.js";
-import { LAMPORT_DECOYS, PASSED_ON_WORDS, decoyVerdict, judgeDecoy, pickDecoy, readHoldings, type Decoy } from "./decoy.js";
-import type { DecoyAskedReply, DecoyFirstReply } from "./messages.js";
+import { LAMPORT_DECOYS, PASSED_ON_WORDS, PASSED_UNREAD, decoyVerdict, judgeDecoy, pickDecoy, readHoldings, together, type Decoy } from "./decoy.js";
+import type { DecoyAskedReply, DecoyFirstReply, Noted } from "./messages.js";
 import { KEYS, settingsFrom } from "./settings.js";
 import { Simulator } from "./simulate.js";
 import type { JudgeReply, ToBackground, WireRequest } from "./messages.js";
@@ -97,46 +97,92 @@ async function markOf(origin: string): Promise<string> {
   return Array.from(digest.subarray(0, 16), (x) => x.toString(16).padStart(2, "0")).join("");
 }
 /** What a decoy held when it was last asked about, for ten minutes: the RPC is asked about the decoy, never about the owner. */
-const holdings = new Map<string, { at: number; held: Pick<Decoy, "lamports" | "tokens"> | null }>();
-
-/** The decoy this page is to be shown first, or null: a site that already passed, Lamport's own pages, and any page when it is off. */
-async function decoyFor(origin: string, url: string, frameId: number | undefined): Promise<Decoy | null> {
-  if (frameId !== 0) return null;
-  const s = await settings();
-  const web = origin.startsWith("https://") || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-  if (!s.decoyFirst || !web || origin === ARMING_ORIGIN) return null;
-  if (!s.decoyAddress && LAMPORT_DECOYS.length === 0) return null; // nothing to show: no mark of the site is made either
-  const mark = await markOf(origin);
-  const passed = (await chrome.storage.local.get(PASSED))[PASSED];
-  if (passed && typeof passed === "object" && Object.hasOwn(passed as object, mark)) return null;
-  const address = pickDecoy(s.decoyAddress, LAMPORT_DECOYS, mark);
-  if (!address) return null;
+const holdings = new Map<string, { at: number; held: Promise<Pick<Decoy, "lamports" | "tokens"> | null> }>();
+function heldBy(address: string, rpcUrl: string): Promise<Pick<Decoy, "lamports" | "tokens"> | null> {
   const kept = holdings.get(address);
-  if (!kept || Date.now() - kept.at > 600_000) holdings.set(address, { at: Date.now(), held: await readHoldings(address, s.rpcUrl, plainFetch) });
-  return { address, ...(holdings.get(address)!.held ?? {}) };
+  if (kept && Date.now() - kept.at <= 600_000) return kept.held;
+  // (a reading that failed is not kept: the next question asks the RPC again)
+  const held = readHoldings(address, rpcUrl, plainFetch).catch(() => null).then((h) => { if (h === null) holdings.delete(address); return h; });
+  holdings.set(address, { at: Date.now(), held });
+  return held;
 }
 
-/** The page asked the decoy to sign `req`. A site that passes is remembered, and is not shown a decoy again. */
-async function decoyAsked(req: WireRequest, origin: string, url: string, frameId: number | undefined): Promise<DecoyAskedReply> {
-  const decoy = await decoyFor(origin, url, frameId);
-  if (!decoy || req.owner !== decoy.address) return { ok: false };
-  let finding = PASSED_ON_WORDS;
-  if (req.kind === "tx") {
-    const bytes = fromBase64(req.bytes);
-    let tables = {};
-    try { tables = await reader.forMessage(splitTransaction(bytes).messageBytes, (await settings()).rpcUrl); } catch { /* read without them */ }
-    finding = judgeDecoy(bytes, decoy, tables);
+/** Sites that were caught asking a decoy for what only a thief asks: kept like the ones that passed, as marks with the day. */
+const CAUGHT_SITES = "decoyCaught";
+async function marks(list: string): Promise<Record<string, string>> {
+  const stored = (await chrome.storage.local.get(list))[list];
+  return stored && typeof stored === "object" ? { ...(stored as Record<string, string>) } : {};
+}
+/** Adds a site's mark to a list, with today's date. The newest five hundred: a record of sites is not something to keep growing. */
+async function keep(list: string, mark: string): Promise<void> {
+  const all = await marks(list);
+  all[mark] = new Date().toISOString().slice(0, 10);
+  const newest = Object.entries(all).sort((x, y) => (x[1] < y[1] ? 1 : -1)).slice(0, 500);
+  await chrome.storage.local.set({ [list]: Object.fromEntries(newest) });
+}
+
+/**
+ * Where a page stands with the decoy. "none": it is not shown one (the experiment is off, there is no decoy,
+ * it is not a web page's top frame, or it is Lamport's own). "passed": the owner has gone on with their own
+ * wallet on this site before. "decoy": it is shown this one; `caughtOn` is the day it was caught, if it was.
+ */
+type Standing = { kind: "none" } | { kind: "passed" } | { kind: "decoy"; address: string; mark: string; caughtOn: string | null; rpcUrl: string };
+async function standing(origin: string, frameId: number | undefined): Promise<Standing> {
+  if (frameId !== 0) return { kind: "none" };
+  const s = await settings();
+  const web = origin.startsWith("https://") || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+  if (!s.decoyFirst || !web || origin === ARMING_ORIGIN) return { kind: "none" };
+  if (!s.decoyAddress && LAMPORT_DECOYS.length === 0) return { kind: "none" }; // nothing to show: no mark of the site is made either
+  const mark = await markOf(origin);
+  if (Object.hasOwn(await marks(PASSED), mark)) return { kind: "passed" };
+  const address = pickDecoy(s.decoyAddress, LAMPORT_DECOYS, mark);
+  if (!address) return { kind: "none" };
+  const caught = (await marks(CAUGHT_SITES))[mark];
+  return { kind: "decoy", address, mark, caughtOn: typeof caught === "string" ? caught : null, rpcUrl: s.rpcUrl };
+}
+
+/** May this page be shown a decoy, and which? Answered at once: what the decoy holds is read meanwhile, for when it is asked for something. */
+async function decoyFirst(origin: string, frameId: number | undefined): Promise<DecoyFirstReply> {
+  const at = await standing(origin, frameId);
+  if (at.kind !== "decoy") return { address: null };
+  void heldBy(at.address, at.rpcUrl);
+  return { address: at.address, caughtOn: at.caughtOn };
+}
+
+/** How many requests of one call are read. A sweep of many accounts shows what it is in its first few. */
+const MOST_READ = 16;
+
+/**
+ * The page asked the decoy to sign these, in one call. One answer for all of them. Nothing is recorded of a
+ * site that passes here: that waits for the owner to choose to go on ("decoy-passed"). A catch is recorded at
+ * once, because it does not depend on anybody's choice.
+ */
+async function decoyAsked(reqs: WireRequest[], origin: string, frameId: number | undefined): Promise<DecoyAskedReply> {
+  const at = await standing(origin, frameId);
+  if (at.kind === "none") return { ok: false };
+  // the owner has gone on with this site already (in another tab, say): this door follows, with nothing more to ask
+  if (at.kind === "passed") return { ok: true, caught: false, verdict: null };
+  if (reqs.length === 0 || reqs.some((r) => r.owner !== at.address)) return { ok: false };
+  const decoy: Decoy = { address: at.address, ...((await heldBy(at.address, at.rpcUrl)) ?? {}) };
+  const findings = [];
+  for (const req of reqs.slice(0, MOST_READ)) {
+    if (req.kind === "tx") {
+      const bytes = fromBase64(req.bytes);
+      let tables = {};
+      try { tables = await reader.forMessage(splitTransaction(bytes).messageBytes, at.rpcUrl); } catch { /* read without them */ }
+      findings.push(judgeDecoy(bytes, decoy, tables));
+    } else findings.push(req.kind === "opaque" ? PASSED_UNREAD : PASSED_ON_WORDS);
   }
-  if (!finding.caught) {
-    const stored = (await chrome.storage.local.get(PASSED))[PASSED];
-    const passed: Record<string, string> = stored && typeof stored === "object" ? { ...(stored as Record<string, string>) } : {};
-    passed[await markOf(origin)] = new Date().toISOString().slice(0, 10);
-    // the newest five hundred: a record of the sites a wallet has used is not something to keep growing
-    const keep = Object.entries(passed).sort((a, b) => (a[1] < b[1] ? 1 : -1)).slice(0, 500);
-    await chrome.storage.local.set({ [PASSED]: Object.fromEntries(keep) });
-  }
-  const v = decoyVerdict(finding, decoy);
-  return { ok: true, caught: finding.caught, verdict: { level: v.level, sentence: v.sentence, reasons: v.reasons, confirm: undefined } };
+  const finding = together(findings, reqs.length > MOST_READ);
+  if (finding.caught) await keep(CAUGHT_SITES, at.mark);
+  const v = decoyVerdict(finding, decoy, at.caughtOn);
+  return { ok: true, caught: finding.caught, verdict: { level: v.level, sentence: v.sentence, reasons: v.reasons, confirm: v.confirm } };
+}
+
+/** The owner chose to go on with their own wallet on this site: it is not shown a decoy again. */
+async function decoyPassed(origin: string, frameId: number | undefined): Promise<void> {
+  const at = await standing(origin, frameId);
+  if (at.kind === "decoy") await keep(PASSED, at.mark);
 }
 
 /** The Sentinel page asked something. Only that page's top frame is answered. */
@@ -150,7 +196,7 @@ async function sentinelPage(ask: unknown, origin: string, frameId: number | unde
   return { ok: true, type: "hello", version: chrome.runtime.getManifest().version, reporting: settingsFrom(all).reportSigned, linked };
 }
 
-chrome.runtime.onMessage.addListener((message: ToBackground, sender, sendResponse: (r: JudgeReply | PageAnswer | DecoyFirstReply | DecoyAskedReply) => void) => {
+chrome.runtime.onMessage.addListener((message: ToBackground, sender, sendResponse: (r: JudgeReply | PageAnswer | DecoyFirstReply | DecoyAskedReply | Noted) => void) => {
   // only this extension's own content scripts, and the site is the one the browser says the tab is on
   if (sender.id !== chrome.runtime.id || !sender.tab) return false;
   const origin = sender.origin ?? (sender.url ? new URL(sender.url).origin : "");
@@ -160,14 +206,20 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, sendRespons
     return true;
   }
   if (message?.type === "decoy-first") {
-    decoyFor(origin, sender.url ?? "", sender.frameId).then((d) => sendResponse({ address: d ? d.address : null }), () => sendResponse({ address: null }));
+    decoyFirst(origin, sender.frameId).then(sendResponse, () => sendResponse({ address: null }));
+    return true;
+  }
+  if (message?.type === "decoy-passed") {
+    decoyPassed(origin, sender.frameId).then(() => sendResponse({ noted: true }), () => sendResponse({ noted: false }));
+    return true;
+  }
+  if (message?.type === "decoy-asked") {
+    const reqs = Array.isArray(message.reqs) ? message.reqs.filter(valid).slice(0, 32) : [];
+    if (!Array.isArray(message.reqs) || reqs.length !== Math.min(message.reqs.length, 32)) { sendResponse({ ok: false }); return false; }
+    decoyAsked(reqs, origin, sender.frameId).then(sendResponse, () => sendResponse({ ok: false }));
     return true;
   }
   if (!message || !valid(message.req)) return false;
-  if (message.type === "decoy-asked") {
-    decoyAsked(message.req, origin, sender.url ?? "", sender.frameId).then(sendResponse, () => sendResponse({ ok: false }));
-    return true;
-  }
   if (message.type === "judge") {
     judge(decode(message.req), origin, store, sources)
       .then(({ verdict }) => sendResponse({ ok: true, verdict: { level: verdict.level, sentence: verdict.sentence, reasons: verdict.reasons, confirm: verdict.confirm } }))

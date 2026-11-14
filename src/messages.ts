@@ -20,10 +20,18 @@ export type ToBackground =
   | { type: "doors"; unguarded: string[] }
   /** Decoy first: may this page be shown a decoy before the owner's wallet, and which? */
   | { type: "decoy-first" }
-  /** Decoy first: the page asked the decoy (`req.owner`) to sign this. Was that a robbery? */
-  | { type: "decoy-asked"; req: WireRequest };
+  /** Decoy first: the page asked the decoy (their `owner`) to sign these, in one call. Was that a robbery? */
+  | { type: "decoy-asked"; reqs: WireRequest[] }
+  /** Decoy first: the owner chose to go on with their own wallet on this site. It is not shown a decoy again. */
+  | { type: "decoy-passed" };
 
 export type JudgeReply = { ok: true; verdict: WireVerdict } | { ok: false };
-export type DecoyFirstReply = { address: string | null };
-/** `caught`: the site asked the decoy for what only a thief asks. The verdict is what the owner is shown either way. */
-export type DecoyAskedReply = { ok: true; caught: boolean; verdict: WireVerdict } | { ok: false };
+/** The worker has written down what it was told. */
+export type Noted = { noted: boolean };
+/** `caughtOn`: the day this site was caught asking a decoy for what only a thief asks, when it has been. */
+export type DecoyFirstReply = { address: string | null; caughtOn?: string | null };
+/**
+ * `caught`: the site asked the decoy for what only a thief asks. The verdict is what the owner is shown either
+ * way; null when there is nothing to show because this site has passed already (in another tab, say).
+ */
+export type DecoyAskedReply = { ok: true; caught: boolean; verdict: WireVerdict | null } | { ok: false };

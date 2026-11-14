@@ -90,48 +90,69 @@ address a site is handed does not have to be the owner's. With this on, a site W
 a decoy's: an address that holds something and whose key is not in the browser, so that nothing it is asked
 to sign can be signed.
 
-The decoy stands at both of a wallet's doors: its Wallet Standard wallet, and the older object on the window
-(`window.solana.connect()`), which is how the simplest thieving scripts reach a wallet. It answers connect,
-what the wallet says its account is, and the event a site listens for. One page gets one decoy and one
-outcome: caught at one door, it gets nothing more through any; passed at one, the decoy comes down at all.
-A wallet that is already connected to the site, or that answers a connect which asked not to prompt, is left
-as it is: that site has its address already.
-
 A site that robs wallets looks up what the connected address holds and asks it to sign that away. A site
 that does not, waits for its visitor. So what a site asks the decoy for says what the site is, before it has
 seen the owner's address (`src/decoy.ts`):
 
-- it asks the decoy to let somebody spend its tokens, or to hand over an account: caught;
-- it asks the decoy to send out two or more different things at once, and nothing else: caught (a sweep);
-- it asks the decoy to send out nine tenths or more of what it holds of something: caught;
-- anything else: it passes. The owner's own wallet is connected in the decoy's place, the site is told the
-  accounts changed and to ask again, and Warden reads that request like any other.
+- it asks the decoy to hand over an account, or to let somebody spend its tokens without limit, or nearly
+  all of them, or with nothing in the transaction that would use the permission: caught;
+- it asks the decoy to send out most of two or more different things at once, in a transaction that does
+  nothing else: caught (a sweep);
+- it asks the decoy to send out nine tenths or more of what it holds of something, in a transaction that
+  does nothing else: caught;
+- anything else: it passes. The owner is told, and when they go on their own wallet is connected in the
+  decoy's place, the site is told its account changed and to ask again, and Warden reads that request like
+  any other.
+
+"Does nothing else" means it calls only programs whose every instruction Warden reads. What moves into the
+decoy's own accounts (wrapping SOL) is not sent out. Everything asked in one call is judged together.
+
+While a site is being shown the decoy, Warden says so in a corner of the page, with a button: **use my
+wallet here**. A site that has nothing to ask a wallet for straight away (a portfolio page, a swap form that
+first wants a balance) never asks the decoy for anything, and that button is how its visitor goes on.
+
+Where it stands, and what it remembers:
+
+- **Both of a wallet's doors**: its Wallet Standard wallet, and the older object on the window
+  (`window.solana.connect()`), which is how the simplest thieving scripts reach a wallet. It answers connect,
+  what the wallet says its account is, and the event a site listens for. What a provider hands a page is a
+  `PublicKey` of the wallet's own web3.js; `keyLike()` is the decoy's address in that shape.
+- **One page, one decoy, one outcome.** Caught at one door, the page gets nothing more through any; passed
+  at one, the decoy comes down at all.
+- **A wallet the site already knows is left as it is**: one that is already connected, or that answers a
+  connect which asked not to prompt. That site has its address already.
+- **A site the owner went on to use is not shown a decoy again; a site that was caught is remembered.** On a
+  later visit it is shown the decoy again, and going on with it takes typing, not a press.
 
 It is run in Chromium by `test/browser/decoy.test.ts`, on an ordinary site in front of wallets built the way
 Phantom, Solflare and Backpack are, and by `pnpm test:wallets` in front of those extensions themselves.
 
-What it is not, yet:
+What it is not:
 
 - **It only adds a way of being caught.** A thief that recognises a decoy asks it for nothing, passes, and
-  then faces what every site faces: Warden reading each request made of the real wallet. A site that behaves
-  first and robs later is in the same place.
+  then faces what every site faces: Warden reading each request made of the real wallet. So does one that
+  behaves first and robs later, one that adds a call to a program Warden does not read, and one that asks
+  the visitor to sign in before it asks them to connect.
+- **A decoy can be recognised.** It answers at once with no window from the wallet, and the key it hands a
+  page is not the wallet's own kind of object. No list of addresses is needed to tell, so rotating or hiding
+  the addresses would buy nothing. A decoy catches the thief that has not adapted to it.
 - **The decoy has to be a real address that really holds something**, or a thief that looks it up sees an
   empty wallet. There is none in this build: the owner names one in the settings, and it must be an address
-  they have no key to. `LAMPORT_DECOYS` in `src/decoy.ts` is where wallets Lamport funds for this would go;
-  it is empty.
-- **A decoy that can be listed can be recognised.** Whatever addresses a build of Warden carries are public,
-  and a thief that knows them asks them for nothing. Then it is in the first case above. A decoy catches
-  the thief that has not adapted to it.
+  they have no key to. `LAMPORT_DECOYS` in `src/defaults.ts` is where wallets Lamport funds for this would
+  go; it is empty.
+- **It can take an honest request for a robbery.** A site that asks the decoy to send its whole balance of
+  something in a plain transfer (a "max" button) is caught like a thief, and a page that was caught gets
+  nothing more until it is loaded again. The button in the corner is the way round: press it before asking.
+- **The top frame only.** A page inside a frame is connected as always, and a page that was caught can
+  still reach a wallet from inside a frame. Warden reads what is asked there like any other request.
 - **Not at Solflare's older door.** Nothing can be put in front of `window.solflare` (see the table above),
   so a page that calls it directly is connected as always. Its Wallet Standard door is covered.
 - **Phantom, Backpack and Solflare are the wallets it was shaped against.** Another wallet gets a decoy only
   where Warden can also answer for what that wallet says its account is, and none otherwise.
-- **One more press the first time a site is used**, because what the site built was built for the decoy.
-  Whether real sites take the change of account gracefully has been tried in tests and in front of the
-  real wallet extensions. On a real site it has been tried only as far as connecting (Jupiter takes the
-  decoy for the connected wallet); no real site has yet been taken through the change.
-- **It keeps a record it otherwise would not**: a mark for each site that passed, so that a site already in
-  use is not shown a decoy again (see the privacy policy). Off, nothing is kept and no wallet is touched.
+- **It keeps records Warden otherwise would not**: a mark for each site the owner went on to use and for
+  each site that was caught (see the privacy policy). And with it off, Warden still stands in front of each
+  wallet's connect, to ask whether the page has a decoy; the answer is no, and the wallet's own list of
+  accounts is left untouched.
 
 ## How it is put together
 

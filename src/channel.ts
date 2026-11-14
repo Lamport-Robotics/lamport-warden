@@ -30,10 +30,12 @@ export interface Channel {
   done: string;
   /** inpage -> content: {unguarded}: the wallet doors on this page Warden could not get in front of */
   doors: string;
+  /** content -> inpage, no detail: the owner chose, in Warden's notice, to use their own wallet on this site now */
+  own: string;
 }
 
 export function channelFor(secret: string): Channel {
-  return { ack: `lw:${secret}:a`, request: `lw:${secret}:q`, reply: `lw:${secret}:r`, done: `lw:${secret}:d`, doors: `lw:${secret}:o` };
+  return { ack: `lw:${secret}:a`, request: `lw:${secret}:q`, reply: `lw:${secret}:r`, done: `lw:${secret}:d`, doors: `lw:${secret}:o`, own: `lw:${secret}:w` };
 }
 
 export function newSecret(): string {
@@ -48,9 +50,11 @@ export const fromBase64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c
 /**
  * `decoy`: a question about the decoy instead of a request to sign (intercept.ts, DecoyGate). "first": may
  * this page be shown a decoy, and which (kind, bytes and owner are empty). "asked": the site asked the decoy
- * to sign this (owner is the decoy's address).
+ * to sign this (owner is the decoy's address), and `more` are the other requests of the same call.
+ * "showing": a decoy has begun to show on this page (owner is its address). "gone": none shows any more.
+ * The last two are told, not asked: no reply comes.
  */
-export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string; decoy?: "first" | "asked" }
+export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string; decoy?: "first" | "asked" | "showing" | "gone"; more?: { kind: string; bytes: string }[] }
 export interface DoorsMessage { unguarded: string[] }
 /**
  * For a signing request: `ok` lets it through. For "first": `address` is the decoy to show, when there is

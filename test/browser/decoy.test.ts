@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { join } from "node:path";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import type { Page } from "playwright";
-import { Prompt, WALLETS, WARDEN, calls, launch, serve, settled, type Browser, type Site } from "./harness.js";
+import { Notice, Prompt, WALLETS, WARDEN, calls, launch, serve, settled, type Browser, type Site } from "./harness.js";
 
 
 const TOKEN = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -31,7 +31,7 @@ const everything = bytesOf(DECOY,
 
 describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's script first", [WALLETS, WARDEN]]])("a decoy the owner named, on any site (%s)", (_name, order) => {
   let site: Site, browser: Browser;
-  const forget = () => browser.ctx.serviceWorkers().find((w) => w.url().endsWith("/background.js"))!.evaluate(() => chrome.storage.local.remove("decoyPassed"));
+  const forget = () => browser.ctx.serviceWorkers().find((w) => w.url().endsWith("/background.js"))!.evaluate(() => chrome.storage.local.remove(["decoyPassed", "decoyCaught"]));
   const open = async (only: string): Promise<{ page: Page; prompt: Prompt }> => {
     const page = await browser.ctx.newPage();
     await page.goto(`${site.origin}/?only=${only}&fresh=1`);
@@ -69,7 +69,7 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     const caught = await prompt.text(10_000);
     expect(caught?.tag).toBe("Lamport Warden · Blocked");
     expect(caught?.sentence).toBe("This site tried to rob a wallet that is not yours. I showed it a decoy before your own wallet, and it asked the decoy to send out 11.99 SOL, of the 12 SOL it holds and 900 USDC, all it holds.");
-    expect(caught?.all).toContain("Your wallet was never connected to this site, and the site has not seen your address.");
+    expect(caught?.all).toContain("The wallet this site asked was never connected to it: what it was handed is the decoy's address.");
     expect(caught?.all).toContain("Nothing was taken: nobody here holds the decoy's key, so nothing it is asked to sign can be signed.");
     // there is nothing to continue to
     expect(caught?.buttons).toEqual(["Close"]);
@@ -186,6 +186,104 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     expect(await calls(page)).toEqual([`${recorded}.connect`, `${recorded}.signTransaction`]);
     expect(await page.evaluate(() => (window as any).__errors)).toEqual([]);
     await page.close();
+  });
+
+  // ---- what the owner is told while a decoy shows, and what is remembered of a site
+
+  it("says in a corner of the page that a decoy is showing, and connects the owner's wallet when they press its button", async () => {
+    await forget();
+    const door = "standard:FixturePhantom";
+    const { page, prompt } = await open("phantom");
+    const note = await Notice.on(page);
+    expect(await note.shown()).toBe(false);
+    expect(await connect(page, door, "c")).toBe(DECOY.toBase58());
+    const said = await note.text(6000);
+    expect(said).toEqual({ text: `This site is being shown a decoy wallet (${short(DECOY.toBase58())}), not yours. If it asks the decoy for anything, I will tell you what.`, warn: false, button: "Use my wallet here" });
+    // a site with nothing to ask straight away asks the decoy for nothing: the button is how its visitor goes on
+    await note.press();
+    await expect.poll(() => accounts(page, door), { timeout: 8000 }).toEqual([OWNER.toBase58()]);
+    expect(await calls(page)).toEqual([`${door}.connect`]);
+    expect(await note.shown()).toBe(false);
+    expect(await prompt.shown()).toBe(false);
+    // from here Warden reads what the site asks like any other request
+    const SHOP = person(110 + (order[0] === WARDEN ? 0 : 1));
+    await start(page, "pay", door, "tx", pay(OWNER, SHOP, 500_000_000n));
+    expect((await prompt.text(10_000))?.sentence).toContain("0.5 SOL");
+    await prompt.click("Continue to wallet");
+    expect(await settled(page, "pay")).toBe("signed");
+    await page.close();
+    // and the site, gone on with, is not shown a decoy on the next visit
+    const next = await open("phantom");
+    expect(await connect(next.page, door, "c")).toBe(OWNER.toBase58());
+    expect(await (await Notice.on(next.page)).shown()).toBe(false);
+    await next.page.close();
+  });
+
+  it("asks once about everything in one call, and remembers a site only when the owner goes on with it", async () => {
+    await forget();
+    const door = "standard:FixturePhantom";
+    const SHOP = person(120 + (order[0] === WARDEN ? 0 : 1));
+    const two = [pay(DECOY, SHOP, 100_000_000n), pay(DECOY, SHOP, 200_000_000n)];
+    // the owner says no to going on: nothing is remembered of the site
+    const first = await open("phantom");
+    expect(await connect(first.page, door, "c")).toBe(DECOY.toBase58());
+    await start(first.page, "both", door, "all", two);
+    expect((await first.prompt.text(10_000))?.sentence).toContain("what it asked the decoy to sign is not a robbery");
+    await first.prompt.click("Cancel");
+    expect(await settled(first.page, "both")).toBe("WardenRejected");
+    expect(await accounts(first.page, door)).toEqual([DECOY.toBase58()]);
+    expect(await calls(first.page)).toEqual([]);
+    await first.page.close();
+    // so the next visit is shown the decoy again; this time the owner goes on, with one press for the two requests
+    const second = await open("phantom");
+    expect(await connect(second.page, door, "c")).toBe(DECOY.toBase58());
+    await start(second.page, "both", door, "all", two);
+    expect((await second.prompt.text(10_000))?.sentence).toContain("what it asked the decoy to sign is not a robbery");
+    await second.prompt.click("Continue to wallet");
+    expect(await settled(second.page, "both")).toBe("WardenRejected"); // told to ask again
+    await second.page.waitForTimeout(400);
+    expect(await second.prompt.shown()).toBe(false); // one question, not two
+    expect(await calls(second.page)).toEqual([`${door}.connect`]);
+    expect(await accounts(second.page, door)).toEqual([OWNER.toBase58()]);
+    await second.page.close();
+  });
+
+  it("stays caught when a harmless request is asked beside the robbery, and remembers the site: going on with it later takes typing", async () => {
+    await forget();
+    const door = "standard:FixturePhantom";
+    const { page, prompt } = await open("phantom");
+    expect(await connect(page, door, "c")).toBe(DECOY.toBase58());
+    // the drain, and a message in the same breath that would pass on its own
+    await start(page, "rob", door, "tx", everything);
+    await start(page, "words", door, "msg", [1, 2, 3]);
+    expect((await prompt.text(10_000))?.tag).toBe("Lamport Warden · Blocked");
+    await prompt.click("Close");
+    expect(await settled(page, "rob")).toBe("WardenRejected");
+    expect(await settled(page, "words")).toBe("WardenRejected");
+    await page.waitForTimeout(500);
+    expect(await prompt.shown()).toBe(false); // no "this one is all right" after "this is a thief"
+    expect(await connect(page, door, "c2")).toBe("WardenRejected");
+    expect(await calls(page)).toEqual([]);
+    await page.close();
+
+    // the same site again: shown a decoy again, and the owner is told what it did
+    const again = await open("phantom");
+    expect(await connect(again.page, door, "c")).toBe(DECOY.toBase58());
+    const said = await (await Notice.on(again.page)).text(6000);
+    expect(said?.warn).toBe(true);
+    expect(said?.text).toMatch(/^This site tried to rob a decoy wallet on \d{4}-\d{2}-\d{2}\. It is being shown a decoy \(.+\) again, not your wallet\.$/);
+    // this time it asks for something ordinary: that is not gone on with at a press
+    const SHOP = person(130 + (order[0] === WARDEN ? 0 : 1));
+    await start(again.page, "pay", door, "tx", pay(DECOY, SHOP, 500_000_000n));
+    const asked = await again.prompt.text(10_000);
+    expect(asked?.tag).toBe("Lamport Warden · Check this carefully");
+    expect(asked?.sentence).toMatch(/^This site tried to rob a decoy wallet on \d{4}-\d{2}-\d{2}\. This time what it asked the decoy to sign is not a robbery\. Go on only if you are sure of this site: your own wallet is then connected to it\.$/);
+    expect(await again.prompt.canContinue()).toBe(false);
+    await again.prompt.type("I understand");
+    expect(await again.prompt.canContinue()).toBe(true);
+    await again.prompt.click("Cancel");
+    expect(await calls(again.page)).toEqual([]);
+    await again.page.close();
   });
 
   it.each(["FixturePhantom", "FixtureSolflare", "FixtureBackpack"])("shows no decoy to a site %s already trusts: that site has its address already", async (name) => {

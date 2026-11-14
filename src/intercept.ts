@@ -53,16 +53,22 @@ export interface DecoyGate {
   /** Asked once for a page, at the first connect through any door: the decoy's address, or null to connect as always. */
   first(): Promise<string | null>;
   /**
-   * The site asked the decoy to sign this. Resolves true when that caught it: nothing from this page reaches
-   * a wallet again. Resolves false when it passed and the owner chose to go on: their own wallet is then
-   * connected. Rejects when the owner chose not to: everything stays as it is.
+   * The site asked the decoy to sign these, in one call. Resolves true when that caught it: nothing from this
+   * page reaches a wallet again. Resolves false when it passed and the owner chose to go on: their own wallet
+   * is then connected. Rejects when the owner chose not to: everything stays as it is.
    */
-  asked(req: GuardRequest): Promise<boolean>;
+  asked(reqs: GuardRequest[]): Promise<boolean>;
+  /** A decoy has begun to show on this page: the owner is told, and given a way to end it. */
+  showing?(address: string): void;
+  /** No door on this page shows a decoy any more. */
+  gone?(): void;
 }
 /** A door that may be showing a decoy. */
 interface Door {
   /** The site passed at another door: this one takes the decoy down and says what the wallet's own state is. */
   aside(): void;
+  /** Connects the wallet itself in the decoy's place, and tells the site its account is another one now. */
+  takeOver(): Promise<void>;
 }
 /**
  * One page: one decoy and one outcome. Every door of every wallet on the page shows the same decoy or none
@@ -74,34 +80,69 @@ interface DecoyPage {
   first: Promise<string | null> | null;
   caught: boolean;
   passed: boolean;
-  /**
-   * Above zero while a wallet is being connected for real. A wallet's doors call one another (Phantom's and
-   * Backpack's Wallet Standard connect is a call to their injected provider's connect), and a connect that
-   * is already the real thing is not answered with a decoy on its way through.
-   */
-  connecting: number;
-  /** The doors showing a decoy now. */
+  /** The doors showing a decoy now, the first to show it first. */
   showing: Set<Door>;
 }
 const pages = new WeakMap<DecoyGate, DecoyPage>();
 function pageOf(gate: DecoyGate): DecoyPage {
   let page = pages.get(gate);
-  if (!page) { page = { gate, first: null, caught: false, passed: false, connecting: 0, showing: new Set() }; pages.set(gate, page); }
+  if (!page) { page = { gate, first: null, caught: false, passed: false, showing: new Set() }; pages.set(gate, page); }
   return page;
 }
-/** The page's decoy, asked for once. Nobody to ask is no decoy. */
-const firstOf = (page: DecoyPage): Promise<string | null> => (page.first ??= Promise.resolve().then(() => page.gate.first()).catch(() => null));
+/** How long a connect waits to hear whether this page has a decoy. Past it, the page has none: a connect must not hang on Warden. */
+const FIRST_WAIT_MS = 1500;
+/** The page's decoy, asked for once. Nobody to ask, or no answer in time, is no decoy. */
+const firstOf = (page: DecoyPage): Promise<string | null> => (page.first ??= new Promise<string | null>((resolve) => {
+  const timer = setTimeout(() => resolve(null), FIRST_WAIT_MS);
+  (timer as { unref?: () => void }).unref?.();
+  Promise.resolve().then(() => page.gate.first()).then((address) => { clearTimeout(timer); resolve(address); }, () => { clearTimeout(timer); resolve(null); });
+}));
+const said = (tell: () => void) => { try { tell(); } catch { /* telling the owner is a courtesy: the door works without it */ } };
+/** `door` begins to show the decoy. */
+function shows(page: DecoyPage, door: Door, address: string): void {
+  const first = page.showing.size === 0;
+  page.showing.add(door);
+  if (first) said(() => page.gate.showing?.(address));
+}
+/** `door` stops showing the decoy, with nothing decided about the site. */
+function hides(page: DecoyPage, door: Door): void {
+  if (page.showing.delete(door) && page.showing.size === 0) said(() => page.gate.gone?.());
+}
 /** The site passed at `door`: the decoy comes down at every other one. */
 function passedAt(page: DecoyPage, door: Door): void {
   page.passed = true;
   page.showing.delete(door);
   for (const other of [...page.showing]) { try { other.aside(); } catch { /* a door that cannot say so is still no longer showing one */ } }
   page.showing.clear();
+  said(() => page.gate.gone?.());
 }
-/** Connects a wallet for real, and lets its other doors know that is what is going on. */
-async function really<T>(page: DecoyPage, connect: () => T | Promise<T>): Promise<T> {
-  page.connecting += 1;
-  try { return await connect(); } finally { page.connecting -= 1; }
+/**
+ * What the site asked the decoy for, put to the gate as one question. Returns when the site passed and the
+ * owner chose to go on. Throws when it was caught, when the owner chose to stay as they are, and when there
+ * was nothing to ask about (a request to sign nothing is no reason to bring the owner's wallet in).
+ */
+async function askedOfDecoy(page: DecoyPage, address: string, reqs: GuardRequest[]): Promise<void> {
+  if (reqs.length === 0) throw new WardenRejected();
+  let caught: boolean;
+  try { caught = await page.gate.asked(reqs.map((r) => ({ ...r, owner: address }))); } catch { throw new WardenRejected(); }
+  // (read afresh: the page may have been caught at another door, or by another request, while this one waited)
+  if (caught || page.caught) {
+    page.caught = true;
+    if (page.showing.size) { page.showing.clear(); said(() => page.gate.gone?.()); }
+    throw new WardenRejected(CAUGHT);
+  }
+}
+/**
+ * The owner chose, in Warden's own notice, to use their wallet on this site now. The door that first showed
+ * the decoy connects the wallet itself; the decoy comes down at the others.
+ */
+export function useOwnWallet(gate: DecoyGate): void {
+  const page = pages.get(gate);
+  if (!page || page.caught || page.passed) return;
+  const [door] = page.showing;
+  if (!door) return;
+  passedAt(page, door);
+  void door.takeOver().catch(() => undefined);
 }
 
 /** Where one Wallet Standard wallet stands on this page. */
@@ -396,6 +437,18 @@ function standardDoor(gate: DecoyGate, wallet: any, front: (state: DecoyState) =
     page: pageOf(gate), state, wallet,
     front: () => (fronted ??= front(state)),
     aside: () => { if (state.phase !== "decoy") return; state.phase = "real"; state.account = null; announce(state, accountsOf(wallet)); },
+    takeOver: async () => {
+      if (state.phase !== "decoy") return;
+      state.phase = "real";
+      state.account = null;
+      try {
+        const out = await state.connect!();
+        announce(state, out?.accounts ?? accountsOf(wallet));
+      } catch {
+        // the owner said no to their own wallet: nothing is connected, and the site hears that too
+        announce(state, accountsOf(wallet));
+      }
+    },
   };
 }
 
@@ -409,25 +462,9 @@ async function viaDecoy<T>(d: DecoyCtx | undefined, reqs: GuardRequest[], run: (
   const s = d.state, page = d.page;
   if (page.caught) throw new WardenRejected(CAUGHT);
   if (s.phase !== "decoy") return run();
-  const address = s.account!.address;
-  for (const r of reqs) {
-    let caught: boolean;
-    try { caught = await page.gate.asked({ ...r, owner: address }); } catch { throw new WardenRejected(); }
-    if (caught) { page.caught = true; throw new WardenRejected(CAUGHT); }
-  }
+  await askedOfDecoy(page, s.account!.address, reqs);
   // (two requests may have waited on the one answer: the first through does the rest)
-  if ((s.phase as DecoyState["phase"]) === "decoy") {
-    passedAt(page, d);
-    s.phase = "real";
-    s.account = null;
-    try {
-      const out = await really(page, () => s.connect!());
-      announce(s, out?.accounts ?? accountsOf(d.wallet));
-    } catch {
-      // the owner said no to their own wallet: nothing is connected, and the site hears that too
-      announce(s, accountsOf(d.wallet));
-    }
-  }
+  if ((s.phase as DecoyState["phase"]) === "decoy") { passedAt(page, d); await d.takeOver(); }
   throw new WardenRejected(AGAIN);
 }
 
@@ -441,22 +478,23 @@ function decoyConnect(feature: any, d: DecoyCtx): any {
   const fn = async (...inputs: any[]) => {
     if (page.caught) throw new WardenRejected(CAUGHT);
     if (s.phase === "new") {
-      if (inputs[0]?.silent === true) {
-        // Asked not to prompt. Only a wallet that already trusts this site answers with an account, and a
-        // site the wallet has told its address before has nothing to learn from a decoy.
-        const out = await really(page, () => original.apply(feature, inputs));
+      // Asked not to prompt, on a page that is not being shown a decoy: only a wallet that already trusts this
+      // site answers with an account, and a site the wallet has told its address before has nothing to learn
+      // from a decoy. (While another door shows the decoy, this one answers with it too: one page, one decoy.)
+      if (inputs[0]?.silent === true && page.showing.size === 0) {
+        const out = await original.apply(feature, inputs);
         if (s.phase === "new" && Array.isArray(out?.accounts) && out.accounts.length > 0) s.phase = "real";
         return out;
       }
-      // no decoy once the site has passed, while a wallet is being connected for real, or for a wallet this site is already connected to
-      if (page.passed || page.connecting > 0 || connected()) s.phase = "real";
+      // no decoy once the site has passed, or for a wallet this site is already connected to
+      if (page.passed || connected()) s.phase = "real";
       else {
         const address = await firstOf(page);
         const key = address ? fromBase58(address) : null;
         // (asked twice at once, the first answer stands; and the page may have been caught or passed meanwhile)
         // A decoy only when the wallet's list of accounts can be answered for too: a site must not see one address from connect and another in the list.
         if (s.phase === "new") {
-          if (!page.passed && !page.caught && address && key && key.length === 32 && d.front()) { s.account = decoyAccount(address, key, d.wallet); s.phase = "decoy"; page.showing.add(d); }
+          if (!page.passed && !page.caught && address && key && key.length === 32 && d.front()) { s.account = decoyAccount(address, key, d.wallet); s.phase = "decoy"; shows(page, d, address); }
           else s.phase = "real";
         }
       }
@@ -464,7 +502,7 @@ function decoyConnect(feature: any, d: DecoyCtx): any {
     if (page.caught) throw new WardenRejected(CAUGHT);
     // (read afresh: another call may have moved it on while this one was waiting)
     if ((s.phase as DecoyState["phase"]) === "decoy") return { accounts: [s.account] };
-    return really(page, () => original.apply(feature, inputs));
+    return original.apply(feature, inputs);
   };
   ours.add(fn);
   const out = { ...feature, connect: fn };
@@ -480,7 +518,7 @@ function decoyDisconnect(feature: any, d: DecoyCtx): any {
     if (s.phase !== "decoy") return original.apply(feature, inputs);
     s.phase = "new";
     s.account = null;
-    d.page.showing.delete(d);
+    hides(d.page, d);
     announce(s, accountsOf(d.wallet));
   };
   ours.add(fn);
@@ -833,8 +871,8 @@ interface LegacyDoor extends Door {
   /** The decoy as the provider's `publicKey`. */
   key: any | null;
   provider: any;
-  /** Connects the wallet itself, the way the page last asked it to. */
-  connect: (() => Promise<any>) | null;
+  /** Connects the wallet itself: the provider's own connect, as it stood when Warden met it. */
+  connect: () => Promise<any>;
   /** Puts Warden in front of `publicKey` and `isConnected`, when a decoy is first to be shown and not before. */
   front: () => boolean;
   /**
@@ -867,10 +905,27 @@ function legacyDoor(gate: DecoyGate, provider: any, front: (door: LegacyDoor) =>
   // the wallet's own too. A page's scripts run later.
   try { void Promise.resolve().then(note); } catch { /* what was there when Warden met it is all that is known */ }
   let fronted: boolean | undefined;
+  const connect: AnyFn = provider.connect;
   const door: LegacyDoor = {
-    page: pageOf(gate), phase: "new", address: "", key: null, provider, connect: null, own,
+    page: pageOf(gate), phase: "new", address: "", key: null, provider, own,
+    connect: () => Promise.resolve(connect.call(provider)),
     front: () => (fronted ??= front(door)),
     aside: () => { if (door.phase !== "decoy") return; door.phase = "real"; door.key = null; tellPage(door, "disconnect"); },
+    takeOver: async () => {
+      if (door.phase !== "decoy") return;
+      door.phase = "real";
+      door.key = null;
+      try {
+        await door.connect();
+        // the wallet tells its listeners it is connected; a site that was holding the decoy also needs to hear that the account is another one
+        let key: unknown = null;
+        try { key = provider.publicKey; } catch { /* nothing to tell */ }
+        if (key != null) tellPage(door, "accountChanged", accountEvent(provider, key));
+      } catch {
+        // the owner said no to their own wallet: nothing is connected, and the site hears that too
+        tellPage(door, "disconnect");
+      }
+    },
   };
   legacyDoors.set(provider, door);
   return door;
@@ -952,21 +1007,23 @@ async function legacyConnect(door: LegacyDoor, opts: any, real: () => Promise<an
   const page = door.page;
   if (page.caught) throw new WardenRejected(CAUGHT);
   if (door.phase === "new") {
-    if (opts?.onlyIfTrusted === true) {
-      // Asked not to prompt. A wallet that does not already trust this site refuses, and a site the wallet has
-      // told its address before has nothing to learn from a decoy.
-      const out = await really(page, real);
+    // Asked not to prompt, on a page that is not being shown a decoy: a wallet that does not already trust
+    // this site refuses, and a site the wallet has told its address before has nothing to learn from a decoy.
+    // (While another door shows the decoy, this one answers with it too: one page, one decoy.)
+    if (opts?.onlyIfTrusted === true && page.showing.size === 0) {
+      const out = await real();
       if (door.phase === "new") door.phase = "real";
       return out;
     }
     let connected = false;
     try { connected = door.provider.publicKey != null && door.provider.isConnected !== false; } catch { /* not readable: not connected */ }
-    if (page.passed || page.connecting > 0 || connected) door.phase = "real";
+    // no decoy once the site has passed, or at a provider this site is already connected to
+    if (page.passed || connected) door.phase = "real";
     else {
       const address = await firstOf(page);
       const bytes = address ? fromBase58(address) : null;
       if (door.phase === "new") {
-        if (!page.passed && !page.caught && address && bytes && bytes.length === 32 && door.front()) { door.address = address; door.key = keyLike(bytes, address); door.phase = "decoy"; page.showing.add(door); }
+        if (!page.passed && !page.caught && address && bytes && bytes.length === 32 && door.front()) { door.address = address; door.key = keyLike(bytes, address); door.phase = "decoy"; shows(page, door, address); }
         else door.phase = "real";
       }
     }
@@ -977,7 +1034,7 @@ async function legacyConnect(door: LegacyDoor, opts: any, real: () => Promise<an
     if (opts?.onlyIfTrusted !== true) tellPage(door, "connect", accountEvent(door.provider, door.key));
     return { publicKey: door.key };
   }
-  return really(page, real);
+  return real();
 }
 
 /** A site that lets go of the decoy lets go of the decoy. The wallet itself was never connected. */
@@ -985,7 +1042,7 @@ async function legacyDisconnect(door: LegacyDoor, real: () => Promise<any>): Pro
   if (door.phase !== "decoy") return real();
   door.phase = "new";
   door.key = null;
-  door.page.showing.delete(door);
+  hides(door.page, door);
   tellPage(door, "disconnect");
 }
 
@@ -995,27 +1052,8 @@ async function viaLegacy<T>(door: LegacyDoor | undefined, reqs: GuardRequest[], 
   const page = door.page;
   if (page.caught) throw new WardenRejected(CAUGHT);
   if (door.phase !== "decoy") return run();
-  const address = door.address;
-  for (const r of reqs) {
-    let caught: boolean;
-    try { caught = await page.gate.asked({ ...r, owner: address }); } catch { throw new WardenRejected(); }
-    if (caught) { page.caught = true; throw new WardenRejected(CAUGHT); }
-  }
-  if ((door.phase as LegacyDoor["phase"]) === "decoy") {
-    passedAt(page, door);
-    door.phase = "real";
-    door.key = null;
-    try {
-      await really(page, () => door.connect!());
-      // the wallet tells its listeners it is connected; a site that was holding the decoy also needs to hear that the account is another one
-      let key: unknown = null;
-      try { key = door.provider.publicKey; } catch { /* nothing to tell */ }
-      if (key != null) tellPage(door, "accountChanged", accountEvent(door.provider, key));
-    } catch {
-      // the owner said no to their own wallet: nothing is connected, and the site hears that too
-      tellPage(door, "disconnect");
-    }
-  }
+  await askedOfDecoy(page, door.address, reqs);
+  if ((door.phase as LegacyDoor["phase"]) === "decoy") { passedAt(page, door); await door.takeOver(); }
   throw new WardenRejected(AGAIN);
 }
 
@@ -1023,8 +1061,12 @@ async function viaLegacy<T>(door: LegacyDoor | undefined, reqs: GuardRequest[], 
 function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => any): AnyFn | null {
   const run = (that: any, args: any[]) => original.apply(that, args);
   const owner = (that: any) => ownerOf(self() ?? that);
-  /** The door a call came through: the provider it was called on, or the one the method was taken from when it was called on nothing. */
-  const doorOf = (that: any): LegacyDoor | undefined => legacyDoors.get(that && typeof that === "object" ? that : self());
+  /**
+   * The door a call came through: the provider it was called on, and when it was called on anything else, the
+   * provider the method was taken from. Phantom's methods are arrow functions and run on whatever they are
+   * called on, so `connect.call({})` is a call to Phantom all the same.
+   */
+  const doorOf = (that: any): LegacyDoor | undefined => (that && typeof that === "object" ? legacyDoors.get(that) : undefined) ?? legacyDoors.get(self());
   switch (name) {
     case "signTransaction":
     case "signAndSendTransaction":
@@ -1054,7 +1096,6 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
         const door = doorOf(this);
         const method = arg && typeof arg === "object" && typeof arg.method === "string" ? arg.method : "";
         if (door && method === "connect") {
-          door.connect ??= () => Promise.resolve(run(this, [{ method: "connect" }]));
           return legacyConnect(door, arg.params, () => Promise.resolve(run(this, [arg, ...rest])));
         }
         if (door && method === "disconnect") return legacyDisconnect(door, () => Promise.resolve(run(this, [arg, ...rest])));
@@ -1065,7 +1106,6 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
       return function (this: any, ...args: any[]) {
         const door = doorOf(this);
         if (!door) return run(this, args);
-        door.connect ??= () => Promise.resolve(run(this, []));
         return legacyConnect(door, args[0], () => Promise.resolve(run(this, args)));
       };
     case "disconnect":

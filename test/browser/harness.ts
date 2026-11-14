@@ -187,6 +187,51 @@ export class Prompt {
   }
 }
 
+/** Warden's notice in the corner of a page (overlay.ts, `notice`), read and pressed the way the prompt is. */
+export class Notice {
+  private constructor(private page: Page, private cdp: CDPSession) {}
+  static async on(page: Page): Promise<Notice> { return new Notice(page, await page.context().newCDPSession(page)); }
+
+  private async card(): Promise<Node | null> {
+    const { root } = (await this.cdp.send("DOM.getDocument", { depth: -1, pierce: true })) as { root: Node };
+    let found: Node | null = null;
+    const walk = (n: Node, inShadow: boolean) => {
+      if (inShadow && n.nodeName === "DIV" && attr(n, "class") === "note") found = n;
+      for (const c of n.children ?? []) walk(c, inShadow);
+      for (const s of n.shadowRoots ?? []) walk(s, true);
+    };
+    walk(root, false);
+    return found;
+  }
+
+  /** Waits for the notice and returns what it says, or null when none came up in time. */
+  async text(timeoutMs = 4000): Promise<{ text: string; warn: boolean; button: string } | null> {
+    const until = Date.now() + timeoutMs;
+    for (;;) {
+      const card = await this.card();
+      if (card) {
+        const tag = find(card, (n) => (attr(n, "class") ?? "").split(" ").includes("tag"))[0];
+        return { text: texts(find(card, (n) => n.nodeName === "P")[0]).join(""), warn: (attr(tag ?? card, "class") ?? "").split(" ").includes("warn"), button: texts(find(card, (n) => n.nodeName === "BUTTON")[0]).join("") };
+      }
+      if (Date.now() > until) return null;
+      await this.page.waitForTimeout(100);
+    }
+  }
+
+  async shown(): Promise<boolean> { return (await this.card()) !== null; }
+
+  /** Presses the notice's button with the mouse, after the moment the browser takes to report it visible. */
+  async press(): Promise<void> {
+    await this.page.waitForTimeout(750);
+    const card = await this.card();
+    const button = card && find(card, (n) => n.nodeName === "BUTTON")[0];
+    if (!button) throw new Error("there is no notice to press");
+    const { model } = (await this.cdp.send("DOM.getBoxModel", { backendNodeId: button.backendNodeId })) as { model: { content: number[] } };
+    const [x1, y1, , , x3, y3] = model.content as [number, number, number, number, number, number];
+    await this.page.mouse.click((x1 + x3) / 2, (y1 + y3) / 2);
+  }
+}
+
 /** The colour of a 1 x 1 PNG. */
 function onePixel(png: Buffer): [number, number, number] {
   let at = 8, data = Buffer.alloc(0);

@@ -8,8 +8,8 @@ import "../src/polyfill.js";
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { LAMPORT_DECOYS, decoyVerdict, judgeDecoy, pickDecoy, readHoldings, type Decoy } from "../src/decoy.js";
-import { WardenRejected, installLegacyHook, installStandardHook, keyLike, patchStandardWalletInPlace, wrapStandardWallet, type DecoyGate, type Guard, type GuardRequest } from "../src/intercept.js";
+import { LAMPORT_DECOYS, PASSED_ON_WORDS, decoyVerdict, judgeDecoy, pickDecoy, readHoldings, together, type Decoy } from "../src/decoy.js";
+import { WardenRejected, installLegacyHook, installStandardHook, keyLike, patchStandardWalletInPlace, useOwnWallet, wrapStandardWallet, type DecoyGate, type Guard, type GuardRequest } from "../src/intercept.js";
 import { cleanAddress, settingsFrom } from "../src/settings.js";
 import type { FetchLike } from "../src/rpc.js";
 
@@ -40,12 +40,12 @@ const everything = (victim: PublicKey) => tx(victim, sol(victim, THIEF, 309_990_
 describe("what a site asks a decoy for says what the site is", () => {
   it("catches the site that asks for everything, and says what it asked for", () => {
     const found = judgeDecoy(everything(DECOY), BAIT);
-    expect(found).toEqual({ caught: true, asked: ["send out 309.99 SOL, of the 310 SOL it holds and 40,000 USDC, all it holds"], to: null });
+    expect(found).toEqual({ caught: true, asked: ["send out 309.99 SOL, of the 310 SOL it holds and 40,000 USDC, all it holds"], to: null, unread: false });
     const v = decoyVerdict(found, BAIT);
     expect(v.level).toBe("block");
     expect(v.sentence).toBe("This site tried to rob a wallet that is not yours. I showed it a decoy before your own wallet, and it asked the decoy to send out 309.99 SOL, of the 310 SOL it holds and 40,000 USDC, all it holds.");
     expect(v.reasons).toEqual([
-      "your wallet was never connected to this site, and the site has not seen your address.",
+      "the wallet this site asked was never connected to it: what it was handed is the decoy's address.",
       "nothing was taken: nobody here holds the decoy's key, so nothing it is asked to sign can be signed.",
       "I will pass nothing from this page to your wallet. Close it.",
     ]);
@@ -54,23 +54,24 @@ describe("what a site asks a decoy for says what the site is", () => {
   it("catches nearly all of one thing, a sweep of several, and any handing over of power", () => {
     const caught = (bytes: Uint8Array, decoy: Decoy = BAIT) => judgeDecoy(bytes, decoy);
     // nearly all the SOL, to one address: the amount is the balance, which no visitor chose
-    expect(caught(tx(DECOY, sol(DECOY, THIEF, 300_000_000_000n)))).toEqual({ caught: true, asked: ["send out 300 SOL, of the 310 SOL it holds"], to: THIEF.toBase58() });
+    expect(caught(tx(DECOY, sol(DECOY, THIEF, 300_000_000_000n)))).toEqual({ caught: true, asked: ["send out 300 SOL, of the 310 SOL it holds"], to: THIEF.toBase58(), unread: false });
     // all of a token
     expect(caught(tx(DECOY, usdc(DECOY, THIEF, 40_000_000_000n)))).toMatchObject({ caught: true, asked: ["send out 40,000 USDC, all it holds"] });
-    // Two different things at once and nothing else is a sweep, whatever the amounts, and whether or not
-    // anything is known of what the decoy holds.
+    // Most of two different things at once and nothing else is a sweep, though neither is nearly all
+    expect(caught(tx(DECOY, sol(DECOY, THIEF, 200_000_000_000n), usdc(DECOY, THIEF, 25_000_000_000n)))).toEqual({ caught: true, asked: ["send out 200 SOL and 25,000 USDC"], to: null, unread: false });
+    // and with nothing known of what the decoy holds, two different things at once and nothing else is one too
     const bare: Decoy = { address: BAIT.address };
-    expect(caught(tx(DECOY, sol(DECOY, THIEF, 1_000_000_000n), usdc(DECOY, THIEF, 5_000_000n)), bare)).toEqual({ caught: true, asked: ["send out 1 SOL and 5 USDC"], to: null });
+    expect(caught(tx(DECOY, sol(DECOY, THIEF, 1_000_000_000n), usdc(DECOY, THIEF, 5_000_000n)), bare)).toEqual({ caught: true, asked: ["send out 1 SOL and 5 USDC"], to: null, unread: false });
     // letting somebody spend, and handing an account over: caught with nothing sent at all
-    expect(caught(tx(DECOY, approve(DECOY, THIEF, 0xffff_ffff_ffff_ffffn)), bare)).toEqual({ caught: true, asked: [`let ${short(THIEF.toBase58())} spend its tokens, without limit`], to: THIEF.toBase58() });
+    expect(caught(tx(DECOY, approve(DECOY, THIEF, 0xffff_ffff_ffff_ffffn)), bare)).toEqual({ caught: true, asked: [`let ${short(THIEF.toBase58())} spend its tokens, without limit`], to: THIEF.toBase58(), unread: false });
     expect(caught(tx(DECOY, approve(DECOY, THIEF, 5n)), bare).asked).toEqual([`let ${short(THIEF.toBase58())} spend its tokens`]);
-    expect(caught(tx(DECOY, setAuthority(DECOY, THIEF)), bare)).toEqual({ caught: true, asked: [`hand ${short(THIEF.toBase58())} control of one of its token accounts`], to: THIEF.toBase58() });
+    expect(caught(tx(DECOY, setAuthority(DECOY, THIEF)), bare)).toEqual({ caught: true, asked: [`hand ${short(THIEF.toBase58())} control of one of its token accounts`], to: THIEF.toBase58(), unread: false });
     const both = decoyVerdict(caught(tx(DECOY, approve(DECOY, THIEF, 0xffff_ffff_ffff_ffffn), sol(DECOY, THIEF, 309_000_000_000n))), BAIT);
     expect(both.sentence).toBe(`This site tried to rob a wallet that is not yours. I showed it a decoy before your own wallet, and it asked the decoy to let ${short(THIEF.toBase58())} spend its tokens, without limit, and send out 309 SOL, of the 310 SOL it holds, to ${short(THIEF.toBase58())}.`);
   });
 
   it("lets an ordinary site pass: a payment somebody chose, a swap, and anything that is not a request of the decoy", () => {
-    const passed = { caught: false, asked: [], to: null };
+    const passed = { caught: false, asked: [], to: null, unread: false }, unread = { ...passed, unread: true };
     // a shop asking for half a SOL, of 310
     expect(judgeDecoy(tx(DECOY, sol(DECOY, SHOP, 500_000_000n)), BAIT)).toEqual(passed);
     // 25 USDC of 40,000
@@ -80,11 +81,11 @@ describe("what a site asks a decoy for says what the site is", () => {
     // A program Warden does not read in the transaction: a swap looks like this, and so could a thief's own
     // program. The decoy does not settle it; the site passes, and Warden reads what it asks of the real wallet.
     const swap = new TransactionInstruction({ programId: key(77), keys: [{ pubkey: DECOY, isSigner: true, isWritable: true }], data: Buffer.from([1, 2, 3]) });
-    expect(judgeDecoy(tx(DECOY, sol(DECOY, key(78), 309_000_000_000n), swap), BAIT)).toEqual(passed);
+    expect(judgeDecoy(tx(DECOY, sol(DECOY, key(78), 309_000_000_000n), swap), BAIT)).toEqual(unread);
     // a transaction somebody else signs asks nothing of the decoy
     expect(judgeDecoy(everything(key(5)), BAIT)).toEqual(passed);
     // and bytes that are no transaction at all
-    expect(judgeDecoy(Uint8Array.from([1, 2, 3]), BAIT)).toEqual(passed);
+    expect(judgeDecoy(Uint8Array.from([1, 2, 3]), BAIT)).toEqual(unread);
     const v = decoyVerdict(passed, BAIT);
     expect(v).toEqual({ level: "explain", sentence: `I showed this site a decoy wallet (${short(BAIT.address)}) before yours, and what it asked the decoy to sign is not a robbery. Continue to connect your own wallet; the site will then ask again, and I will read that request like any other.`, reasons: [] });
   });
@@ -155,14 +156,18 @@ function meet(wallet: object, guard: Guard, gate: DecoyGate): any {
   win.dispatchEvent(new CustomEvent("wallet-standard:app-ready", { detail: api }));
   return registered[0];
 }
-function gateOf(first: string | null | Error, verdict: "caught" | "pass" | "declined" = "caught") {
+function gateOf(first: string | null | Error | Promise<string | null>, verdict: "caught" | "pass" | "declined" | ((reqs: GuardRequest[]) => boolean) = "caught") {
   const asked: GuardRequest[] = [];
-  let firsts = 0;
+  /** What the owner's notice was told, in order. */
+  const told: string[] = [];
+  let firsts = 0, calls = 0;
   const gate: DecoyGate = {
     first: async () => { firsts += 1; if (first instanceof Error) throw first; return first; },
-    asked: async (r) => { asked.push(r); if (verdict === "declined") throw new WardenRejected(); return verdict === "caught"; },
+    asked: async (reqs) => { calls += 1; asked.push(...reqs); if (verdict === "declined") throw new WardenRejected(); return typeof verdict === "function" ? verdict(reqs) : verdict === "caught"; },
+    showing: (address) => { told.push(`showing ${address}`); },
+    gone: () => { told.push("gone"); },
   };
-  return { gate, asked, firsts: () => firsts };
+  return { gate, asked, told, firsts: () => firsts, questions: () => calls };
 }
 const guardOf = () => { const asked: GuardRequest[] = []; const guard: Guard = async (r) => { asked.push(r); return { done() {} }; }; return { guard, asked }; };
 const BYTES = everything(DECOY);
@@ -679,3 +684,218 @@ describe("which decoy a site is shown", () => {
     expect(new Set(LAMPORT_DECOYS).size).toBe(LAMPORT_DECOYS.length);
   });
 });
+
+// ---- what an independent review of this found, each held here
+
+describe("the rule, where it was too quick and where it was too slow", () => {
+  const WSOL = new PublicKey("So11111111111111111111111111111111111111112");
+  const small: Decoy = { address: BAIT.address, lamports: 200_000_000n, tokens: [{ mint: USDC.toBase58(), account: ata(DECOY).toBase58(), amount: 50_000_000n, decimals: 6 }] };
+  const program = (n: number) => new TransactionInstruction({ programId: key(n), keys: [{ pubkey: DECOY, isSigner: true, isWritable: true }], data: Buffer.from([1, 2, 3]) });
+  const closes = (account: PublicKey, to: PublicKey) => new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: account, isSigner: false, isWritable: true }, { pubkey: to, isSigner: false, isWritable: true }, { pubkey: DECOY, isSigner: true, isWritable: false }], data: Buffer.from([9]) });
+
+  it("does not take an ordinary request for a robbery", () => {
+    // a payment with a small fee beside it: two kinds of thing, and a small part of each
+    expect(judgeDecoy(tx(DECOY, usdc(DECOY, SHOP, 10_000_000n), sol(DECOY, SHOP, 1_000_000n)), small).caught).toBe(false);
+    // an older exchange or a bridge: permission for the amount it is about to use, and the call that uses it
+    expect(judgeDecoy(tx(DECOY, approve(DECOY, key(60), 10_000_000n), program(61)), small).caught).toBe(false);
+    // wrapping SOL: it goes into the decoy's own wrapped-SOL account, which is not leaving
+    const wrapped = ata(DECOY, WSOL);
+    expect(judgeDecoy(tx(DECOY, sol(DECOY, wrapped, 190_000_000n)), small)).toEqual({ caught: false, asked: [], to: null, unread: false });
+    // and a move between the decoy's own token accounts
+    const second = key(62);
+    const twice: Decoy = { ...small, tokens: [...small.tokens!, { mint: USDC.toBase58(), account: second.toBase58(), amount: 1n, decimals: 6 }] };
+    const move = new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: ata(DECOY), isSigner: false, isWritable: true }, { pubkey: USDC, isSigner: false, isWritable: false }, { pubkey: second, isSigner: false, isWritable: true }, { pubkey: DECOY, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([12]), u64(50_000_000n), Buffer.from([6])]) });
+    expect(judgeDecoy(tx(DECOY, move), twice).caught).toBe(false);
+  });
+
+  it("still catches what only a thief asks, in the forms that were getting past", () => {
+    // all of a token, with one unit of something sent the decoy's way to look like a trade
+    const bait = new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: ata(THIEF), isSigner: false, isWritable: true }, { pubkey: USDC, isSigner: false, isWritable: false }, { pubkey: ata(DECOY), isSigner: false, isWritable: true }, { pubkey: THIEF, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([12]), u64(1n), Buffer.from([6])]) });
+    expect(judgeDecoy(tx(DECOY, usdc(DECOY, THIEF, 50_000_000n), bait), small)).toMatchObject({ caught: true, asked: ["send out 50 USDC, all it holds"] });
+    // closing the decoy's wrapped-SOL account pays out all that is in it, to the thief
+    const wsol = ata(DECOY, WSOL);
+    const holdsWrapped: Decoy = { ...small, tokens: [...small.tokens!, { mint: WSOL.toBase58(), account: wsol.toBase58(), amount: 3_000_000_000n, decimals: 9 }] };
+    expect(judgeDecoy(tx(DECOY, closes(wsol, THIEF)), holdsWrapped)).toEqual({ caught: true, asked: ["send out 3 SOL of wrapped SOL, all it holds"], to: THIEF.toBase58(), unread: false });
+    // (closed to the decoy itself, that is unwrapping)
+    expect(judgeDecoy(tx(DECOY, closes(wsol, DECOY)), holdsWrapped).caught).toBe(false);
+    // a permission that nothing in the transaction uses, for all there is, or without limit, whatever else is called
+    expect(judgeDecoy(tx(DECOY, approve(DECOY, THIEF, 10_000_000n)), small).asked).toEqual([`let ${short(THIEF.toBase58())} spend its tokens`]);
+    expect(judgeDecoy(tx(DECOY, approve(DECOY, THIEF, 50_000_000n), program(61)), small).asked).toEqual([`let ${short(THIEF.toBase58())} spend its tokens, all it holds`]);
+    expect(judgeDecoy(tx(DECOY, approve(DECOY, THIEF, 0xffff_ffff_ffff_ffffn), program(61)), small).asked).toEqual([`let ${short(THIEF.toBase58())} spend its tokens, without limit`]);
+    // a balance somebody chose to send in full is caught too: the decoy cannot tell a max button from a thief
+    expect(judgeDecoy(tx(DECOY, usdc(DECOY, SHOP, 50_000_000n)), small).caught).toBe(true);
+  });
+
+  it("says only what it read: a pass on a request that was not all read is worded as that", () => {
+    const part = judgeDecoy(tx(DECOY, sol(DECOY, key(78), 190_000_000n), program(77)), small);
+    expect(part).toEqual({ caught: false, asked: [], to: null, unread: true });
+    expect(decoyVerdict(part, small).sentence).toBe(`I showed this site a decoy wallet (${short(BAIT.address)}) before yours, and nothing I could read in what it asked the decoy to sign is a robbery. Continue to connect your own wallet; the site will then ask again, and I will read that request like any other.`);
+    expect(decoyVerdict(PASSED_ON_WORDS, small).sentence).toContain("and what it asked the decoy to sign is not a robbery.");
+  });
+
+  it("judges everything asked in one call as one thing: a robbery anywhere in it is a robbery", () => {
+    const pay = judgeDecoy(tx(DECOY, usdc(DECOY, SHOP, 10_000_000n)), small), rob = judgeDecoy(tx(DECOY, usdc(DECOY, THIEF, 50_000_000n)), small);
+    expect(together([pay, rob])).toEqual({ caught: true, asked: ["send out 50 USDC, all it holds"], to: ata(THIEF).toBase58(), unread: false });
+    expect(together([pay, pay])).toEqual({ caught: false, asked: [], to: null, unread: false });
+    // more was asked than was read: a pass says so
+    expect(together([pay], true)).toEqual({ caught: false, asked: [], to: null, unread: true });
+    expect(together([])).toEqual({ caught: false, asked: [], to: null, unread: false });
+  });
+
+  it("does not let a site that was caught before be gone on with at a press", () => {
+    const again = decoyVerdict(PASSED_ON_WORDS, small, "2026-11-14");
+    expect(again.level).toBe("confirm");
+    expect(again.confirm).toEqual({ kind: "acknowledge", expect: "I understand" });
+    expect(again.sentence).toBe("This site tried to rob a decoy wallet on 2026-11-14. This time what it asked the decoy to sign is not a robbery. Go on only if you are sure of this site: your own wallet is then connected to it.");
+    // caught again, it is simply caught
+    expect(decoyVerdict(judgeDecoy(tx(DECOY, usdc(DECOY, THIEF, 50_000_000n)), small), small, "2026-11-14").level).toBe("block");
+  });
+});
+
+describe("a page and its decoy, where a page could get round it", () => {
+  const drain = () => asked(DECOY, sol(DECOY, THIEF, 309_990_000_000n), usdc(DECOY, THIEF, 40_000_000_000n));
+
+  it("asks one question for everything in one call, and connects the wallet only after the answer", async () => {
+    const m = providers[0]![1](), g = guardOf(), d = gateOf(BAIT.address, "pass");
+    const { site } = await onWindow(m, g.guard, d.gate);
+    const out = await site.connect();
+    const two = [asked(out.publicKey, sol(DECOY, SHOP, 1_000_000n)), asked(out.publicKey, sol(DECOY, SHOP, 2_000_000n))];
+    expect(((await site.signAllTransactions(two).catch((e: unknown) => e)) as Error).message).toBe("Lamport Warden checked this site with a decoy first. Your own wallet is connected now: ask again.");
+    expect(d.questions()).toBe(1);
+    expect(d.asked).toHaveLength(2);
+    expect(m.calls).toEqual(["connect"]);
+    expect(site.publicKey.toBase58()).toBe(OWNER_KEY.toBase58());
+  });
+
+  it("does not take a request to sign nothing for a site that passed", async () => {
+    const m = providers[0]![1](), d = gateOf(BAIT.address, "pass");
+    const { site } = await onWindow(m, guardOf().guard, d.gate);
+    await site.connect();
+    expect(await site.signAllTransactions([]).catch((e: unknown) => e)).toBeInstanceOf(WardenRejected);
+    expect(d.questions()).toBe(0);
+    expect(m.calls).toEqual([]); // the owner's wallet was not brought in
+    expect(site.publicKey.toBase58()).toBe(BAIT.address);
+  });
+
+  it("stays caught: a second request asked beside the robbery cannot pass the page afterwards", async () => {
+    // the drain is caught; a message asked in the same breath would pass on its own
+    const m = providers[0]![1](), d = gateOf(BAIT.address, (reqs) => reqs[0]!.kind === "tx");
+    const { site } = await onWindow(m, guardOf().guard, d.gate);
+    const out = await site.connect();
+    const [rob, words] = await Promise.all([site.signTransaction(asked(out.publicKey, sol(DECOY, THIEF, 309_990_000_000n))).catch((e: Error) => e.message), site.signMessage(Uint8Array.of(1)).catch((e: Error) => e.message)]);
+    expect(rob).toBe("Blocked by Lamport Warden: this site tried to rob a decoy wallet");
+    expect(words).toBe("Blocked by Lamport Warden: this site tried to rob a decoy wallet");
+    expect(m.calls).toEqual([]);
+    expect(site.publicKey?.toBase58()).not.toBe(OWNER_KEY.toBase58());
+  });
+
+  it("goes through the door when a provider's method is called on some other object", async () => {
+    // Phantom's methods are arrow functions: they run on whatever they are called on
+    const m = providers[0]![1](), d = gateOf(BAIT.address, "caught");
+    const { site } = await onWindow(m, guardOf().guard, d.gate);
+    expect((await site.connect.call({})).publicKey.toBase58()).toBe(BAIT.address);
+    expect(await site.signTransaction.call({}, drain()).catch((e: unknown) => e)).toBeInstanceOf(WardenRejected);
+    // caught: and still caught when asked on another object
+    expect(((await site.connect.call({}).catch((e: unknown) => e)) as Error).message).toBe("Blocked by Lamport Warden: this site tried to rob a decoy wallet");
+    expect(((await site.signMessage.call({}, Uint8Array.of(1)).catch((e: unknown) => e)) as Error).message).toBe("Blocked by Lamport Warden: this site tried to rob a decoy wallet");
+    expect(m.calls).toEqual([]);
+  });
+
+  it("is not put off by a connect that asked not to prompt, made first or left hanging", async () => {
+    // refused by the wallet in the same breath as the real connect: the real connect still gets the decoy
+    const m = providers[0]![1](), d = gateOf(BAIT.address);
+    const { site } = await onWindow(m, guardOf().guard, d.gate);
+    const [quiet, loud] = await Promise.all([site.connect({ onlyIfTrusted: true }).catch((e: Error) => e.message), site.connect()]);
+    expect(quiet).toBe("not trusted");
+    expect(loud.publicKey.toBase58()).toBe(BAIT.address);
+    expect(m.calls).toEqual([]);
+    // a wallet the page made itself, whose connect never answers, does not keep decoys from the real one
+    const m2 = providers[0]![1](), g2 = guardOf(), d2 = gateOf(BAIT.address);
+    const fake: any = { name: "Fake", version: "1.0.0", chains: ["solana:mainnet"], accounts: [{ address: key(90).toBase58() }], features: { "standard:connect": { version: "1.0.0", connect: () => new Promise(() => {}) } } };
+    expect(patchStandardWalletInPlace(fake, g2.guard, d2.gate)).toBe(true);
+    void fake.features["standard:connect"].connect();
+    void fake.features["standard:connect"].connect({ silent: true });
+    const real = (await onWindow(m2, g2.guard, d2.gate)).site;
+    expect((await real.connect()).publicKey.toBase58()).toBe(BAIT.address);
+    expect(m2.calls).toEqual([]);
+  });
+
+  it("does not hang a site's connect when nobody answers whether there is a decoy", async () => {
+    const m = providers[0]![1](), d = gateOf(new Promise<string | null>(() => {}));
+    const { site } = await onWindow(m, guardOf().guard, d.gate);
+    const started = Date.now();
+    expect((await site.connect()).publicKey.toBase58()).toBe(OWNER_KEY.toBase58());
+    expect(Date.now() - started).toBeLessThan(4000);
+    expect(m.calls).toEqual(["connect"]);
+  }, 10_000);
+});
+
+describe("the owner is told a decoy is showing, and can end it", () => {
+  it("says when the first door begins to show it and when the last one stops, and connects the owner's wallet when they ask", async () => {
+    const m = providers[0]![1](), g = guardOf(), d = gateOf(BAIT.address, "caught");
+    const { site, heard } = await onWindow(m, g.guard, d.gate);
+    await site.connect();
+    await site.connect();
+    expect(d.told).toEqual([`showing ${BAIT.address}`]);
+    // the owner presses "use my wallet here" in Warden's notice
+    useOwnWallet(d.gate);
+    await new Promise((done) => setTimeout(done, 5));
+    expect(d.told).toEqual([`showing ${BAIT.address}`, "gone"]);
+    expect(m.calls).toEqual(["connect"]);
+    expect(site.publicKey.toBase58()).toBe(OWNER_KEY.toBase58());
+    // (connect was called twice on the decoy, and each said so; then the wallet's own, and the change of account)
+    expect(heard.map((h) => h[0])).toEqual(["connect", "connect", "connect", "accountChanged"]);
+    // the site was never asked about anything: it simply has the wallet now, and Warden reads what it asks
+    expect(d.questions()).toBe(0);
+    await site.signMessage(Uint8Array.of(4));
+    expect(g.asked).toHaveLength(1);
+    // pressed again, or on a page with no decoy showing, it does nothing
+    useOwnWallet(d.gate);
+    useOwnWallet(gateOf(BAIT.address).gate);
+    expect(m.calls).toEqual(["connect", "signMessage"]);
+  });
+
+  it("does the same at a Wallet Standard door, and takes the notice down when the site lets go of the decoy or is caught", async () => {
+    const d = gateOf(BAIT.address, "caught");
+    const [, make] = shapes[0]!;
+    const wallet = make(), site = meet(wallet, guardOf().guard, d.gate);
+    await site.features["standard:connect"].connect();
+    useOwnWallet(d.gate);
+    await new Promise((done) => setTimeout(done, 5));
+    expect(wallet.calls).toEqual(["connect"]);
+    expect(site.accounts.map((a: any) => a.address)).toEqual([real.address]);
+    expect(d.told).toEqual([`showing ${BAIT.address}`, "gone"]);
+    // caught: the notice goes, and asking for the owner's wallet afterwards does nothing
+    const c = gateOf(BAIT.address, "caught"), m = providers[0]![1]();
+    const older = (await onWindow(m, guardOf().guard, c.gate)).site;
+    const out = await older.connect();
+    await older.signTransaction(asked(out.publicKey, sol(DECOY, THIEF, 309_990_000_000n))).catch(() => undefined);
+    expect(c.told).toEqual([`showing ${BAIT.address}`, "gone"]);
+    useOwnWallet(c.gate);
+    await new Promise((done) => setTimeout(done, 5));
+    expect(m.calls).toEqual([]);
+  });
+});
+
+describe("one page, one decoy: a connect that asks not to prompt, at a second door", () => {
+  it("answers with the decoy the page is already looking at, and does not reach into the wallet", async () => {
+    // Phantom's Wallet Standard connect is a call to its provider's connect, and its wallet takes its account from the provider
+    const m = providers[0]![1](), g = guardOf(), d = gateOf(BAIT.address);
+    let account: any = null;
+    const standard: any = {
+      name: "Both", version: "1.0.0", chains: ["solana:mainnet"],
+      get accounts() { return account ? [account] : []; },
+      features: { "standard:connect": { version: "1.0.0", connect: async ({ silent }: { silent?: boolean } = {}) => { await m.provider.connect(silent ? { onlyIfTrusted: true } : undefined); const k = m.provider.publicKey; account = { address: k.toBase58(), publicKey: k.toBytes() }; return { accounts: [account] }; } } },
+    };
+    const win: Record<string, any> = { solana: m.provider };
+    installLegacyHook(win, g.guard, ["solana"], [], d.gate);
+    expect(patchStandardWalletInPlace(standard, g.guard, d.gate)).toBe(true);
+    expect((await win.solana.connect()).publicKey.toBase58()).toBe(BAIT.address);
+    const quiet = await standard.features["standard:connect"].connect({ silent: true });
+    expect(quiet.accounts.map((a: any) => a.address)).toEqual([BAIT.address]);
+    // the wallet's own Wallet Standard code never ran, so it did not take the decoy for its own account
+    expect(account).toBeNull();
+    expect(m.calls).toEqual([]);
+  });
+});
+

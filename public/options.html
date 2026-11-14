@@ -72,7 +72,9 @@
   <div class="row"><input type="text" id="decoyAddress" spellcheck="false" autocomplete="off" placeholder="The decoy's address" aria-label="The decoy's address"><button id="saveDecoy">Save</button></div>
   <p class="note" id="decoyLamport" hidden>Warden shows one of Lamport's decoy wallets: wallets Lamport funds for this, whose keys are not in the extension. To have sites shown an address of your choosing instead, give it above.</p>
   <p class="note">The decoy has to be an address that really holds something, or a thief that looks it up will see an empty wallet and leave it alone. Warden asks your RPC what it holds; the RPC learns the decoy's address, not yours. Never use an address you have the key to.</p>
-  <p class="note">So that a site you already use is not shown a decoy again, Warden keeps a mark for each site that passed, up to five hundred, in this browser and nowhere else. It is the one record Warden keeps of sites you used. Turning this off removes it.</p>
+  <p class="note">While a site is being shown the decoy, Warden says so in a corner of the page, with a button to use your own wallet there. Press it on a site you trust that has nothing to ask a wallet for straight away: it will not ask the decoy for anything, and would otherwise go on looking at it.</p>
+  <p class="note">So that a site you already use is not shown a decoy again, Warden keeps a mark for each site you went on to use, and one for each site that was caught robbing a decoy, up to five hundred of each, in this browser and nowhere else. They are the one record Warden keeps of sites. Turning this off removes them.</p>
+  <p class="note" id="decoySites" hidden><span id="decoyCount"></span> <button id="forgetDecoySites">Forget them</button></p>
   <p class="note" id="decoyNote" role="status"></p>
 
   <h2>Sites allowed to ask for your Privacy Rings keys</h2>

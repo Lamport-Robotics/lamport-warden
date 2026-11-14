@@ -130,3 +130,60 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
     }
   });
 }
+
+const NOTICE_CSS = `
+:host { all: initial; }
+.note { box-sizing: border-box; width: min(340px, calc(100vw - 24px)); background: #f2eee3; color: #14130f; border-radius: 12px; padding: 12px 14px 12px; box-shadow: 0 10px 36px rgba(0, 0, 0, 0.4); font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+.tag { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; color: #4a4a40; margin-bottom: 6px; }
+.tag.warn { color: #a1260d; }
+p { margin: 0 0 10px; overflow-wrap: anywhere; }
+button { font: inherit; font-weight: 600; border-radius: 999px; padding: 6px 14px; border: 1px solid #14130f; background: transparent; color: #14130f; cursor: pointer; }
+`;
+
+/**
+ * A small card in a corner of the page that stays until it is taken down. It says a decoy is showing, and
+ * its one button ends that. It does not cover the page and asks nothing. Drawn like the prompt: in a closed
+ * shadow root, and its button counts only when a person presses it where it can be seen.
+ */
+export function notice(o: { text: string; button: string; warn?: boolean; onPress(): void }): { remove(): void } {
+  const host = document.createElement("div");
+  const root = host.attachShadow({ mode: "closed" });
+  const style = document.createElement("style");
+  style.textContent = NOTICE_CSS;
+  const card = document.createElement("div");
+  card.className = "note";
+  card.setAttribute("role", "status");
+  const el = (tag: string, cls: string, text: string) => { const e = document.createElement(tag); e.className = cls; e.textContent = text; return e; };
+  const button = el("button", "", o.button) as HTMLButtonElement;
+  card.append(el("div", o.warn ? "tag warn" : "tag", "Lamport Warden · A decoy first"), el("p", "", o.text), button);
+  const tracked = typeof IntersectionObserver === "function" && typeof IntersectionObserverEntry === "function" && "isVisible" in IntersectionObserverEntry.prototype;
+  let seenSince: number | null = null;
+  let io: IntersectionObserver | null = null;
+  if (tracked) {
+    io = new IntersectionObserver((entries) => {
+      const last = entries[entries.length - 1] as IntersectionObserverEntry & { isVisible?: boolean };
+      seenSince = last.isIntersecting && last.isVisible ? (seenSince ?? performance.now()) : null;
+    }, { threshold: 1, trackVisibility: true, delay: 100 } as IntersectionObserverInit);
+    io.observe(button);
+  }
+  button.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    if (tracked && (seenSince === null || performance.now() - seenSince < 400)) return; // covered, altered, or only just shown
+    o.onPress();
+  });
+  root.append(style, card);
+  (document.documentElement ?? document).append(host);
+  let raising: ReturnType<typeof setInterval> | undefined;
+  try {
+    host.setAttribute("popover", "manual");
+    host.style.cssText = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;left:auto !important;bottom:auto !important;width:auto !important;height:auto !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;overflow:visible !important;";
+    const raise = () => { try { if (!host.matches(":popover-open")) host.showPopover(); } catch { /* no top layer here: it stays where it is */ } };
+    raise();
+    raising = setInterval(raise, 1000);
+    (raising as { unref?: () => void }).unref?.();
+  } catch {
+    host.style.cssText = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;z-index:2147483647 !important;";
+  }
+  return { remove() { io?.disconnect(); if (raising !== undefined) clearInterval(raising); host.remove(); } };
+}
+
