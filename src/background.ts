@@ -106,7 +106,8 @@ async function decoyFor(origin: string, url: string, frameId: number | undefined
   if (frameId !== 0) return null;
   if (url.startsWith(PRACTICE_THIEF)) return PRACTICE_DECOY;
   const s = await settings();
-  if (!s.decoyFirst || !s.decoyAddress || !origin.startsWith("https://") || origin === ARMING_ORIGIN) return null;
+  const web = origin.startsWith("https://") || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+  if (!s.decoyFirst || !s.decoyAddress || !web || origin === ARMING_ORIGIN) return null;
   const passed = (await chrome.storage.local.get(PASSED))[PASSED];
   if (passed && typeof passed === "object" && Object.hasOwn(passed as object, await markOf(origin))) return null;
   const kept = holdings.get(s.decoyAddress);

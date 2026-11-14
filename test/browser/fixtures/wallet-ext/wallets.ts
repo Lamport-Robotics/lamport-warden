@@ -28,7 +28,7 @@ const methods = (door: string) => ({
 });
 
 const features = (door: string) => ({
-  "standard:connect": { version: "1.0.0", connect: async () => ({ accounts: [account] }) },
+  "standard:connect": { version: "1.0.0", connect: async () => { called(door, "connect"); return { accounts: [account] }; } },
   "standard:events": { version: "1.0.0", on: () => () => {} },
   "solana:signTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signTransaction: async (...inputs: any[]) => { called(door, "signTransaction"); return inputs.map((i) => ({ signedTransaction: i.transaction })); } },
   "solana:signAndSendTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signAndSendTransaction: async (...inputs: any[]) => { called(door, "signAndSendTransaction"); return inputs.map(() => ({ signature: new Uint8Array(64) })); } },

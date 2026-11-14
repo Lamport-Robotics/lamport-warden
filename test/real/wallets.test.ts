@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import type { Page } from "playwright";
 import { Prompt, WARDEN, launch, serve, settled, type Browser, type Site } from "../browser/harness.js";
 
@@ -42,6 +43,16 @@ const WALLETS: { name: string; id: string; guarded: string[]; gap: string[] }[] 
   { name: "backpack", id: "aflkmfhebedbjioipglgcbcmnbpgliof", guarded: ["standard:Backpack", "backpack", "backpack.solana"], gap: [] },
 ];
 const text = [...new TextEncoder().encode("Sign in to the test shop\nnonce: 1234")];
+
+// Decoy first (src/decoy.ts): a decoy, what the test RPC says it holds, and what a thief that looked it up would ask it for.
+const TOKEN = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"), USDC = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+const DECOY = Keypair.fromSeed(new Uint8Array(32).fill(33)).publicKey, THIEF = Keypair.fromSeed(new Uint8Array(32).fill(34)).publicKey;
+const ata = (owner: PublicKey) => PublicKey.findProgramAddressSync([owner.toBytes(), TOKEN.toBytes(), USDC.toBytes()], new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"))[0];
+const amount = Buffer.alloc(8); amount.writeBigUInt64LE(900_000_000n);
+const everything = [...new Transaction({ feePayer: DECOY, recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" }).add(
+  SystemProgram.transfer({ fromPubkey: DECOY, toPubkey: THIEF, lamports: 11_990_000_000n }),
+  new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: ata(DECOY), isSigner: false, isWritable: true }, { pubkey: USDC, isSigner: false, isWritable: false }, { pubkey: ata(THIEF), isSigner: false, isWritable: true }, { pubkey: DECOY, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([12]), amount, Buffer.from([6])]) }),
+).serialize({ requireAllSignatures: false, verifySignatures: false })];
 
 describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
   describe.each([["Warden loaded first", true], ["the wallet loaded first", false]])("%s", (_order, wardenFirst) => {
@@ -99,6 +110,43 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
       console.log(`${wallet.name}: after Continue the wallet answered "${outcome}"`);
       expect(outcome).not.toBe("WardenRejected");
       expect(await prompt.shown()).toBe(false);
+    });
+
+    it("hands a site a decoy in the wallet's place, and catches a robbery of it, with the wallet itself never asked for anything", async () => {
+      // the experiment is on, with a decoy the owner named; what it holds is asked of their RPC
+      // Warden's own worker, by what it says it is: a wallet's worker can have the same file name
+      let worker = browser.ctx.serviceWorkers()[0]!;
+      for (const w of browser.ctx.serviceWorkers()) { if (await w.evaluate(() => chrome.runtime.getManifest().name).then((n) => /Warden/.test(n), () => false)) worker = w; }
+      expect(await worker.evaluate(() => chrome.runtime.getManifest().name)).toMatch(/Warden/);
+      site.setHoldings(DECOY.toBase58(), 12_000_000_000, [{ account: ata(DECOY).toBase58(), mint: USDC.toBase58(), amount: "900000000", decimals: 6 }]);
+      await worker.evaluate(([rpcUrl, decoyAddress]) => chrome.storage.local.set({ decoyFirst: true, decoyAddress, rpcUrl }), [`${site.origin}/rpc`, DECOY.toBase58()] as const);
+      const fresh = await browser.ctx.newPage();
+      try {
+        await fresh.goto(`${site.origin}/`);
+        await fresh.waitForFunction(() => !!(window as any).__app);
+        await fresh.waitForTimeout(3000); // wallets that load their script from a tag
+        const door = wallet.guarded[0]!; // the Wallet Standard door
+        const pagesBefore = browser.ctx.pages().length;
+        await fresh.evaluate((d) => (window as any).__app.connect("c", d), door);
+        // Connected, as far as the site can tell, to the decoy. No wallet is set up here: a connect that reached
+        // the real wallet would have opened its window or been refused, and neither happened.
+        expect(await settled(fresh, "c", 10_000)).toBe(DECOY.toBase58());
+        expect(await fresh.evaluate((d) => (window as any).__app.accounts(d), door)).toEqual([DECOY.toBase58()]);
+        expect(browser.ctx.pages().length).toBe(pagesBefore);
+        await fresh.evaluate(([d, t]) => (window as any).__app.start("rob", d, "tx", t), [door, everything] as const);
+        const warden = await Prompt.on(fresh);
+        const caught = await warden.text(10_000);
+        expect(caught?.tag).toBe("Lamport Warden · Blocked");
+        expect(caught?.sentence).toBe("This site tried to rob a wallet that is not yours. I showed it a decoy before your own wallet, and it asked the decoy to send out 11.99 SOL, of the 12 SOL it holds and 900 USDC, all it holds.");
+        await warden.click("Close");
+        expect(await settled(fresh, "rob")).toBe("WardenRejected");
+        expect(browser.ctx.pages().length).toBe(pagesBefore); // and still the wallet's own window never opened
+        expect(await fresh.evaluate(() => (window as any).__errors)).toEqual([]);
+        console.log(`${wallet.name} ${version}: decoy shown and robbery caught`);
+      } finally {
+        await fresh.close();
+        await worker.evaluate(() => chrome.storage.local.remove(["decoyFirst", "decoyAddress", "decoyPassed"]));
+      }
     });
 
     it.each(wallet.gap)("known gap: %s goes to the wallet without Warden", async (door) => {
