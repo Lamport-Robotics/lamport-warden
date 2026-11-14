@@ -377,7 +377,8 @@ describe("older injected providers", () => {
     const read = (b: Uint8Array) => JSON.parse(new TextDecoder().decode(b));
     expect(r.asked.map((a) => a.kind)).toEqual(["signin", "signin", "signin", "signin"]);
     expect(r.asked.map((a) => read(a.bytes))).toEqual([{ domain: "a.example", address: account.address, statement: "hi" }, {}, { domain: "b.example" }, { domain: "c.example", statement: "s" }]);
-    expect(r.asked.map((a) => a.owner)).toEqual([account.address, "", account.address, account.address]);
+    // it is the wallet's own account that signs in: this wallet lists nobody, and the provider says who it is
+    expect(r.asked.map((a) => a.owner)).toEqual(["", "", account.address, account.address]);
     expect(seen).toEqual(["feature", "feature", "method", "request"]);
   });
 
@@ -495,3 +496,78 @@ describe("a wallet whose Wallet Standard door answers by calling its own injecte
     expect(r.asked.every((a) => a.bytes.length === 0)).toBe(true);
   });
 });
+
+describe("whose request it is", () => {
+  const OWNER = account.address, ATTACKER = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
+  const txOf = (bytes: Uint8Array) => ({ version: 0, message: { serialize: () => Uint8Array.of(0) }, serialize: () => bytes });
+  /** The real wallet: connected as OWNER at both doors, its Wallet Standard door answering by calling its provider (as Phantom's and Backpack's do). */
+  function real(guard: Guard) {
+    const calls: string[] = [];
+    const provider: any = { isPhantom: true, publicKey: { toBase58: () => OWNER }, signTransaction: async (t: any) => { calls.push("phantom.signTransaction"); return t; }, signMessage: async () => { calls.push("phantom.signMessage"); return { signature: new Uint8Array(64) }; } };
+    const wallet: any = { name: "Real", version: "1.0.0", accounts: [account], features: { "solana:signTransaction": { version: "1.0.0", signTransaction: async (...i: any[]) => { await provider.signTransaction(txOf(i[0].transaction)); return i.map((x) => ({ signedTransaction: x.transaction })); } } } };
+    const win: Record<string, any> = { solana: provider };
+    installLegacyHook(win, guard);
+    expect(patchStandardWalletInPlace(wallet, guard)).toBe(true);
+    return { calls, wallet, win };
+  }
+  /** A guard that answers as the worker does for a transaction that empties OWNER: harmless when read as anybody else, refused when read as OWNER. */
+  function reading() {
+    const asked: string[] = [];
+    const guard: Guard = async (r) => { asked.push(r.owner); if (r.owner === OWNER) throw new WardenRejected(); return { done() {} }; };
+    return { guard, asked };
+  }
+  const DRAIN = Uint8Array.of(9, 9, 9);
+
+  it("does not let a request answered for one account through for another: a wallet the page made cannot open the way to the real one", async () => {
+    const g = reading(), r = real(g.guard);
+    // the page makes a wallet of its own, and has it "asked" to sign the drain as an account of the page's; it never answers
+    const fake: any = { name: "Fake", version: "1.0.0", accounts: [{ address: ATTACKER }], features: { "solana:signTransaction": { version: "1.0.0", signTransaction: () => new Promise(() => {}) } } };
+    expect(patchStandardWalletInPlace(fake, g.guard)).toBe(true);
+    void fake.features["solana:signTransaction"].signTransaction({ account: { address: ATTACKER }, transaction: DRAIN });
+    await new Promise((done) => setTimeout(done, 5));
+    expect(g.asked).toEqual([ATTACKER]); // read as the page's account: nothing leaves it
+    // then the same bytes, straight to the real wallet's provider
+    await expect(r.win.solana.signTransaction(txOf(DRAIN))).rejects.toBeInstanceOf(WardenRejected);
+    expect(g.asked).toEqual([ATTACKER, OWNER]); // asked about, as the account that would sign
+    expect(r.calls).toEqual([]);
+  });
+
+  it("reads a request as the wallet's own account when the page names one the wallet does not have", async () => {
+    const g = reading(), r = real(g.guard);
+    // Phantom's signTransaction does not check the account it is handed; its provider signs with the wallet's key
+    await expect(r.wallet.features["solana:signTransaction"].signTransaction({ account: { address: ATTACKER }, transaction: DRAIN })).rejects.toBeInstanceOf(WardenRejected);
+    expect(g.asked).toEqual([OWNER]);
+    expect(r.calls).toEqual([]);
+  });
+
+  it("still asks once when the wallet hands on a request for its own account, whatever the page called it", async () => {
+    const asked: GuardRequest[] = [];
+    const r = real(async (q) => { asked.push(q); return { done() {} }; });
+    await r.wallet.features["solana:signTransaction"].signTransaction({ account: { address: ATTACKER }, transaction: Uint8Array.of(1, 2) });
+    await r.wallet.features["solana:signTransaction"].signTransaction({ account, transaction: Uint8Array.of(3, 4) });
+    expect(asked.map((a) => [a.owner, [...a.bytes]])).toEqual([[OWNER, [1, 2]], [OWNER, [3, 4]]]);
+    expect(r.calls).toEqual(["phantom.signTransaction", "phantom.signTransaction"]);
+  });
+
+  it("takes the page's word for an account the wallet lists, and when the wallet lists nobody", async () => {
+    const second = { address: "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2" };
+    for (const [accounts, said, read] of [[[account, second], second.address, second.address], [[account, second], ATTACKER, OWNER], [[], ATTACKER, ATTACKER], [[], "", ""]] as const) {
+      const asked: GuardRequest[] = [];
+      const wallet: any = { name: "W", version: "1.0.0", accounts, features: { "solana:signMessage": { version: "1.0.0", signMessage: async (...i: any[]) => i.map((x) => ({ signedMessage: x.message, signature: new Uint8Array(64) })) } } };
+      patchStandardWalletInPlace(wallet, async (q) => { asked.push(q); return { done() {} }; });
+      await wallet.features["solana:signMessage"].signMessage({ account: said ? { address: said } : undefined, message: Uint8Array.of(1) });
+      expect(asked.map((a) => a.owner)).toEqual([read]);
+    }
+  });
+
+  it("keeps a feature's own getters as getters: what a wallet says it supports can change after it has loaded", async () => {
+    let versions: unknown[] = ["legacy", 0];
+    const wallet: any = { name: "W", version: "1.0.0", accounts: [account], features: { "solana:signTransaction": { version: "1.0.0", get supportedTransactionVersions() { return versions; }, signTransaction: async (...i: any[]) => i.map((x) => ({ signedTransaction: x.transaction })) } } };
+    patchStandardWalletInPlace(wallet, async () => ({ done() {} }));
+    expect(wallet.features["solana:signTransaction"].supportedTransactionVersions).toEqual(["legacy", 0]);
+    versions = ["legacy", 0, 1];
+    expect(wallet.features["solana:signTransaction"].supportedTransactionVersions).toEqual(["legacy", 0, 1]);
+    expect(Object.keys(wallet.features["solana:signTransaction"]).sort()).toEqual(["signTransaction", "supportedTransactionVersions", "version"]);
+  });
+});
+

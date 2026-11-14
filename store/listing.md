@@ -7,13 +7,15 @@ Item ID: `dmlhclkglnpkdhidfjfgjfdjnblnalea`, created on 2026-11-13 from `lamport
 version that has Sentinel built in. That was 0.6.0; 0.6.1 added a welcome on first install and a link to the
 practice page; 0.7.0's settings page describes the plans as they now are (alerts in seconds on Pro) and goes
 with the published terms at warden.lamportrobotics.com/terms/; 0.7.1 reads a wallet's rescue setup from the
-chain when the Sentinel page asks it to cover tokens in a browser that never saw the setup; the current one
-is 0.7.2, which asks once about a request that Phantom or Backpack hands from one of its doors to the other
-(0.7.1 and earlier asked twice, and counted such a payment twice).
+chain when the Sentinel page asks it to cover tokens in a browser that never saw the setup; 0.7.2 asked
+once about a request that Phantom or Backpack hands from one of its doors to the other (0.7.1 and earlier
+asked twice, and counted such a payment twice), and in doing so let a page get a request to the wallet
+unasked; **0.7.2 must not be submitted.** The current one is 0.7.3, which lets a request through a second
+time only for the same account, and reads whose request it is from the wallet and not from the page.
 
-To submit 0.7.2:
+To submit 0.7.3:
 
-1. Package tab: upload `lamport-warden-0.7.2.zip` (`pnpm package`).
+1. Package tab: upload `lamport-warden-0.7.3.zip` (`pnpm package`).
 2. Store listing tab: paste the description below again (it now mentions Sentinel and the practice page)
    and replace the screenshots with the four in `store/screenshots/` (retaken from 0.7.1).
 3. Privacy tab: paste the storage justification and the data-usage note below again.
@@ -143,7 +145,7 @@ No login is needed. No wallet or cryptocurrency is needed.
 1. Install the extension. It opens its own settings page with a short welcome. Press
    "See it work with a practice wallet" there, or open https://warden.lamportrobotics.com/try/
    The page makes a practice wallet that holds nothing. Nothing on it is sent to any blockchain.
-   Near the top it says "Warden 0.7.2 is in this browser and is standing in front of the practice wallet."
+   Near the top it says "Warden 0.7.3 is in this browser and is standing in front of the practice wallet."
 2. Press "Try it" beside "Pay someone for the first time".
    The extension shows its prompt: one sentence saying what the request does, with Cancel and
    "Continue to wallet". Press "Continue to wallet".
