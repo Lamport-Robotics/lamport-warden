@@ -227,7 +227,11 @@ export class Rescue {
     } catch { return no(502, "the chain could not be read just now. Try again in a minute."); }
   }
 
-  /** The transactions that take the setup away: every approval given for rescue is revoked, and the config is closed. */
+  /**
+   * The transactions that take the setup away: every approval given for rescue is revoked, and then the
+   * config is closed, in a transaction of its own. (Warden reads Sentinel's requests by their exact shape and
+   * passes a closing only when nothing else is beside it: src/sentinel.ts.)
+   */
   async disarm(profile: string, wallet: unknown): Promise<{ ok: true; transactions: string[] } | Refusal> {
     const p = this.accounts.profile(profile);
     if (!p) return no(401, "sign in again.");
@@ -239,7 +243,7 @@ export class Rescue {
       const owner = new PublicKey(wallet);
       const delegate = delegateAddress(owner, new PublicKey(config.vault)).toBase58();
       const revokes = (await holdingsOf(this.rpc, wallet)).filter((h) => h.delegate === delegate).map((h) => revoke(new PublicKey(h.address), owner, new PublicKey(h.tokenProgram)));
-      const txs = await this.transactions(owner, [...revokes, closeConfig(owner)]);
+      const txs = [...(await this.transactions(owner, revokes)), ...(await this.transactions(owner, [closeConfig(owner)]))];
       // and the permissions going, for the next half hour, for the owner's own doing
       this.store.expectRescueChange(wallet, null, this.now() + CHANGE_SECONDS);
       return { ok: true, transactions: txs };

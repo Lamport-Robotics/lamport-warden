@@ -355,8 +355,9 @@ function openSetup(wallet: string, standing: RescueStanding | null): void {
     if (transactions.length === 0) { out.hidden = true; say("Nothing to set up: every token account that holds something is already covered."); return; }
     say("");
     const what = el("p", `${count(transactions.length, "transaction")} to sign. ${transactions.length === 1 ? "It names" : "They name"} the vault ${short(String(r.body.vault))} and ${transactions.length === 1 ? "gives" : "give"} the rescue program permission on ${count(Number(r.body.accounts), "token account")}. Nothing in ${transactions.length === 1 ? "it" : "them"} moves anything.`, "plain");
-    const check = el("p", "Warden, if it is in this browser, will stop and say that an unlimited permission to spend is being given. That is this setup. The address it names should be exactly this one: ", "soft");
-    check.append(el("code", String(r.body.delegate), "addr"));
+    // Warden knows a rescue setup when it reads one, and holds it until the owner has looked at where a rescue would go
+    const check = el("p", "Warden, if it is in this browser, will stop, name the vault a rescue would go to, and ask for the last four characters of its address. It should be exactly this one: ", "soft");
+    check.append(el("code", String(r.body.vault), "addr"));
     handToWallet(out, wallet, transactions, [head, what, check], () => settle(wallet, (s) => s.armed && s.uncovered.every((u) => u.why !== "not set up"), "Set up. A rescue of this wallet now goes into that vault."));
   });
   out.replaceChildren(head, terms, agree, field, close);
@@ -391,7 +392,7 @@ function drawRescue(mine: Me): void {
       const r = await call("POST", `/wallets/${w.address}/rescue/disarm`);
       if (r.status !== 200 || !Array.isArray(r.body?.transactions)) { say(String(r.body?.error ?? "That did not work."), true); return; }
       const transactions = r.body.transactions as string[];
-      const what = el("p", `${count(transactions.length, "transaction")} to sign. ${transactions.length === 1 ? "It revokes" : "They revoke"} every permission this wallet gave for rescue and ${transactions.length === 1 ? "closes" : "close"} the setup. After that nothing can rescue this wallet.`, "plain");
+      const what = el("p", `${count(transactions.length, "transaction")} to sign. ${transactions.length === 1 ? "It closes the setup" : "The last closes the setup, and the others revoke every permission this wallet gave for rescue"}. After that nothing can rescue this wallet.`, "plain");
       handToWallet($("rescueSetup"), w.address, transactions, [el("p", `Take the rescue setup away from ${short(w.address)}`, "plain"), what], () => settle(w.address, (s) => !s.armed, "Taken away. This wallet is no longer set up for rescue."));
     }));
     return row(w.address, seen ? standingText(seen) : armed ? "Set up for rescue. Press Look to see what a rescue would move now." : "Not set up for rescue.", acts, "addr");
