@@ -11,7 +11,16 @@ import { registerWallet } from "@wallet-standard/wallet";
 
 const w = window as any;
 w.__calls = w.__calls ?? [];
-const called = (door: string, method: string) => { w.__calls.push(`${door}.${method}`); };
+/** Above zero while a wallet's Wallet Standard code is calling its own injected provider: that is the wallet's own business, and not recorded. */
+let inside = 0;
+const called = (door: string, method: string) => { if (!inside) w.__calls.push(`${door}.${method}`); };
+/**
+ * Phantom's and Backpack's Wallet Standard wallets answer by calling their own injected provider's public
+ * methods (`await this.#provider.signTransaction(VersionedTransaction.deserialize(transaction))`), looked up
+ * at the moment of the call: so what they call is whatever stands there, Warden's guard included.
+ */
+const handOn = async <T>(call: () => Promise<T>): Promise<T> => { inside += 1; try { return await call(); } finally { inside -= 1; } };
+const txObject = (bytes: Uint8Array) => ({ version: 0, message: { serialize: () => new Uint8Array(1) }, serialize: () => bytes });
 const ADDRESS = "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"; // fixtures.owner in the tests
 const account = Object.freeze({ address: ADDRESS, publicKey: new Uint8Array(32), chains: ["solana:mainnet"], features: [] });
 const publicKey = { toBase58: () => ADDRESS, toString: () => ADDRESS };
@@ -27,13 +36,29 @@ const methods = (door: string) => ({
   connect: async () => ({ publicKey }),
 });
 
-const features = (door: string) => ({
-  "standard:connect": { version: "1.0.0", connect: async () => ({ accounts: [account] }) },
+const features = (door: string, provider?: any) => ({
+  "standard:connect": { version: "1.0.0", connect: async () => { called(door, "connect"); return { accounts: [account] }; } },
   "standard:events": { version: "1.0.0", on: () => () => {} },
-  "solana:signTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signTransaction: async (...inputs: any[]) => { called(door, "signTransaction"); return inputs.map((i) => ({ signedTransaction: i.transaction })); } },
-  "solana:signAndSendTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signAndSendTransaction: async (...inputs: any[]) => { called(door, "signAndSendTransaction"); return inputs.map(() => ({ signature: new Uint8Array(64) })); } },
-  "solana:signMessage": { version: "1.0.0", signMessage: async (...inputs: any[]) => { called(door, "signMessage"); return inputs.map((i) => ({ signedMessage: i.message, signature: new Uint8Array(64) })); } },
-  "solana:signIn": { version: "1.0.0", signIn: async (...inputs: any[]) => { called(door, "signIn"); return inputs.map(() => ({ account, signedMessage: new Uint8Array(1), signature: new Uint8Array(64) })); } },
+  "solana:signTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signTransaction: async (...inputs: any[]) => {
+    called(door, "signTransaction");
+    if (provider) await handOn(() => (inputs.length === 1 ? provider.signTransaction(txObject(inputs[0].transaction)) : provider.signAllTransactions(inputs.map((i) => txObject(i.transaction)))));
+    return inputs.map((i) => ({ signedTransaction: i.transaction }));
+  } },
+  "solana:signAndSendTransaction": { version: "1.0.0", supportedTransactionVersions: ["legacy", 0], signAndSendTransaction: async (...inputs: any[]) => {
+    called(door, "signAndSendTransaction");
+    if (provider) for (const i of inputs) await handOn(() => provider.signAndSendTransaction(txObject(i.transaction)));
+    return inputs.map(() => ({ signature: new Uint8Array(64) }));
+  } },
+  "solana:signMessage": { version: "1.0.0", signMessage: async (...inputs: any[]) => {
+    called(door, "signMessage");
+    if (provider) for (const i of inputs) await handOn(() => provider.signMessage(i.message));
+    return inputs.map((i) => ({ signedMessage: i.message, signature: new Uint8Array(64) }));
+  } },
+  "solana:signIn": { version: "1.0.0", signIn: async (...inputs: any[]) => {
+    called(door, "signIn");
+    if (provider) for (const i of inputs.length ? inputs : [undefined]) await handOn(() => provider.signIn(i ? { ...i } : i));
+    return inputs.map(() => ({ account, signedMessage: new Uint8Array(1), signature: new Uint8Array(64) }));
+  } },
 });
 
 const base = { version: "1.0.0", icon: "data:image/svg+xml;base64,PHN2Zy8+", chains: ["solana:mainnet"] } as const;
@@ -50,7 +75,7 @@ function phantom() {
     readonly version = base.version; readonly name = "FixturePhantom"; readonly icon = base.icon; readonly chains = base.chains;
     #accounts = [account];
     get accounts() { return this.#accounts; }
-    get features() { return features("standard:FixturePhantom"); }
+    get features() { return features("standard:FixturePhantom", provider); }
     constructor() { Object.freeze(this); }
   }
   registerWallet(new PhantomWallet() as any);
@@ -76,7 +101,7 @@ function backpack() {
   const box = Object.freeze({ solana: inner, ethereum: Object.freeze({}) });
   const z = new Proxy(box, { get: (t: any, k) => { if (Reflect.has(t, k)) return Reflect.get(t, k); const v = t.solana[k]; return typeof v === "function" ? v.bind(t.solana) : v; } });
   try { Object.defineProperty(window, "backpack", { value: z }); } catch { /* as Backpack does */ }
-  registerWallet({ ...base, name: "FixtureBackpack", accounts: [account], features: features("standard:FixtureBackpack") } as any);
+  registerWallet({ ...base, name: "FixtureBackpack", accounts: [account], features: features("standard:FixtureBackpack", inner) } as any);
 }
 
 const params = new URLSearchParams(location.search);
