@@ -100,6 +100,8 @@ export interface Quote {
   renewsAt: number | null;
   /** For a plan the owner cancelled: its last day. */
   endsAt: number | null;
+  /** For a plan paid ahead in USDC or SOL: the day it is paid until. It does not renew. */
+  paidUntil: number | null;
 }
 
 const when = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : undefined);
@@ -131,8 +133,17 @@ export class Billing {
     return false;
   }
 
+  /** True while a card subscription is paying for this profile's plan. */
+  byCard(profile: string): boolean {
+    const b = this.accounts.profile(profile)?.billing;
+    return !!b && PAID.has(b.status);
+  }
+
+  /** What each month costs, for the other way of paying (prepaid.ts) to charge the same. */
+  get cents(): { full: number; holder: number } { return { full: this.cfg.centsFull, holder: this.cfg.centsHolder }; }
+
   /** Whether this profile may buy: checkout is open, or one of its wallets is named as a tester. */
-  private sellsTo(profile: string): boolean {
+  sellsTo(profile: string): boolean {
     if (this.cfg.checkoutOpen) return true;
     const testers = this.cfg.checkoutTesters ?? [];
     return testers.length > 0 && this.accounts.walletsOf(profile).some((w) => testers.includes(w));
@@ -149,6 +160,7 @@ export class Billing {
       price, cents: price === "holder" ? this.cfg.centsHolder : this.cfg.centsFull, centsFull: this.cfg.centsFull, centsHolder: this.cfg.centsHolder, holder, holderMin: this.cfg.holderMin,
       renewsAt: subscribed && !p.billing!.endsAt ? p.billing!.periodEnd ?? null : null,
       endsAt: subscribed ? p.billing!.endsAt ?? null : null,
+      paidUntil: !subscribed && (p.prepaid?.until ?? 0) > this.now() ? p.prepaid!.until : null,
     };
   }
 
@@ -158,6 +170,8 @@ export class Billing {
     if (!p) return { ok: false, status: 401, why: "sign in again." };
     if (!this.sellsTo(profile)) return { ok: false, status: 403, why: "the paid plan is not on sale yet." };
     if (p.billing && PAID.has(p.billing.status)) return { ok: false, status: 409, why: "this profile already has the paid plan." };
+    // months already paid for ahead would be paid for twice
+    if ((p.prepaid?.until ?? 0) > this.now()) return { ok: false, status: 409, why: "this profile's plan is already paid ahead. A card plan can be started when that time is up." };
     let holder: boolean;
     try { holder = await this.holder(profile); } catch { return { ok: false, status: 502, why: "I could not read your wallet's balance just now, so I can't tell which price is yours. Try again in a minute." }; }
     // One checkout page at a time. An older page left open in another tab is closed before a new one is made,
@@ -228,7 +242,8 @@ export class Billing {
     // a profile has one subscription: news about an old one must not undo the current one
     if (p.billing && p.billing.subscription !== subscription.id && PAID.has(p.billing.status)) return;
     const was = { tier: p.tier, status: p.billing?.status ?? null, endsAt: p.billing && p.billing.subscription === subscription.id ? p.billing.endsAt : undefined };
-    const tier = PAID.has(status) ? "pro" : "watch";
+    // months paid ahead in USDC or SOL keep the plan whatever the card side says
+    const tier = PAID.has(status) || this.accounts.prepaidUntil(profile) > this.now() ? "pro" : "watch";
     // Stripe moved the period's dates from the subscription to its item; either is read
     const periodEnd = when(subscription.items?.data?.[0]?.current_period_end) ?? when(subscription.current_period_end);
     // cancelled by its owner: it runs to the end of what was paid for, and does not renew

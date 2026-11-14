@@ -42,6 +42,9 @@
  *                              connect a Telegram chat from the page; without it Telegram is not offered.
  *   SENTINEL_CHECKOUT_TESTERS  wallet addresses, comma-separated (twenty at most), that may buy while checkout is
  *                              closed: a profile one of them is in. For running a real payment before selling.
+ *   SENTINEL_PAY_TO            Lamport's wallet address. With it (and the settings above) the plan can also be paid
+ *                              ahead in USDC or SOL, to that address (prepaid.ts); without it, by card only.
+ *   SENTINEL_PAY_SOL           "off" to take USDC only. Otherwise SOL is quoted at a price two public sources agree on.
  *   SENTINEL_PRICE_CENTS, SENTINEL_HOLDER_PRICE_CENTS          what the page shows (default 1500 and 1000)
  *   SENTINEL_HOLDER_MINT, SENTINEL_HOLDER_MIN                  the token and whole-token amount for the holder price
  *                                                              (default $LAMPORT, 250000)
@@ -55,7 +58,9 @@ import { Blindness, RESUMED_SENTENCE, stoppedSentence } from "./blindness.js";
 import { ChannelNotifier } from "./notify.js";
 import { Ops } from "./ops.js";
 import { PLANS, type ChannelKind, type Tier } from "./plans.js";
+import { Prepaid } from "./prepaid.js";
 import { Push, pushUrlFor } from "./push.js";
+import { SolPrice } from "./solprice.js";
 import { LinkCodes, TOKEN_SHAPE, TelegramBot, listen as hearTelegram, type TelegramDeps } from "./telegram.js";
 import { channelAddedNotice, channelRemovedNotice } from "./notices.js";
 import { HttpRpc, PUBLIC_RPC_PACE, type Pace } from "./rpc.js";
@@ -64,7 +69,7 @@ import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore, type StoredEvent } from "./store.js";
 import { ACCOUNTS_PER_CALL, Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { payTo: string | null; payUsdcMint: string | null; paySol: boolean; telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -130,6 +135,10 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const readers = Number(env.SENTINEL_READERS ?? 3);
   if (!Number.isInteger(readers) || readers < 1 || readers > 32) return { ok: false, why: "SENTINEL_READERS has to be a whole number from 1 to 32." };
   const opsChannel = env.SENTINEL_OPS_CHANNEL ? cleanTarget(env.SENTINEL_OPS_CHANNEL, ntfyHosts) : null;
+  // where payments in USDC or SOL go: an address, or nothing; and only beside the rest of the paid plan
+  const payTo = (env.SENTINEL_PAY_TO ?? "").trim() || null;
+  if (payTo && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(payTo)) return { ok: false, why: "SENTINEL_PAY_TO has to be a wallet address." };
+  const payUsdcMint = (env.SENTINEL_PAY_USDC_MINT ?? "").trim() || null;
   const telegramToken = (env.SENTINEL_TELEGRAM_BOT_TOKEN ?? "").trim() || null;
   // said without repeating it: a token that is wrong is still a secret
   if (telegramToken && !TOKEN_SHAPE.test(telegramToken)) return { ok: false, why: "SENTINEL_TELEGRAM_BOT_TOKEN is not a bot token as BotFather gives them (a number, a colon, and a long secret)." };
@@ -146,7 +155,8 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const reads: ReadBudget | null = perMinute > 0
     ? { perMinute, cost: { watch: 60 / pollSeconds, pro: 60 / proPollSeconds }, reservedForPro: billing.billing ? Math.floor(perMinute * (reservedForPro / maxWallets)) : 0 }
     : null;
-  return { ok: true, config: { telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
+  if (payTo && !billing.billing) return { ok: false, why: "SENTINEL_PAY_TO needs the paid plan's settings (the Stripe ones) beside it: they say who is sold to and at what price." };
+  return { ok: true, config: { payTo, payUsdcMint, paySol: env.SENTINEL_PAY_SOL !== "off", telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -443,6 +453,16 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   }, 3600);
 
   const billing = cfg.billing ? new Billing(cfg.billing, accounts, cfg.billing.holderRpcUrl === cfg.rpcUrl ? rpc : new HttpRpc(cfg.billing.holderRpcUrl), new Stripe(cfg.billing.secretKey), { notice: (profile, sentence) => notifier.notice(profile, sentence) }) : null;
+  // Paying ahead in USDC or SOL: sold to the same people at the same prices as the card plan, checked on
+  // the chain, and looked at once an hour for what has run out or is about to.
+  const solPrice = new SolPrice();
+  const prepaid = billing && cfg.payTo
+    ? new Prepaid({ payTo: cfg.payTo, ...(cfg.payUsdcMint ? { usdcMint: cfg.payUsdcMint } : {}) }, accounts, rpc,
+      { sells: (p) => billing.sellsTo(p), holder: (p) => billing.holder(p), byCard: (p) => billing.byCard(p), centsFull: billing.cents.full, centsHolder: billing.cents.holder },
+      { notice: (profile, sentence) => notifier.notice(profile, sentence), ...(cfg.paySol ? { price: () => solPrice.usd() } : {}) })
+    : null;
+  const stopPrepaid = prepaid ? startRounds(async () => { const { ended, reminded } = prepaid.expire(); if (ended || reminded) console.error(`sentinel: ${ended} paid-ahead plan(s) ended, ${reminded} told they are about to`); }, 3600) : () => undefined;
+
   // Once a day. First, Stripe's side: every profile is made to match what Stripe says, in case a webhook was
   // missed, and a subscription nobody here has is reported. Then whoever stopped holding the token moves to
   // the full price from their next bill, and the other way round.
@@ -498,6 +518,7 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
     notice: (profile, sentence, opts) => notifier.notice(profile, sentence, opts),
     webhookFailed: (why) => { void ops.say(`A webhook from Stripe could not be applied (${why.slice(0, 120)}). Stripe sends it again; if this repeats, a plan may not be starting or ending when it should.`, "webhook-failed", 3600); },
     ...(billing ? { billing: { api: billing, webhookSecret: cfg.billing!.webhookSecret } } : {}),
+    ...(prepaid ? { prepaid } : {}),
     // read when a request comes in, so that a bot that answers later is offered from then on
     get telegram() { return offered.telegram; },
   }, { port: cfg.port, trustProxy: cfg.trustProxy });
@@ -505,5 +526,5 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   // said at most every ten minutes, so a service that keeps falling over does not fill the channel
   void ops.say(`Sentinel started: ${started}.`, "started", 600);
   // on the way out, what was waiting to be written (when each wallet was last looked at) is written
-  return async () => { stopRounds(); push?.stop(); stopTelegram(); stopHourly(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); store.flush(); };
+  return async () => { stopRounds(); push?.stop(); stopTelegram(); stopHourly(); stopPrepaid(); stopDaily(); await new Promise<void>((r) => server.close(() => r())); store.flush(); };
 }

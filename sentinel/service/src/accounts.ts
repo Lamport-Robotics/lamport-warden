@@ -12,7 +12,7 @@ import { randomBytes } from "node:crypto";
 import { hashToken, randomToken, sameHash, seal, unseal } from "./crypto.js";
 import { PLANS, type ChannelKind, type Tier } from "./plans.js";
 import { chatOf, chatTarget } from "./telegram.js";
-import type { Channel, MemoryStore, Profile, StoredEvent, WalletOwner } from "./store.js";
+import type { Channel, MemoryStore, Profile, StoredEvent, WalletOwner, PayIntent, Payment } from "./store.js";
 
 export const SESSION_SECONDS = 7 * 86_400;
 
@@ -139,6 +139,49 @@ export class Accounts {
     const p = this.profile(profile);
     if (!p) return;
     if (billing === null) delete p.billing; else p.billing = billing;
+    this.store.flush();
+  }
+
+  // ---- months paid for ahead, in USDC or SOL (prepaid.ts)
+
+  /** Until when the profile has paid ahead; 0 when it has not. */
+  prepaidUntil(profile: string): number { return this.profile(profile)?.prepaid?.until ?? 0; }
+
+  /** Notes an amount quoted to a profile. It keeps the newest twenty, for a week. */
+  addIntent(intent: PayIntent, now: number): void {
+    const kept = (this.data.intents ?? []).filter((i) => now - i.createdAt < 7 * 86_400);
+    const mine = kept.filter((i) => i.profile === intent.profile);
+    const drop = new Set(mine.slice(0, Math.max(0, mine.length - 19)).filter((i) => !i.paidBy).map((i) => i.reference));
+    this.data.intents = [...kept.filter((i) => !drop.has(i.reference)), intent];
+    this.store.flush();
+  }
+
+  intentOf(profile: string, reference: string): PayIntent | undefined {
+    return (this.data.intents ?? []).find((i) => i.profile === profile && i.reference === reference);
+  }
+
+  /** True when this transaction has already paid for something, for anyone. */
+  credited(signature: string): boolean { return Object.hasOwn(this.data.credited ?? {}, signature); }
+
+  /**
+   * Credits a payment: the transaction is marked as spent, the quote as paid by it, and the profile is paid
+   * until `until`. False when the transaction was credited before: it is never credited twice.
+   */
+  credit(intent: PayIntent, payment: Payment, until: number): boolean {
+    const p = this.profile(intent.profile);
+    if (!p || this.credited(payment.signature)) return false;
+    (this.data.credited ??= {})[payment.signature] = { profile: p.id, at: payment.at };
+    intent.paidBy = payment.signature;
+    p.prepaid = { until, payments: [...(p.prepaid?.payments ?? []), payment].slice(-12) };
+    this.store.flush();
+    return true;
+  }
+
+  /** Notes that the profile's owner was told its paid time is ending. */
+  reminded(profile: string): void {
+    const p = this.profile(profile);
+    if (!p?.prepaid) return;
+    p.prepaid.remindedFor = p.prepaid.until;
     this.store.flush();
   }
 

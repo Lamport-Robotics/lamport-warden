@@ -58,6 +58,26 @@ export const purchaseTerms = (cents: number, centsFull: number = PRICE_CENTS, ce
   `The price follows what this profile's wallets hold: ${dollars(centsHolder)} a month while they hold ${tokens(holderMin)} $LAMPORT between them, ${dollars(centsFull)} otherwise. It is checked every day, a change applies from your next bill, and your alert channels are told before that bill.`,
 ];
 
+/** How many months can be paid for ahead at once, in USDC or SOL. */
+export const PREPAID_MONTHS: readonly number[] = [1, 3, 12];
+
+/** An amount in an asset's smallest units as a wallet shows it: no trailing zeros. */
+export function decimal(units: bigint, decimals: number): string {
+  const s = units.toString().padStart(decimals + 1, "0");
+  const whole = s.slice(0, -decimals), frac = s.slice(-decimals).replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : whole;
+}
+
+/**
+ * What someone is told before they pay ahead in USDC or SOL: that it is once and does not renew, that the
+ * payment is public, and what happens if they pay again or want it back.
+ */
+export const prepaidTerms = (cents: number, months: number): string[] => [
+  `${dollars(cents)} pays for ${months === 1 ? "one month" : `${months} months`}, once. Nothing is charged again and nothing renews: when the time is up your profile goes back to Watch, and nothing is deleted. Your alert channels are told three days before.`,
+  "It is one transfer of exactly the amount shown, to Lamport's address, from any wallet. Like every transfer on the chain it is public: anyone can see that the paying wallet paid Lamport.",
+  "Paying again before the time is up adds to it. A refund is on the same terms as by card, and is sent back to the wallet that paid.",
+];
+
 /** The same, for someone who already has the plan. */
 export const renewalTerms = (cents: number, centsFull: number = PRICE_CENTS, centsHolder: number = HOLDER_PRICE_CENTS, holderMin: number = HOLDER_MIN_LAMPORT): string =>
   `It renews every month at ${dollars(cents)} until you cancel, which you can do any time with the button above; it then runs to the end of the month you paid for. The price is ${dollars(centsHolder)} a month while this profile's wallets hold ${tokens(holderMin)} $LAMPORT between them and ${dollars(centsFull)} otherwise, checked every day; your alert channels are told before a bill at a different price.`;

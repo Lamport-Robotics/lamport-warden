@@ -162,6 +162,40 @@ describe("the holder price", () => {
   });
 });
 
+describe("beside months paid ahead in USDC or SOL", () => {
+  /** A profile that has paid ahead until `until`, as prepaid.ts leaves it. */
+  function paidAhead(until: number) {
+    const s = setup();
+    const p = s.accounts.profile(s.profile)!;
+    p.prepaid = { until, payments: [{ signature: "sig", asset: "USDC", units: "15000000", months: 1, cents: 1500, at: T0 }] };
+    s.accounts.setTier(s.profile, "pro");
+    return s;
+  }
+
+  it("a card plan is not started over time that is already paid for, and the page is told until when", async () => {
+    const s = paidAhead(T0 + 20 * 86_400);
+    expect(await s.billing.checkout(s.profile)).toEqual({ ok: false, status: 409, why: "this profile's plan is already paid ahead. A card plan can be started when that time is up." });
+    expect(s.stripe.calls).toEqual([]);
+    expect(await s.billing.quote(s.profile)).toMatchObject({ tier: "pro", subscribed: false, paidUntil: T0 + 20 * 86_400, renewsAt: null });
+    expect(s.billing.byCard(s.profile)).toBe(false);
+    // when that time is up, the card is welcome again
+    const over = paidAhead(T0 - 60);
+    expect((await over.billing.quote(over.profile)).paidUntil).toBeNull();
+    expect((await over.billing.checkout(over.profile)).ok).toBe(true);
+  });
+
+  it("a card subscription ending does not end a plan that is paid ahead", async () => {
+    const s = paidAhead(T0 + 20 * 86_400);
+    // an old subscription of this profile's is cancelled at Stripe: news about the card side only
+    const started = s.stripe.start("sub_old", s.profile, "price_full");
+    s.stripe.subscriptions.get("sub_old").status = "canceled";
+    await s.billing.onEvent({ ...started, type: "customer.subscription.deleted", data: { object: { id: "sub_old" } } });
+    expect(s.accounts.profile(s.profile)!.tier).toBe("pro");
+    expect(s.said.map((x) => x.sentence).filter((x) => x.includes("has ended"))).toEqual([]);
+    expect(s.billing.cents).toEqual({ full: 1500, holder: 1000 });
+  });
+});
+
 describe("what Stripe says moves the tier", () => {
   it("a paid checkout lifts the profile, and reading more wallets comes with it", async () => {
     const { store, accounts, stripe, billing, profile } = setup();

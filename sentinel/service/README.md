@@ -19,6 +19,7 @@ and answer them. It holds no signing key and moves nothing. There is no rescuer 
 | `src/server.ts` | The HTTP API. |
 | `src/main.ts`, `src/cli.ts` | The process: the watcher on a timer and the API beside it. |
 | `src/billing.ts` | The paid plan: a monthly Stripe subscription at one of two prices, the webhook that moves a profile between tiers, and the daily look at who holds the token. |
+| `src/prepaid.ts`, `src/solprice.ts` | The same plan paid ahead in USDC or SOL: the quote and its reference, the payment read from the chain, and the price of SOL from sources that have to agree. |
 | `src/program.ts` | The rescue program's instructions, for arming (the owner signs) and for a rescue, and the plan of a rescue: which accounts, in what order, in how many transactions. |
 | `src/crypto.ts` | Random tokens and their hashes, the sealed box for channel addresses, and the check of a wallet's signature. All from Node itself. |
 
@@ -564,6 +565,29 @@ of the customer and the subscription.
   plan at the end of the paid month (`at_period_end`), which is what the page says.
 - **Checkout is closed unless `SENTINEL_CHECKOUT=open`.** With the Stripe settings in place and checkout
   closed, the page shows the prices and existing subscriptions are honoured, and nothing is sold.
+- **Paid ahead in USDC or SOL** (`src/prepaid.ts`), where `SENTINEL_PAY_TO` names Lamport's wallet. A card
+  can be charged every month; a wallet cannot, except by a standing permission to spend from it, which is
+  the thing Sentinel warns about. So it is paid ahead: one, three or twelve months, at the same monthly
+  price (the holder's for a holder), and nothing renews. The plan runs to the end of what was paid for and
+  the owner's channels are told three days before.
+  - The service quotes an amount and an address nobody holds, a *reference* (as in Solana Pay). The paying
+    transaction names it. Any wallet can pay, from the page or from a phone; the reference is what ties the
+    payment to the profile.
+  - A payment is read from the chain at `finalized` and counted by what arrived at Lamport's address in it,
+    from the balances before and after: not by what the page says and not by what an instruction says. That
+    the transaction names the reference is read from the transaction, not taken from the RPC's list.
+  - A transaction pays for one thing, once: its signature is kept, and one that names two quotes is
+    credited to one. A short payment starts nothing and is said to be short. USDC is a dollar for a dollar
+    and a quote holds a week. SOL is priced when quoted, at a price two of three public sources agree on to
+    within two in a hundred (`src/solprice.ts`), and holds ten minutes; with no such price SOL is not
+    quoted and USDC still is. `SENTINEL_PAY_SOL=off` takes USDC only.
+  - For a wallet in the browser the service builds the payment (one transfer of exactly the amount, naming
+    the reference, nothing else) and the page hands it to the wallet. Warden, if it is installed, reads it
+    and says it like any other before the wallet is asked.
+  - It is sold to the same profiles as the card plan (`SENTINEL_CHECKOUT`, the testers), not beside a card
+    subscription, and a card plan is not started over months already paid for.
+  - `prepaid.test.ts` runs it against a list of transactions; `prepaid.validator.test.ts` runs a real token
+    payment and a real SOL payment on a local validator, and is part of `pnpm test:rescue`.
 - **A real payment before it is on sale.** `SENTINEL_CHECKOUT_TESTERS` names up to twenty wallet addresses,
   separated by commas. A profile that one of them is in sees the button and can buy while checkout is closed
   to everyone else, so the whole path (the page, Stripe's checkout with a real card, the webhook, the tier,
@@ -676,7 +700,6 @@ devnet faucet no longer answers the command line, so the deploy key
 
 ## Not here yet
 
-A process that runs the rescuer, arming on the page, the Pincer1 webhook, a subscription in place of the poll,
-more channels than ntfy, and payment in SOL or USDC. Replaying real wallets' public history to count
+A process that runs the rescuer, arming on the page, the Pincer1 webhook, and alerts by email. Replaying real wallets' public history to count
 false alerts needs an RPC that allows it (the public one refuses most `getTransaction` calls); a free Helius
 key is enough.

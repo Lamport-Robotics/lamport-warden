@@ -17,7 +17,7 @@
     "build:web": "node scripts/build-web.mjs",
     "start:service": "node sentinel/service/dist/sentinel.mjs",
     "test:service": "node scripts/build-service.mjs && node scripts/smoke-service.mjs",
-    "test:rescue": "REQUIRE_VALIDATOR=1 vitest run sentinel/service/test/rescue.validator.test.ts sentinel/service/test/taken.validator.test.ts",
+    "test:rescue": "REQUIRE_VALIDATOR=1 vitest run sentinel/service/test/rescue.validator.test.ts sentinel/service/test/taken.validator.test.ts sentinel/service/test/prepaid.validator.test.ts",
     "test": "vitest run",
     "test:browser": "node scripts/build.mjs && node scripts/build-fixtures.mjs && node scripts/build-web.mjs && vitest run --config vitest.browser.config.ts",
     "test:wallets": "node scripts/build.mjs && node scripts/build-fixtures.mjs && vitest run --config vitest.wallets.config.ts",

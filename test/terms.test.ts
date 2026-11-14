@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PRICE_CENTS, purchaseTerms } from "../sentinel/service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PRICE_CENTS, prepaidTerms, purchaseTerms } from "../sentinel/service/src/plans.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (...p: string[]) => readFileSync(join(root, ...p), "utf8");
@@ -18,6 +18,20 @@ describe("the terms", () => {
     const list = /<ul id="plan-terms">([\s\S]*?)<\/ul>/.exec(terms)![1]!;
     const lines = [...list.matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]!.trim());
     expect(lines).toEqual(purchaseTerms(PRICE_CENTS, PRICE_CENTS, HOLDER_PRICE_CENTS, HOLDER_MIN_LAMPORT));
+  });
+
+  it("state paying ahead in the page's own words too, and what the service does with a payment that is short or late", () => {
+    const list = /<ul id="prepaid-terms">([\s\S]*?)<\/ul>/.exec(terms)![1]!;
+    const lines = [...list.matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]!.trim());
+    expect(lines).toEqual(prepaidTerms(PRICE_CENTS, 1));
+    const prepaid = read("sentinel", "service", "src", "prepaid.ts");
+    // final, and at least the amount: both are what the code checks
+    expect(text).toContain("A payment counts when the chain has made it final and the amount that arrived is at least the amount shown.");
+    expect(prepaid).toContain('commitment: "finalized"');
+    expect(prepaid).toContain("if (got < BigInt(intent.units))");
+    // ten minutes for a price in SOL, three days' notice before the time is up
+    expect(prepaid).toContain("export const SOL_QUOTE_SECONDS = 600;");
+    expect(prepaid).toContain("export const REMIND_BEFORE_SECONDS = 3 * 86_400;");
   });
 
   it("promise only what the service does", () => {

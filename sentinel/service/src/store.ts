@@ -102,7 +102,21 @@ export interface Profile {
     /** Set when the owner cancelled: the plan runs until then and does not renew. */
     endsAt?: number;
   };
+  /**
+   * Months of the paid tier paid for ahead, in USDC or SOL (prepaid.ts). The plan runs until `until` and does
+   * not renew by itself. `payments`: what was paid, the newest twelve. `remindedFor`: the `until` its owner
+   * was last told is coming.
+   */
+  prepaid?: { until: number; remindedFor?: number; payments: Payment[] };
 }
+export type PayAsset = "USDC" | "SOL";
+/** One payment that was credited: the transaction, what it paid in its asset's smallest units, and for how many months. */
+export interface Payment { signature: string; asset: PayAsset; units: string; months: number; cents: number; at: number }
+/**
+ * An amount a profile was quoted, and the address that marks the payment as this one (a "reference": an
+ * address nobody holds, named in the paying transaction and in no other).
+ */
+export interface PayIntent { reference: string; profile: string; asset: PayAsset; units: string; months: number; cents: number; createdAt: number; expiresAt: number; paidBy?: string }
 /** Which profile a watched wallet belongs to, and the hash of the token its owner's browser reports with. */
 export interface WalletOwner {
   profile: string; addedAt: number; reportTokenHash?: string;
@@ -127,6 +141,10 @@ export interface AccountsData {
   owners: Record<string, WalletOwner>;
   channels: Channel[];
   sessions: Session[];
+  /** Amounts quoted for payment in USDC or SOL and not yet a week old. */
+  intents?: PayIntent[];
+  /** Transactions already credited, and to which profile: a payment pays for one thing, once. */
+  credited?: Record<string, { profile: string; at: number }>;
 }
 const noAccounts = (): AccountsData => ({ profiles: {}, owners: {}, channels: [], sessions: [] });
 
