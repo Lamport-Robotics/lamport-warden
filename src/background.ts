@@ -13,7 +13,7 @@ import { reportOwnSignature } from "./report.js";
 import { LINK_PREFIX, fromSentinelPage, linkFrom, linkKey, readPageAsk, type PageAnswer } from "./sentinel-link.js";
 import { TableReader, readAccount } from "./rpc.js";
 import { configAddress, vaultOfConfig } from "./sentinel.js";
-import { PASSED_ON_WORDS, decoyVerdict, judgeDecoy, readHoldings, type Decoy } from "./decoy.js";
+import { LAMPORT_DECOYS, PASSED_ON_WORDS, decoyVerdict, judgeDecoy, pickDecoy, readHoldings, type Decoy } from "./decoy.js";
 import type { DecoyAskedReply, DecoyFirstReply } from "./messages.js";
 import { KEYS, settingsFrom } from "./settings.js";
 import { Simulator } from "./simulate.js";
@@ -104,12 +104,16 @@ async function decoyFor(origin: string, url: string, frameId: number | undefined
   if (frameId !== 0) return null;
   const s = await settings();
   const web = origin.startsWith("https://") || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
-  if (!s.decoyFirst || !s.decoyAddress || !web || origin === ARMING_ORIGIN) return null;
+  if (!s.decoyFirst || !web || origin === ARMING_ORIGIN) return null;
+  if (!s.decoyAddress && LAMPORT_DECOYS.length === 0) return null; // nothing to show: no mark of the site is made either
+  const mark = await markOf(origin);
   const passed = (await chrome.storage.local.get(PASSED))[PASSED];
-  if (passed && typeof passed === "object" && Object.hasOwn(passed as object, await markOf(origin))) return null;
-  const kept = holdings.get(s.decoyAddress);
-  if (!kept || Date.now() - kept.at > 600_000) holdings.set(s.decoyAddress, { at: Date.now(), held: await readHoldings(s.decoyAddress, s.rpcUrl, plainFetch) });
-  return { address: s.decoyAddress, ...(holdings.get(s.decoyAddress)!.held ?? {}) };
+  if (passed && typeof passed === "object" && Object.hasOwn(passed as object, mark)) return null;
+  const address = pickDecoy(s.decoyAddress, LAMPORT_DECOYS, mark);
+  if (!address) return null;
+  const kept = holdings.get(address);
+  if (!kept || Date.now() - kept.at > 600_000) holdings.set(address, { at: Date.now(), held: await readHoldings(address, s.rpcUrl, plainFetch) });
+  return { address, ...(holdings.get(address)!.held ?? {}) };
 }
 
 /** The page asked the decoy to sign `req`. A site that passes is remembered, and is not shown a decoy again. */

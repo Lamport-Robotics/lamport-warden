@@ -8,7 +8,7 @@ import "../src/polyfill.js";
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { decoyVerdict, judgeDecoy, readHoldings, type Decoy } from "../src/decoy.js";
+import { LAMPORT_DECOYS, decoyVerdict, judgeDecoy, pickDecoy, readHoldings, type Decoy } from "../src/decoy.js";
 import { WardenRejected, installLegacyHook, installStandardHook, keyLike, patchStandardWalletInPlace, wrapStandardWallet, type DecoyGate, type Guard, type GuardRequest } from "../src/intercept.js";
 import { cleanAddress, settingsFrom } from "../src/settings.js";
 import type { FetchLike } from "../src/rpc.js";
@@ -655,3 +655,27 @@ describe("one page, one decoy, one outcome: every door of every wallet", () => {
   });
 });
 
+describe("which decoy a site is shown", () => {
+  const roster = [key(50).toBase58(), key(51).toBase58(), key(52).toBase58()];
+  it("is the owner's own when they named one, and otherwise one of Lamport's, the same one for a site each time", () => {
+    expect(pickDecoy(BAIT.address, roster, "00000001aa")).toBe(BAIT.address);
+    expect(pickDecoy("", roster, "00000000ff")).toBe(roster[0]);
+    expect(pickDecoy("", roster, "00000001ff")).toBe(roster[1]);
+    expect(pickDecoy("", roster, "00000005ff")).toBe(roster[2]);
+    expect(pickDecoy("", roster, "00000005ff")).toBe(pickDecoy("", roster, "00000005ff"));
+    // every one of them is somebody's site's decoy: no address in the list goes unused
+    const seen = new Set(Array.from({ length: 64 }, (_, i) => pickDecoy("", roster, i.toString(16).padStart(8, "0"))));
+    expect([...seen].sort()).toEqual([...roster].sort());
+    // a mark that is not one still gets a decoy
+    expect(pickDecoy("", roster, "")).toBe(roster[0]);
+  });
+
+  it("is nothing when there is none: no address named, and none of Lamport's in the build", () => {
+    expect(pickDecoy("", [], "00000001")).toBeNull();
+  });
+
+  it("carries only real, different addresses in the build", () => {
+    for (const a of LAMPORT_DECOYS) { expect(cleanAddress(a)).toBe(a); expect(PublicKey.isOnCurve(new PublicKey(a).toBytes())).toBe(true); }
+    expect(new Set(LAMPORT_DECOYS).size).toBe(LAMPORT_DECOYS.length);
+  });
+});

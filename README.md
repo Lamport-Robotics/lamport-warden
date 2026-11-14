@@ -81,8 +81,15 @@ stricter. A transaction made only of instructions Warden reads in full is never 
 
 Connecting a wallet to a site hands the site an address and nothing else: nothing is signed. So the first
 address a site is handed does not have to be the owner's. With this on, a site Warden has not seen is handed
-a decoy's: an address that holds something and that nobody here has a key to, so that nothing it is asked to
-sign can be signed.
+a decoy's: an address that holds something and whose key is not in the browser, so that nothing it is asked
+to sign can be signed.
+
+The decoy stands at both of a wallet's doors: its Wallet Standard wallet, and the older object on the window
+(`window.solana.connect()`), which is how the simplest thieving scripts reach a wallet. It answers connect,
+what the wallet says its account is, and the event a site listens for. One page gets one decoy and one
+outcome: caught at one door, it gets nothing more through any; passed at one, the decoy comes down at all.
+A wallet that is already connected to the site, or that answers a connect which asked not to prompt, is left
+as it is: that site has its address already.
 
 A site that robs wallets looks up what the connected address holds and asks it to sign that away. A site
 that does not, waits for its visitor. So what a site asks the decoy for says what the site is, before it has
@@ -103,11 +110,16 @@ What it is not, yet:
   then faces what every site faces: Warden reading each request made of the real wallet. A site that behaves
   first and robs later is in the same place.
 - **The decoy has to be a real address that really holds something**, or a thief that looks it up sees an
-  empty wallet. There is no default: the owner names one in the settings, and it must be an address they
-  have no key to. Which addresses to offer, and whether to rotate them so that they cannot be listed, is
-  not decided.
-- **Wallet Standard only.** A site that reaches a wallet through its older injected object
-  (`window.solana`) is connected as always.
+  empty wallet. There is none in this build: the owner names one in the settings, and it must be an address
+  they have no key to. `LAMPORT_DECOYS` in `src/decoy.ts` is where wallets Lamport funds for this would go;
+  it is empty.
+- **A decoy that can be listed can be recognised.** Whatever addresses a build of Warden carries are public,
+  and a thief that knows them asks them for nothing. Then it is in the first case above. A decoy catches
+  the thief that has not adapted to it.
+- **Not at Solflare's older door.** Nothing can be put in front of `window.solflare` (see the table above),
+  so a page that calls it directly is connected as always. Its Wallet Standard door is covered.
+- **Phantom, Backpack and Solflare are the wallets it was shaped against.** Another wallet gets a decoy only
+  where Warden can also answer for what that wallet says its account is, and none otherwise.
 - **One more press the first time a site is used**, because what the site built was built for the decoy.
   Whether real sites take the change of account gracefully has been tried in tests and in front of the
   real wallet extensions. On a real site it has been tried only as far as connecting (Jupiter takes the

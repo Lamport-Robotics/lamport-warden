@@ -46,6 +46,20 @@ const MEMO = new Set(["MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", "Memo1UhkJR
 /** Programs whose every instruction the engine reads: a transaction made only of these hides nothing. */
 const PLAIN = new Set([SYSTEM, TOKEN, TOKEN_2022, ASSOCIATED, COMPUTE_BUDGET, ...MEMO]);
 
+export { LAMPORT_DECOYS } from "./defaults.js";
+
+/**
+ * The decoy a site is shown: the owner's own if they named one, or else one of Lamport's. `mark` is the
+ * site's mark in this browser (hex), so that a site sees the same one each time, and different sites and
+ * different browsers do not all see the same one.
+ */
+export function pickDecoy(named: string, roster: readonly string[], mark: string): string | null {
+  if (named) return named;
+  if (roster.length === 0) return null;
+  const n = Number.parseInt(mark.slice(0, 8), 16);
+  return roster[(Number.isFinite(n) ? n : 0) % roster.length]!;
+}
+
 /** How much of a holding counts as "nearly all of it". */
 const NEARLY_ALL = 9n; // tenths
 

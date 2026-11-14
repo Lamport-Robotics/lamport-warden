@@ -1,5 +1,5 @@
 /** The settings page. Everything is built with textContent: stored addresses and labels are never parsed as HTML. */
-import { DEFAULT_RPC, PRACTICE_PAGE, SENTINEL_PAGE } from "./defaults.js";
+import { DEFAULT_RPC, LAMPORT_DECOYS, PRACTICE_PAGE, SENTINEL_PAGE } from "./defaults.js";
 import { LINK_PREFIX, linkFrom } from "./sentinel-link.js";
 import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../sentinel/service/src/plans.js";
 import { KEYS, cleanAddress, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
@@ -35,7 +35,8 @@ async function load() {
   // a decoy first
   $<HTMLInputElement>("decoyFirst").checked = s.decoyFirst;
   $<HTMLInputElement>("decoyAddress").value = s.decoyAddress;
-  if (s.decoyFirst && !s.decoyAddress) note("decoyNote", "On, and there is no decoy to show: give its address below. Until then every site is connected as always.", true);
+  $("decoyLamport").hidden = LAMPORT_DECOYS.length === 0;
+  if (s.decoyFirst && !s.decoyAddress && LAMPORT_DECOYS.length === 0) note("decoyNote", "On, and there is no decoy to show: give its address above. Until then every site is connected as always.", true);
   else if (s.decoyFirst && s.rpcUrl === "") note("decoyNote", "On. The RPC is turned off above, so Warden cannot ask what the decoy holds: a thief is then caught by what it asks for, and not by how much.", true);
 
   // simulation
@@ -172,7 +173,7 @@ $("saveDecoy").addEventListener("click", async () => {
   // the sites that passed were judged against the old decoy: they are shown the new one once
   await chrome.storage.local.set({ decoyAddress: address });
   await chrome.storage.local.remove("decoyPassed");
-  note("decoyNote", address ? "Saved." : "Removed. There is no decoy to show.");
+  note("decoyNote", address ? "Saved." : LAMPORT_DECOYS.length ? "Removed. Sites are shown one of Lamport's decoys." : "Removed. There is no decoy to show.");
   await load();
 });
 
