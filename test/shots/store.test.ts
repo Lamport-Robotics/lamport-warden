@@ -118,6 +118,9 @@ it("5: a site that asked a decoy for everything, caught before it saw the wallet
     await page.goto(`${site.origin}/?only=phantom&fresh=1`);
     await page.waitForFunction(() => !!(window as any).__app);
     await page.evaluate(DRESS);
+    // what this site was handed is the decoy, so that is the address it shows
+    const shown = `${decoy.toBase58().slice(0, 4)}...${decoy.toBase58().slice(-4)}`;
+    await page.evaluate((a) => { for (const el of document.querySelectorAll("div, span")) if (el.children.length === 0 && /^GmaD.*AEGB$/.test(el.textContent ?? "")) el.textContent = a; }, shown);
     const prompt = await Prompt.on(page);
     await page.evaluate(() => (window as any).__app.connect("c", "standard:FixturePhantom"));
     await page.waitForFunction(() => (window as any).__results.c !== "pending");
