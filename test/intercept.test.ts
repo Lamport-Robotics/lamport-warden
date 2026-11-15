@@ -38,7 +38,9 @@ describe("wrapping a Wallet Standard wallet", () => {
     const out = await wrapped.features["solana:signTransaction"].signTransaction({ account, transaction: tx, chain: "solana:mainnet" });
     expect(r.asked).toEqual([{ kind: "tx", bytes: tx, owner: account.address }]);
     expect(w.calls).toEqual(["signTransaction"]);
-    expect(out[0].signedTransaction).toBe(tx);
+    // (the wallet was handed Warden's own copy of the bytes, not the page's array: see "what the wallet is handed")
+    expect([...out[0].signedTransaction]).toEqual([...tx]);
+    expect(out[0].signedTransaction).not.toBe(tx);
     expect(r.done).toEqual([true]);
   });
 
@@ -568,6 +570,122 @@ describe("whose request it is", () => {
     versions = ["legacy", 0, 1];
     expect(wallet.features["solana:signTransaction"].supportedTransactionVersions).toEqual(["legacy", 0, 1]);
     expect(Object.keys(wallet.features["solana:signTransaction"]).sort()).toEqual(["signTransaction", "supportedTransactionVersions", "version"]);
+  });
+});
+
+describe("what the wallet is handed is what was read", () => {
+  /** A guard that takes a moment, as an owner reading a prompt does, and records what it was shown. */
+  function slow() {
+    const judged: number[][] = [];
+    const guard: Guard = async (r) => { judged.push([...r.bytes]); await new Promise((d) => setTimeout(d, 5)); return { done() {} }; };
+    return { guard, judged };
+  }
+  const HARMLESS = [1, 1, 1], DRAIN = [9, 9, 9];
+
+  it("at the Wallet Standard door: a page that writes other bytes into its array while the owner is asked changes nothing", async () => {
+    const g = slow(), got: number[][] = [];
+    const wallet: any = { name: "W", version: "1.0.0", accounts: [account], features: {
+      "solana:signTransaction": { version: "1.0.0", signTransaction: async (...i: any[]) => { for (const x of i) got.push([...x.transaction]); return i.map((x) => ({ signedTransaction: x.transaction })); } },
+      "solana:signMessage": { version: "1.0.0", signMessage: async (...i: any[]) => { for (const x of i) got.push([...x.message]); return i.map((x) => ({ signedMessage: x.message, signature: new Uint8Array(64) })); } },
+    } };
+    patchStandardWalletInPlace(wallet, g.guard);
+    // the same array, written over straight after asking
+    const input = { account, transaction: Uint8Array.from(HARMLESS) };
+    const first = wallet.features["solana:signTransaction"].signTransaction(input);
+    input.transaction.set(DRAIN);
+    await first;
+    // another array put in its place
+    const second: any = { account, transaction: Uint8Array.from(HARMLESS) };
+    const swapped = wallet.features["solana:signTransaction"].signTransaction(second);
+    second.transaction = Uint8Array.from(DRAIN);
+    await swapped;
+    // a field that answers differently each time it is read
+    let reads = 0;
+    const sly: any = { account, get transaction() { return Uint8Array.from(reads++ === 0 ? HARMLESS : DRAIN); } };
+    await wallet.features["solana:signTransaction"].signTransaction(sly);
+    // and a message
+    const words = { account, message: Uint8Array.from(HARMLESS) };
+    const said = wallet.features["solana:signMessage"].signMessage(words);
+    words.message.set(DRAIN);
+    await said;
+    expect(g.judged).toEqual([HARMLESS, HARMLESS, HARMLESS, HARMLESS]);
+    expect(got).toEqual(g.judged);
+  });
+
+  it("at the Wallet Standard door: a sign-in whose fields are changed while the owner is asked is the one that was read", async () => {
+    const seen: any[] = [], got: any[] = [];
+    const guard: Guard = async (r) => { seen.push(JSON.parse(new TextDecoder().decode(r.bytes))); await new Promise((d) => setTimeout(d, 5)); return { done() {} }; };
+    const wallet: any = { name: "W", version: "1.0.0", accounts: [account], features: { "solana:signIn": { version: "1.0.0", signIn: async (...i: any[]) => { got.push({ ...i[0] }); return []; } } } };
+    patchStandardWalletInPlace(wallet, guard);
+    const input: any = { domain: "shop.example", statement: "Sign in" };
+    const p = wallet.features["solana:signIn"].signIn(input);
+    input.domain = "bank.example";
+    await p;
+    expect(seen).toEqual([{ domain: "shop.example", statement: "Sign in" }]);
+    expect(got).toEqual([{ domain: "shop.example", statement: "Sign in" }]);
+  });
+
+  it("at the older door: bytes, a message, a list and a request() call are Warden's own copies by the time the wallet has them", async () => {
+    const g = slow(), got: number[][] = [];
+    const provider: any = {
+      publicKey: { toBase58: () => account.address },
+      signTransaction: async (t: any) => { got.push([...t]); return t; },
+      signAllTransactions: async (ts: any[]) => { for (const t of ts) got.push([...t]); return ts; },
+      signMessage: async (m: Uint8Array) => { got.push([...m]); return { signature: new Uint8Array(64) }; },
+      request: async (a: any) => { got.push([...fromBase58(a.params.message)!]); return "ok"; },
+    };
+    const win: Record<string, any> = { solana: provider };
+    installLegacyHook(win, g.guard);
+    const bytes = Uint8Array.from(HARMLESS);
+    const one = win.solana.signTransaction(bytes);
+    bytes.set(DRAIN);
+    await one;
+    const list = [Uint8Array.from(HARMLESS)];
+    const all = win.solana.signAllTransactions(list);
+    list.push(Uint8Array.from(DRAIN)); // slipped in after the list was read
+    list[0]!.set(DRAIN);
+    await all;
+    const words = Uint8Array.from(HARMLESS);
+    const said = win.solana.signMessage(words);
+    words.set(DRAIN);
+    await said;
+    expect(got).toEqual([HARMLESS, HARMLESS, HARMLESS]);
+    // request(): the message of a transaction as text, in an object of the page's
+    const message = Uint8Array.of(1, 0, 1, 1, ...new Uint8Array(40)), other = Uint8Array.of(1, 0, 1, 2, ...new Uint8Array(40));
+    const b58 = (b: Uint8Array) => { let n = 0n; for (const x of b) n = (n << 8n) | BigInt(x); let out = ""; const A = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"; while (n > 0n) { out = A[Number(n % 58n)] + out; n /= 58n; } return out; };
+    const arg: any = { method: "signTransaction", params: { message: b58(message) } };
+    const asked = win.solana.request(arg);
+    arg.params.message = b58(other);
+    arg.params = { message: b58(other) };
+    await asked;
+    expect(got.at(-1)).toEqual([...message]);
+  });
+
+  it("at the older door: a transaction object is read again when it is handed on, and the owner is asked about what it says then", async () => {
+    // an honest object says the same thing each time: one question
+    const honest = slow(), calls: string[] = [];
+    const provider = () => ({ publicKey: { toBase58: () => account.address }, signTransaction: async (t: any) => { calls.push("signTransaction"); return t; } });
+    const a: Record<string, any> = { solana: provider() };
+    installLegacyHook(a, honest.guard);
+    await a.solana.signTransaction({ version: 0, message: { serialize: () => Uint8Array.of(0) }, serialize: () => Uint8Array.from(HARMLESS) });
+    expect(honest.judged).toEqual([HARMLESS]);
+    // one that changes once it has been read: the owner is asked again, about what it now says
+    const changed = slow();
+    const b: Record<string, any> = { solana: provider() };
+    installLegacyHook(b, changed.guard);
+    let n = 0;
+    await b.solana.signTransaction({ version: 0, message: { serialize: () => Uint8Array.of(0) }, serialize: () => Uint8Array.from(n++ === 0 ? HARMLESS : DRAIN) });
+    expect(changed.judged).toEqual([HARMLESS, DRAIN]);
+    // one that never says the same thing twice is refused, and never reaches the wallet
+    const restless = slow();
+    const c: Record<string, any> = { solana: provider() };
+    installLegacyHook(c, restless.guard);
+    calls.length = 0;
+    let m = 0;
+    const refused = await c.solana.signTransaction({ version: 0, message: { serialize: () => Uint8Array.of(0) }, serialize: () => Uint8Array.of(m++) }).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(WardenRejected);
+    expect((refused as Error).message).toBe("Blocked by Lamport Warden: this request kept changing while it was being read");
+    expect(calls).toEqual([]);
   });
 });
 

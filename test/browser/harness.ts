@@ -139,10 +139,10 @@ export class Prompt {
 
   async shown(): Promise<boolean> { return (await this.card()) !== null; }
 
-  /** Clicks a button of the prompt with the mouse, after the moment a person takes to read it. */
-  async click(label: string): Promise<void> {
+  /** Clicks a button of the prompt with the mouse, after the moment a person takes to read it (`atOnce`: without that moment). */
+  async click(label: string, atOnce = false): Promise<void> {
     // "Continue" counts only once the browser has reported the button visible for a moment (overlay.ts)
-    if (label === "Continue to wallet") await this.page.waitForTimeout(750);
+    if (label === "Continue to wallet" && !atOnce) await this.page.waitForTimeout(750);
     const card = await this.card();
     const button = card && find(card, (n) => n.nodeName === "BUTTON" && texts(n).join("") === label)[0];
     if (!button) throw new Error(`the prompt has no "${label}" button`);

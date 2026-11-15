@@ -55,6 +55,8 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
 
     let done = false;
     let watching: { disconnect(): void }[] = [];
+    /** When the page last changed how the prompt's own element is laid out. */
+    let stirred = -Infinity;
     let raising: ReturnType<typeof setInterval> | undefined;
     const finish = (ok: boolean) => {
       if (done) return;
@@ -101,6 +103,7 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
       go.addEventListener("click", (e) => {
         if (!e.isTrusted || go.disabled) return;
         if (tracked && (seenSince === null || performance.now() - seenSince < SEEN_FOR_MS)) return; // covered, altered, or only just shown
+        if (performance.now() - stirred < SEEN_FOR_MS) return; // moved a moment ago: a button slid under a pointer is not a button somebody chose to press
         finish(true);
       });
       row.append(go);
@@ -117,7 +120,23 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
     try {
       host.setAttribute("popover", "manual");
       // the browser's own popover styling gives it a size, a border and a background: none of that
-      host.style.cssText = "all:initial !important;position:fixed !important;inset:0 !important;width:auto !important;height:auto !important;max-width:none !important;max-height:none !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;overflow:visible !important;";
+const laidOut = "all:initial !important;position:fixed !important;inset:0 !important;width:auto !important;height:auto !important;max-width:none !important;max-height:none !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;overflow:visible !important;";
+      host.style.cssText = laidOut;
+      const asSet = host.style.cssText; // as the browser writes it back
+      // The element is the page's to reach, though not what is in it. A page can rewrite its style to move the
+      // whole prompt, and a move does not hide the button from the check above. So what the page changes is
+      // put back, and the button counts again only once it has stood still.
+      if (typeof MutationObserver === "function") {
+        const still = new MutationObserver(() => {
+          stirred = performance.now();
+          for (const a of Array.from(host.attributes)) if (a.name !== "popover" && a.name !== "style") host.removeAttribute(a.name);
+          if (host.getAttribute("popover") !== "manual") host.setAttribute("popover", "manual");
+          if (host.style.cssText !== asSet) host.style.cssText = laidOut;
+          still.takeRecords(); // what was just put back is not the page's doing
+        });
+        still.observe(host, { attributes: true });
+        watching.push(still);
+      }
       raise();
       raising = setInterval(() => { if (!done) raise(); }, 250);
       (raising as { unref?: () => void }).unref?.();
