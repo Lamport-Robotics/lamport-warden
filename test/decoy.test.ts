@@ -781,6 +781,27 @@ describe("the rule, where it was too quick and where it was too slow", () => {
     expect(judgeDecoy(tx(DECOY, sol(DECOY, wsol, 20_000_000n), pays), small).caught).toBe(false);
   });
 
+  it("is not put off by SOL wrapped in one transaction of a call and taken in the next", () => {
+    const one = (bytes: Uint8Array) => ({ kind: "tx" as const, bytes });
+    const wsol = ata(DECOY, WSOL);
+    const wrap = tx(DECOY, sol(DECOY, wsol, 195_000_000n));
+    const sendsOn = new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: wsol, isSigner: false, isWritable: true }, { pubkey: WSOL, isSigner: false, isWritable: false }, { pubkey: ata(THIEF, WSOL), isSigner: false, isWritable: true }, { pubkey: DECOY, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([12]), u64(195_000_000n), Buffer.from([9])]) });
+    expect(judgeCall([one(wrap), one(tx(DECOY, sendsOn))], small)).toMatchObject({ caught: true, asked: ["send out 0.195 SOL, of the 0.2 SOL it holds"] });
+    expect(judgeCall([one(wrap), one(tx(DECOY, closes(wsol, THIEF)))], small)).toMatchObject({ caught: true, asked: ["send out 0.195 SOL, of the 0.2 SOL it holds"] });
+    // wrapped in one and left there, it has gone nowhere
+    expect(judgeCall([one(wrap), one(tx(DECOY, usdc(DECOY, SHOP, 5_000_000n)))], small).caught).toBe(false);
+  });
+
+  it("weighs a permission on a wrapped-SOL account against what the transaction wraps into it", () => {
+    // an older exchange: wrap what is to be traded into an account that already holds a little, let the exchange spend that much, and call it
+    const wsol = ata(DECOY, WSOL);
+    const holds: Decoy = { ...small, lamports: 500_000_000n, tokens: [...small.tokens!, { mint: WSOL.toBase58(), account: wsol.toBase58(), amount: 50_000_000n, decimals: 9 }] };
+    const lets = (to: PublicKey, n: bigint) => new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: wsol, isSigner: false, isWritable: true }, { pubkey: to, isSigner: false, isWritable: false }, { pubkey: DECOY, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([4]), u64(n)]) });
+    expect(judgeDecoy(tx(DECOY, sol(DECOY, wsol, 100_000_000n), lets(key(60), 100_000_000n), program(61)), holds).caught).toBe(false);
+    // for all that will be there, it is what a thief asks
+    expect(judgeDecoy(tx(DECOY, sol(DECOY, wsol, 100_000_000n), lets(THIEF, 150_000_000n), program(61)), holds).caught).toBe(true);
+  });
+
   it("says when an amount was above what the decoy was last known to hold, so that what it holds can be read again", () => {
     // read at 0.2 SOL; the wallet has since been sent a little, and the thief asks for all of what is there now
     const stale = judgeDecoy(tx(DECOY, sol(DECOY, THIEF, 204_995_000n)), small);

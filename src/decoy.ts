@@ -98,6 +98,10 @@ interface Reading {
   plainOnly: boolean;
   /** SOL this transaction puts into one of the decoy's own wrapped-SOL accounts and leaves there. */
   wrapped: Map<string, bigint>;
+  /** The decoy's own wrapped-SOL accounts this transaction takes from, and to whom: closed away, sent on, or lent out. */
+  leaks: Map<string, string>;
+  /** The SOL the decoy holds, when that is known. */
+  solHeld: bigint | null;
   /** Powers it would hand over, each as the end of "It asked the decoy to …", and to whom. */
   hands: string[];
   handsTo: string[];
@@ -112,6 +116,14 @@ function reading(parsed: ParsedTx, decoy: Decoy): Reading {
   const wrappedOwn = new Set<string>([...ownerAtaSet(decoy.address, WSOL), ...(decoy.tokens ?? []).filter((t) => t.mint === WSOL).map((t) => t.account)]);
   /** The decoy's own accounts: what moves into one of them has not left the decoy. */
   const own = new Set<string>([decoy.address, ...(decoy.tokens ?? []).map((t) => t.account), ...wrappedOwn]);
+
+  /** What this transaction wraps into each of the decoy's own wrapped-SOL accounts. */
+  const wrappedIn = new Map<string, bigint>();
+  for (const ix of parsed.instructions) {
+    if (ix.label !== "System.transfer" || ix.accounts[0] !== decoy.address) continue;
+    const into = ix.accounts[1] ?? "";
+    if (wrappedOwn.has(into)) wrappedIn.set(into, (wrappedIn.get(into) ?? 0n) + u64(ix.data, 4));
+  }
 
   // powers handed over
   for (const d of parsed.dangers) {
@@ -130,9 +142,11 @@ function reading(parsed: ParsedTx, decoy: Decoy): Reading {
     const amount = u64(ix.data, 1);
     const held = tokenOf(decoy, checked ? ix.accounts[1] ?? null : null, source);
     const unlimited = amount === U64_MAX;
-    const nearlyAll = !!held && held.amount > 0n && amount * 10n >= held.amount * NEARLY_ALL;
+    // what the account will hold when the permission is used: what it holds, and what this transaction wraps into it
+    const there = (held?.amount ?? 0n) + (wrappedIn.get(source) ?? 0n);
+    const nearlyAll = there > 0n && amount * 10n >= there * NEARLY_ALL;
     // on an account the decoy is known not to hold anything in, a limited permission gives nothing away
-    const nothingThere = decoy.tokens !== undefined && !held;
+    const nothingThere = decoy.tokens !== undefined && there === 0n;
     if (unlimited || nearlyAll || (plainOnly && !nothingThere)) {
       hands.push(`let ${delegate ? short(delegate) : "someone"} spend its tokens${unlimited ? ", without limit" : nearlyAll ? ", all it holds" : ""}`);
       if (delegate) handsTo.push(delegate);
@@ -162,16 +176,12 @@ function reading(parsed: ParsedTx, decoy: Decoy): Reading {
     if (wrappedOwn.has(account) && !own.has(dest)) closedTo.set(account, dest);
   }
   let kept = 0n, solDest = parsed.dest && !own.has(parsed.dest) ? parsed.dest : "";
-  /** What this transaction wraps into each of the decoy's own wrapped-SOL accounts. */
-  const wrappedIn = new Map<string, bigint>();
   for (const ix of parsed.instructions) {
     if (ix.label !== "System.transfer" || ix.accounts[0] !== decoy.address) continue;
     const into = ix.accounts[1] ?? "";
     if (!own.has(into)) continue;
-    const amount = u64(ix.data, 4);
-    if (wrappedOwn.has(into)) wrappedIn.set(into, (wrappedIn.get(into) ?? 0n) + amount);
     if (leaksTo.has(into)) solDest ||= leaksTo.get(into)!;
-    else kept += amount;
+    else kept += u64(ix.data, 4);
   }
   const solOut = parsed.lamportsOut > kept ? parsed.lamportsOut - kept : 0n;
   if (solOut > 0n) outs.push({ kind: "SOL", mint: null, amount: solOut, held: decoy.lamports ?? null, dest: solDest });
@@ -191,7 +201,7 @@ function reading(parsed: ParsedTx, decoy: Decoy): Reading {
   }
   const wrapped = new Map<string, bigint>();
   for (const [account, amount] of wrappedIn) if (!leaksTo.has(account)) wrapped.set(account, amount);
-  return { plainOnly, wrapped, hands, handsTo, outs };
+  return { plainOnly, wrapped, leaks: leaksTo, solHeld: decoy.lamports ?? null, hands, handsTo, outs };
 }
 
 /**
@@ -203,15 +213,27 @@ function decide(readings: Reading[]): DecoyFinding {
   const to = new Set(readings.flatMap((r) => r.handsTo));
   const totals = new Map<string, Out>();
   let above = false, unweighed = false;
+  const count = (o: Out) => {
+    // more than the decoy holds was not worked out from what it holds: that is a price, not a balance
+    if (o.held !== null && o.amount > o.held) { above = true; return; }
+    if (o.held === null) unweighed = true;
+    const sum = totals.get(o.kind);
+    if (sum) { sum.amount += o.amount; if (sum.dest !== o.dest) sum.dest = ""; } else totals.set(o.kind, { ...o });
+  };
+  /** SOL wrapped into an own account by an earlier transaction of the call, and still there. */
+  const wrappedBefore = new Map<string, bigint>();
   for (const r of readings) {
-    if (!r.plainOnly) continue;
-    for (const o of r.outs) {
-      // more than the decoy holds was not worked out from what it holds: that is a price, not a balance
-      if (o.held !== null && o.amount > o.held) { above = true; continue; }
-      if (o.held === null) unweighed = true;
-      const sum = totals.get(o.kind);
-      if (sum) { sum.amount += o.amount; if (sum.dest !== o.dest) sum.dest = ""; } else totals.set(o.kind, { ...o });
+    if (r.plainOnly) {
+      // wrapped by one transaction and taken out of that account by a later one: it left with the later one
+      for (const [account, dest] of r.leaks) {
+        const earlier = wrappedBefore.get(account);
+        if (!earlier) continue;
+        wrappedBefore.delete(account);
+        count({ kind: "SOL", mint: null, amount: earlier, held: r.solHeld, dest });
+      }
+      for (const o of r.outs) count(o);
     }
+    for (const [account, amount] of r.wrapped) wrappedBefore.set(account, (wrappedBefore.get(account) ?? 0n) + amount);
   }
   // With nothing known of what the decoy holds, how much is asked says nothing: only the powers above do.
   const nearlyAll = (o: Out) => o.held !== null && o.held > 0n && o.amount * 10n >= o.held * NEARLY_ALL;
