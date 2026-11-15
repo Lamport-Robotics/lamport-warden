@@ -19,7 +19,7 @@ and answer them. It holds no signing key and moves nothing. There is no rescuer 
 | `src/server.ts` | The HTTP API. |
 | `src/main.ts`, `src/cli.ts` | The process: the watcher on a timer and the API beside it. |
 | `src/billing.ts` | The paid plan: a monthly Stripe subscription at one of two prices, the webhook that moves a profile between tiers, and the daily look at who holds the token. |
-| `src/prepaid.ts`, `src/solprice.ts` | The same plan paid ahead in USDC or SOL: the quote and its reference, the payment read from the chain, and the price of SOL from sources that have to agree. |
+| `src/prepaid.ts`, `src/solprice.ts` | The same plan paid ahead in USDC or SOL: the quote and its reference, the payment read from the chain, and the price of SOL from sources that have to agree. And, where it is turned on, paid by burning LAMPORT. |
 | `src/program.ts` | The rescue program's instructions, for arming (the owner signs) and for a rescue, and the plan of a rescue: which accounts, in what order, in how many transactions. |
 | `src/crypto.ts` | Random tokens and their hashes, the sealed box for channel addresses, and the check of a wallet's signature. All from Node itself. |
 
@@ -591,6 +591,32 @@ of the customer and the subscription.
     subscription, and a card plan is not started over months already paid for.
   - `prepaid.test.ts` runs it against a list of transactions; `prepaid.validator.test.ts` runs a real token
     payment and a real SOL payment on a local validator, and is part of `pnpm test:rescue`.
+- **Paid by burning LAMPORT** (`src/prepaid.ts`), where `SENTINEL_BURN_PER_MONTH` says how many whole
+  tokens burn for a month. It is off until that is set, and it needs `SENTINEL_PAY_TO` beside it, since it
+  is one more way of paying ahead: the same months, the same profiles, nothing renews.
+  - Nothing is sent to Lamport or to anybody. The paying transaction is one `BurnChecked` of the quoted
+    amount from the payer's own token account, naming the quote's reference. The tokens stop existing and
+    the token's supply is that much smaller. No key of Lamport's is involved, and Lamport holds nothing
+    afterwards that it could sell.
+  - The number is the same for everybody. It is not a price in dollars, so there is no holder's price to
+    work out and no wallet's balance is read for the quote. A quote holds a week.
+  - It is counted like any payment, by what the chain did: by how much less of the token there is in the
+    accounts the transaction touched, after than before, at `finalized`. A transfer leaves that sum as it
+    was and counts for nothing. A token that keeps back a fee on transfers would lose some from that sum on
+    a transfer too, so burning is not quoted for one (LAMPORT has no such fee and can never be given one).
+  - A short payment in USDC or SOL can be sent back. A short burn cannot, so burns that name one quote add
+    up, and the plan starts when they come to the amount. Every transaction that went into it is spent.
+  - There is nothing to refund: what was burned cannot be brought back by anybody. The page says so before
+    the wallet is asked (`burnTerms` in `src/plans.ts`), and so do the terms.
+  - Warden, in front of the wallet, reads that transaction on the Sentinel page as "Burns 25,000 LAMPORT
+    from this wallet…", in whole tokens and by name (`burnPayment` in the extension's `src/sentinel.ts`),
+    and always asks. From any other site the same bytes get the engine's own reading of a burn.
+  - A payment request for a phone wallet (Solana Pay) can only ask for a transfer, so a burn is made from a
+    wallet in the browser.
+  - `burn-payment.test.ts` runs it against a list of transactions. `prepaid.validator.test.ts` burns a
+    token under Token-2022 for real on a local validator, and checks that the supply is then smaller by
+    exactly the amount and that a transfer naming the quote counts for nothing. It has not been run with
+    LAMPORT itself, on mainnet.
 - **A real payment before it is on sale.** `SENTINEL_CHECKOUT_TESTERS` names up to twenty wallet addresses,
   separated by commas. A profile that one of them is in sees the button and can buy while checkout is closed
   to everyone else, so the whole path (the page, Stripe's checkout with a real card, the webhook, the tier,

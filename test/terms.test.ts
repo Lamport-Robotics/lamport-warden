@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PRICE_CENTS, RESCUE_TERMS, prepaidTerms, purchaseTerms } from "../sentinel/service/src/plans.js";
+import { BURN_TERMS, HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PRICE_CENTS, RESCUE_TERMS, burnTerms, prepaidTerms, purchaseTerms } from "../sentinel/service/src/plans.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (...p: string[]) => readFileSync(join(root, ...p), "utf8");
@@ -32,6 +32,21 @@ describe("the terms", () => {
     // ten minutes for a price in SOL, three days' notice before the time is up
     expect(prepaid).toContain("export const SOL_QUOTE_SECONDS = 600;");
     expect(prepaid).toContain("export const REMIND_BEFORE_SECONDS = 3 * 86_400;");
+  });
+
+  it("state paying by burning in the page's own words, with no number of tokens: the page shows that", () => {
+    const list = /<ul id="burn-terms">([\s\S]*?)<\/ul>/.exec(terms)![1]!;
+    const lines = [...list.matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]!.trim());
+    expect(lines).toEqual([...BURN_TERMS]);
+    // the two lines that do not depend on the amount are the same for any amount
+    expect(burnTerms("25000", 3).slice(1)).toEqual([...BURN_TERMS]);
+    const prepaid = read("sentinel", "service", "src", "prepaid.ts");
+    // final, the same number for everyone, and burns that add up: what the code does
+    expect(text).toContain("A burn counts when the chain has made it final. Burns that name the same amount shown add up, and the plan starts when they come to at least that amount.");
+    expect(prepaid).toContain("(burnedSoFar += here)");
+    expect(prepaid).toContain("BigInt(this.cfg.burn!.perMonth) * BigInt(months)");
+    expect(text).toContain("A payment made by burning $LAMPORT is the exception: there is nothing left of it to send back, at any time.");
+    expect(text).toContain("not a promise about what it is worth");
   });
 
   it("promise only what the service does", () => {

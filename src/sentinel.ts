@@ -21,6 +21,9 @@
  * saw nothing (the wallet was set up from another one) reads the setup from the chain, and then asks for the
  * end of the vault's address again, as it does at setup: it is the first time this browser has shown it.
  *
+ * One more shape is read here that is nothing to do with arming: the burn of LAMPORT that pays for the
+ * plan (burnPayment below). It is read here because it, too, is said differently on the Sentinel page alone.
+ *
  * This lives in the extension, not in the engine, so the engine pinned from Pincer1 does not move.
  */
 import { PublicKey } from "@solana/web3.js";
@@ -30,12 +33,14 @@ import { fmtSol } from "../pincer1/daemon/src/tx/explain.js";
 
 /** lamport-sentinel on devnet. There is no mainnet program. */
 export const SENTINEL_PROGRAM = "DHM2wm7S5Q4AzfzNFJV85tN3htUpYYEw38CdUApW6crK";
-import { ARMING_ORIGIN } from "./defaults.js";
+import { ARMING_ORIGIN, LAMPORT_DECIMALS, LAMPORT_MINT } from "./defaults.js";
 export { ARMING_ORIGIN };
 
 const SYSTEM = "11111111111111111111111111111111";
 const COMPUTE_BUDGET = "ComputeBudget111111111111111111111111111111";
-const TOKEN_PROGRAMS = new Set(["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]);
+const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+const TOKEN_PROGRAMS = new Set(["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", TOKEN_2022]);
+const ASSOCIATED_TOKEN_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 const DEFAULT_DELAY_HOURS = 72;
 
 /** Anchor's `sha256("global:<name>")[..8]` for each instruction of the program (checked in test/sentinel.test.ts). */
@@ -130,6 +135,44 @@ export function vaultOfConfig(account: { owner: string; data: Uint8Array } | nul
   } catch { return null; }
 }
 
+/** An amount in a token's smallest units, as whole tokens: 25000500000 at six places is "25,000.5". */
+export function wholeTokens(units: bigint, decimals: number): string {
+  const base = 10n ** BigInt(decimals);
+  const whole = (units / base).toString().replace(/\B(?=(\d{3})+$)/g, ",");
+  const part = decimals ? (units % base).toString().padStart(decimals, "0").replace(/0+$/, "") : "";
+  return part ? `${whole}.${part}` : whole;
+}
+
+/**
+ * Paying for Sentinel by burning LAMPORT (sentinel/service/src/prepaid.ts): one BurnChecked of that token,
+ * from the owner's own account of it, and nothing else in the transaction. The engine reads a burn in the
+ * token's smallest units and by the token's address, for any token. This says the same thing in whole tokens
+ * and by name, which Warden can do for the one token whose address and decimals it has pinned.
+ *
+ * It says what the transaction does and no more. Whether the Sentinel service then counts it as a payment is
+ * the service's business, and nothing here can check it. And it is always asked about: a burn is for good.
+ */
+function burnPayment(parsed: ParsedTx, rest: ParsedInstruction[], owner: string): SentinelReading | null {
+  if (rest.length !== 1) return null;
+  const ix = rest[0]!;
+  // BurnChecked: [the account burned from, the token, its owner], then the reference the payment is found by. u64 amount, u8 decimals.
+  if (ix.program !== TOKEN_2022 || ix.data[0] !== 15 || ix.data.length !== 10 || ix.accounts.length !== 4) return null;
+  const amount = u64(ix.data, 1);
+  if (ix.accounts[1] !== LAMPORT_MINT || ix.accounts[2] !== owner || ix.data[9] !== LAMPORT_DECIMALS || amount === null || amount === 0n) return null;
+  // the owner's own account of the token, and not one that somebody let this wallet spend from
+  const own = PublicKey.findProgramAddressSync([new PublicKey(owner).toBytes(), new PublicKey(TOKEN_2022).toBytes(), new PublicKey(LAMPORT_MINT).toBytes()], new PublicKey(ASSOCIATED_TOKEN_PROGRAM))[0].toBase58();
+  if (ix.accounts[0] !== own) return null;
+  return {
+    kind: "verdict",
+    verdict: {
+      level: "explain",
+      sentence: `Burns ${wholeTokens(amount, LAMPORT_DECIMALS)} LAMPORT from this wallet. That is how the Sentinel page takes payment in LAMPORT. The tokens are destroyed: nobody receives them, and nobody can bring them back.`,
+      reasons: [],
+      parsed,
+    },
+  };
+}
+
 const block = (sentence: string, reason: string, parsed: ParsedTx): SentinelReading => ({ kind: "verdict", verdict: { level: "block", sentence, reasons: [reason], parsed } });
 
 /**
@@ -159,6 +202,8 @@ export function readSentinel(parsed: ParsedTx, owner: string, origin: string, st
 
   // ── no call to the program: arming more token accounts, or one rung of the SOL ladder ──
   if (calls.length === 0) {
+    const burn = burnPayment(parsed, rest, owner);
+    if (burn) return burn;
     if (!state) return { kind: "none" };
     const delegate = delegateAddress(owner, state.vault);
     if (rest.length > 0 && onlyApprovals && approvals.every((a) => a!.delegate === delegate)) {

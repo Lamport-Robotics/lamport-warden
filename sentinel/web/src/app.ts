@@ -7,7 +7,7 @@
  */
 import { getWallets } from "@wallet-standard/app";
 import { PAGE_ASKS, WARDEN_ANSWERS, type PageAnswer, type PageAsk } from "../../../src/sentinel-link.js";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, RESCUE_TERMS, WATCH_FEATURES, decimal, paceText, prepaidTerms, purchaseTerms, renewalTerms } from "../../service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, RESCUE_TERMS, WATCH_FEATURES, burnTerms, decimal, grouped, paceText, prepaidTerms, purchaseTerms, renewalTerms } from "../../service/src/plans.js";
 import { dayOf } from "../../service/src/notices.js";
 import { KNOWN_MINTS } from "../../../pincer1/daemon/src/tx/known.js";
 import { LINK_STATEMENT, SIGN_IN_STATEMENT, signInText } from "../../service/src/signin-text.js";
@@ -22,8 +22,8 @@ interface Alert { id: string; wallet: string; at: number | null; level: "info" |
 interface RescueInfo { available: boolean; on: boolean; plan: boolean; auto: boolean; chain: string | null }
 interface TokenView { account: string; mint: string; amount: string; decimals: number }
 interface RescueStanding { armed: boolean; ours: boolean; vault: string | null; rescuers: "lamport" | "own" | null; covered: TokenView[]; uncovered: (TokenView & { why: "not set up" | "frozen" | "cannot be moved"; other?: string })[] }
-type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null; paidUntil?: number | null; crypto?: { payTo: string; assets: ("USDC" | "SOL")[]; months: number[] } | null };
-type PayQuote = { reference: string; payTo: string; asset: "USDC" | "SOL"; units: string; decimals: number; months: number; cents: number; expiresAt: number; url: string };
+type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null; paidUntil?: number | null; crypto?: { payTo: string; assets: ("USDC" | "SOL" | "LAMPORT")[]; months: number[]; burn?: { perMonth: number } } | null };
+type PayQuote = { reference: string; payTo: string; asset: "USDC" | "SOL" | "LAMPORT"; units: string; decimals: number; months: number; cents: number; expiresAt: number; url: string; burned?: true };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -484,7 +484,8 @@ function payAhead(offer: NonNullable<Extract<Plan, { enabled: true }>["crypto"]>
   const asset = el("select"), months = el("select");
   asset.setAttribute("aria-label", "Pay in");
   months.setAttribute("aria-label", "For how long");
-  for (const a of offer.assets) { const o = el("option", a); o.value = a; asset.append(o); }
+  // (LAMPORT is not paid to anybody: it is burned, and the choice says so before anything else does)
+  for (const a of offer.assets) { const o = el("option", a === "LAMPORT" ? "LAMPORT, burned" : a); o.value = a; asset.append(o); }
   for (const m of offer.months) { const o = el("option", m === 1 ? "1 month" : `${m} months`); o.value = String(m); months.append(o); }
   const show = el("button", "Show the amount");
   const pick = el("p", `${lead} `, "soft");
@@ -503,12 +504,11 @@ function payAhead(offer: NonNullable<Extract<Plan, { enabled: true }>["crypto"]>
 }
 
 function quoted(out: HTMLElement, q: PayQuote): void {
-  const amount = `${decimal(BigInt(q.units), q.decimals)} ${q.asset}`;
-  const to = el("code", q.payTo, "addr");
-  const line = el("p", `Send exactly ${amount} to `, "plain");
-  line.append(to);
+  const amount = `${(q.burned ? grouped : decimal)(BigInt(q.units), q.decimals)} ${q.asset}`;
+  const line = el("p", q.burned ? `This burns exactly ${amount}. It is not sent to anybody.` : `Send exactly ${amount} to `, "plain");
+  if (!q.burned) line.append(el("code", q.payTo, "addr"));
   const terms = el("ul", "", "terms");
-  terms.append(...prepaidTerms(q.cents, q.months).map((t) => el("li", t)));
+  terms.append(...(q.burned ? burnTerms(grouped(BigInt(q.units), q.decimals), q.months) : prepaidTerms(q.cents, q.months)).map((t) => el("li", t)));
   if (q.asset === "SOL") terms.append(el("li", `This price in SOL holds for ten minutes, until ${new Date(q.expiresAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Paid later than that, it is not counted: ask for the amount again.`));
   const status = el("p", "", "soft");
   const look = el("button", "I have paid: look for it", "small");
@@ -535,7 +535,8 @@ function quoted(out: HTMLElement, q: PayQuote): void {
   const request = el("input");
   request.readOnly = true; request.value = q.url; request.setAttribute("aria-label", "Payment request"); request.addEventListener("focus", () => request.select());
   phone.append(request);
-  out.replaceChildren(line, terms, pays, phone, look, status);
+  // (a burn is made from a wallet in this browser: a payment request can only ask a wallet for a transfer)
+  if (q.burned) out.replaceChildren(line, terms, pays, look, status); else out.replaceChildren(line, terms, pays, phone, look, status);
   out.hidden = false;
 }
 
@@ -546,6 +547,7 @@ async function watchFor(q: PayQuote, status: HTMLElement, times: number): Promis
     const r = await call("POST", "/billing/crypto/check", { reference: q.reference });
     const s = r.status === 200 ? r.body?.status : null;
     if (s === "paid") { status.textContent = ""; say(`Paid. Your plan runs until ${dayOf(Number(r.body.until))}.`); await refresh(); return; }
+    if (s === "short" && q.burned) { status.textContent = `So far ${grouped(BigInt(r.body.arrived), q.decimals)} LAMPORT of ${grouped(BigInt(r.body.wanted), q.decimals)} has been burned for this. Burns that name it add up: when the rest is burned, it counts.`; return; }
     if (s === "short") { status.textContent = `A payment arrived that is short: ${decimal(BigInt(r.body.arrived), q.decimals)} ${q.asset} of ${decimal(BigInt(r.body.wanted), q.decimals)}. Nothing was started. Write to support@lamportrobotics.com from the Terms page to have it sent back, or send the full amount.`; return; }
     if (s === "late") { status.textContent = "A payment arrived after this price in SOL had run out, so it was not counted. Write to support@lamportrobotics.com to have it sent back or counted."; return; }
     if (r.status !== 200) { status.textContent = String(r.body?.error ?? "That could not be looked up just now."); return; }

@@ -138,7 +138,8 @@ export interface Profile {
    */
   prepaid?: { until: number; remindedFor?: number; payments: Payment[] };
 }
-export type PayAsset = "USDC" | "SOL";
+/** USDC and SOL are paid to Lamport. LAMPORT is not paid to anybody: it is burned (prepaid.ts). */
+export type PayAsset = "USDC" | "SOL" | "LAMPORT";
 /** One payment that was credited: the transaction, what it paid in its asset's smallest units, and for how many months. */
 export interface Payment { signature: string; asset: PayAsset; units: string; months: number; cents: number; at: number }
 /**

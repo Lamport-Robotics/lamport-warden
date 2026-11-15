@@ -182,12 +182,13 @@ export class Accounts {
 
   /**
    * Credits a payment: the transaction is marked as spent, the quote as paid by it, and the profile is paid
-   * until `until`. False when the transaction was credited before: it is never credited twice.
+   * until `until`. False when the transaction was credited before: it is never credited twice. `also`:
+   * earlier transactions that went into the same payment (burns that add up), spent with it.
    */
-  credit(intent: PayIntent, payment: Payment, until: number): boolean {
+  credit(intent: PayIntent, payment: Payment, until: number, also: readonly string[] = []): boolean {
     const p = this.profile(intent.profile);
-    if (!p || this.credited(payment.signature)) return false;
-    (this.data.credited ??= {})[payment.signature] = { profile: p.id, at: payment.at };
+    if (!p || [payment.signature, ...also].some((s) => this.credited(s))) return false;
+    for (const s of [payment.signature, ...also]) (this.data.credited ??= {})[s] = { profile: p.id, at: payment.at };
     intent.paidBy = payment.signature;
     p.prepaid = { until, payments: [...(p.prepaid?.payments ?? []), payment].slice(-12) };
     this.store.flush();

@@ -11,7 +11,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ComputeBudgetProgram, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { judge, recordSigned, type Store } from "../src/judge.js";
-import { ARMING_ORIGIN, DISCRIMINATORS, SENTINEL_PROGRAM, configAddress, delegateAddress, type SentinelState } from "../src/sentinel.js";
+import { ARMING_ORIGIN, DISCRIMINATORS, SENTINEL_PROGRAM, configAddress, delegateAddress, wholeTokens, type SentinelState } from "../src/sentinel.js";
+import { LAMPORT_DECIMALS, LAMPORT_MINT } from "../src/defaults.js";
 import type { MemoryState } from "../pincer1/daemon/src/warden/index.js";
 
 const V = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "sentinel", "vectors", "instructions.json"), "utf8"));
@@ -212,5 +213,72 @@ describe("the SOL ladder", () => {
     await notRecognised(rung(new PublicKey(V.vault), 9_000_000_000), false);                 // before this browser saw any setup
     await notRecognised(rung(new PublicKey(V.vault), 9_000_000_000, [SystemProgram.transfer({ fromPubkey: owner.publicKey, toPubkey: key(91), lamports: 1 })])); // with a second transfer
     await notRecognised(rung(new PublicKey(V.vault), 9_000_000_000, [], key(92)));           // a nonce someone else controls
+  });
+});
+
+describe("paying for the plan by burning LAMPORT", () => {
+  const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+  const ASSOCIATED = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+  const MINT = new PublicKey(LAMPORT_MINT);
+  const accountOf = (who: PublicKey, mint = MINT, program = TOKEN_2022) => PublicKey.findProgramAddressSync([who.toBytes(), program.toBytes(), mint.toBytes()], ASSOCIATED)[0];
+  /** BurnChecked as the Sentinel service makes it: the account, the token, its owner, and the quote's reference. */
+  const burn = (o: { units?: bigint; decimals?: number; mint?: PublicKey; program?: PublicKey; from?: PublicKey; by?: PublicKey; reference?: PublicKey | null } = {}) => {
+    const data = Buffer.alloc(10); data[0] = 15; data.writeBigUInt64LE(o.units ?? 25_000_000_000n, 1); data[9] = o.decimals ?? 6;
+    const mint = o.mint ?? MINT, program = o.program ?? TOKEN_2022, by = o.by ?? owner.publicKey;
+    return new TransactionInstruction({ programId: program, data, keys: [
+      { pubkey: o.from ?? accountOf(owner.publicKey, mint, program), isSigner: false, isWritable: true }, { pubkey: mint, isSigner: false, isWritable: true }, { pubkey: by, isSigner: true, isWritable: false },
+      ...(o.reference === null ? [] : [{ pubkey: o.reference ?? key(61), isSigner: false, isWritable: false }]),
+    ] });
+  };
+  const SAID = "Burns 25,000 LAMPORT from this wallet. That is how the Sentinel page takes payment in LAMPORT. The tokens are destroyed: nobody receives them, and nobody can bring them back.";
+
+  it("is said in whole tokens and by name on the Sentinel page, and is always asked about", async () => {
+    const v = await ask(tx([burn()]), ARMING_ORIGIN);
+    expect(v.level).toBe("explain");
+    expect(v.sentence).toBe(SAID);
+    // the same with a fee setting beside it, and whether or not this browser saw a Sentinel setup
+    const withFee = await ask(tx([ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }), burn({ units: 75_000_500_000n })]), ARMING_ORIGIN, { vault: V.vault });
+    expect(withFee.level).toBe("explain");
+    expect(withFee.sentence).toMatch(/^Burns 75,000\.5 LAMPORT from this wallet\./);
+    // paid again, it is asked about again: nothing about a burn is learned and let through
+    const s = stores();
+    const first = await judge({ kind: "tx", bytes: tx([burn()]), owner: OWNER }, ARMING_ORIGIN, s.store);
+    await recordSigned(first, s.store, 1_794_312_000);
+    expect((await judge({ kind: "tx", bytes: tx([burn()]), owner: OWNER }, ARMING_ORIGIN, s.store)).verdict.level).toBe("explain");
+  });
+
+  it("is the engine's own reading from any other site", async () => {
+    for (const origin of [ELSEWHERE, "https://warden.lamportrobotics.com.evil.example", "http://warden.lamportrobotics.com", ""]) {
+      const v = await ask(tx([burn()]), origin);
+      expect(v.sentence, origin).not.toMatch(/takes payment/);
+      expect(v.sentence, origin).toMatch(/burns/i);
+      expect(v.level, origin).not.toBe("allow");
+    }
+  });
+
+  it("is left to the engine when it is not exactly that", async () => {
+    const notRecognised = async (bytes: Uint8Array) => {
+      const v = await ask(bytes, ARMING_ORIGIN);
+      expect(v.sentence).not.toMatch(/takes payment/);
+      expect(v.level).not.toBe("allow");
+    };
+    await notRecognised(tx([burn({ mint: key(70) })]));                                             // another token
+    await notRecognised(tx([burn({ program: TOKEN, from: accountOf(owner.publicKey, MINT, TOKEN_2022) })])); // under the other token program
+    await notRecognised(tx([burn({ from: accountOf(key(71)) })]));                                  // from an account that is not this wallet's own
+    await notRecognised(tx([burn({ decimals: 9 })]));                                               // decimals the token does not have
+    await notRecognised(tx([burn({ units: 0n })]));                                                 // nothing
+    await notRecognised(tx([burn({ reference: null })]));                                           // without the reference
+    await notRecognised(tx([burn(), burn({ units: 1n })]));                                         // two burns
+    await notRecognised(tx([burn(), SystemProgram.transfer({ fromPubkey: owner.publicKey, toPubkey: key(72), lamports: 1 })])); // with a payment beside it
+    await notRecognised(tx([burn(), approve(key(73))]));                                            // with a permission beside it
+  });
+
+  it("writes amounts as whole tokens", () => {
+    expect(LAMPORT_DECIMALS).toBe(6);
+    expect(wholeTokens(25_000_000_000n, 6)).toBe("25,000");
+    expect(wholeTokens(1_234_567_000_001n, 6)).toBe("1,234,567.000001");
+    expect(wholeTokens(999n, 6)).toBe("0.000999");
+    expect(wholeTokens(1_000n, 0)).toBe("1,000");
+    expect(wholeTokens(18_446_744_073_709_551_615n, 6)).toBe("18,446,744,073,709.551615");
   });
 });

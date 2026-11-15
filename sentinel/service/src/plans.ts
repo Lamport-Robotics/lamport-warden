@@ -82,6 +82,24 @@ export const prepaidTerms = (cents: number, months: number): string[] => [
   "Paying again before the time is up adds to it. A refund is on the same terms as by card, and is sent back to the wallet that paid.",
 ];
 
+/** The same, with the whole part in thousands: 25000500000 at six places is "25,000.5". How a number of tokens to burn is written, here and by Warden. */
+export function grouped(units: bigint, decimals: number): string {
+  const [whole, part] = decimal(units, decimals).split(".");
+  return `${whole!.replace(/\B(?=(\d{3})+$)/g, ",")}${part ? `.${part}` : ""}`;
+}
+
+/**
+ * What someone is told before they pay by burning LAMPORT: the same, and that what is burned is gone, to
+ * everybody, and so cannot be given back.
+ */
+export const burnTerms = (amount: string, months: number): string[] => [
+  `${amount} LAMPORT pays for ${months === 1 ? "one month" : `${months} months`}, once. Nothing is charged again and nothing renews: when the time is up your profile goes back to Watch, and nothing is deleted. Your alert channels are told three days before.`,
+  "It is one transaction that burns exactly the amount shown, from the wallet that signs it. The tokens are destroyed: they go to nobody, Lamport included, and there is that much less LAMPORT. Like everything on the chain it is public: anyone can see that the paying wallet burned them.",
+  "Paying again before the time is up adds to it. Burned tokens cannot be brought back by anybody, so they are not refunded. If the time you paid for was not given, write to support@lamportrobotics.com and it will be.",
+];
+/** The two of those lines that hold for any amount: what the terms page states. */
+export const BURN_TERMS: readonly string[] = burnTerms("0", 1).slice(1);
+
 /** The same, for someone who already has the plan. */
 export const renewalTerms = (cents: number, centsFull: number = PRICE_CENTS, centsHolder: number = HOLDER_PRICE_CENTS, holderMin: number = HOLDER_MIN_LAMPORT): string =>
   `It renews every month at ${dollars(cents)} until you cancel, which you can do any time with the button above; it then runs to the end of the month you paid for. The price is ${dollars(centsHolder)} a month while this profile's wallets hold ${tokens(holderMin)} $LAMPORT between them and ${dollars(centsFull)} otherwise, checked every day; your alert channels are told before a bill at a different price.`;
