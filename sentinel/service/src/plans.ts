@@ -96,10 +96,14 @@ export const lamportTerms = (amount: string, months: number): string[] => [
   `${amount} LAMPORT pays for ${months === 1 ? "one month" : `${months} months`}, once. Nothing is charged again and nothing renews: when the time is up your profile goes back to Watch, and nothing is deleted. Your alert channels are told three days before.`,
   ...LAMPORT_TERMS,
 ];
-/** The two of those lines that hold for any amount: what the terms page states. */
+/**
+ * The lines of those that hold for any amount: what the terms page states. The last says what becomes of
+ * the tokens, which is Lamport's own doing after the payment and nothing the service does.
+ */
 export const LAMPORT_TERMS: readonly string[] = [
   "It is one transfer of exactly the amount shown, to Lamport's treasury wallet, from any wallet. Like every transfer on the chain it is public: anyone can see that the paying wallet paid Lamport.",
   "Paying again before the time is up adds to it. A refund is on the same terms as by card, and is sent back in LAMPORT to the wallet that paid.",
+  "Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. Lamport does that itself, after the payment; this page does not, and none of it is a promise about what the token is worth.",
 ];
 
 /** The same, for someone who already has the plan. */

@@ -622,8 +622,9 @@ of the customer and the subscription.
   set, neither has a default, and it needs `SENTINEL_PAY_TO` beside it, since it is one more way of paying
   ahead: the same months, the same profiles, nothing renews.
   - It is a transfer, like the one in USDC, to another wallet: the tokens go to the treasury wallet and
-    not to the wallet USDC and SOL go to. What Lamport then does with them is done by hand, from that
-    wallet, and is no part of the service or of what is sold.
+    not to the wallet USDC and SOL go to. Lamport keeps a part of them there, locked for the long term,
+    and burns the rest. That is done by Lamport, by hand, from that wallet: the service holds no key, does
+    neither, and the page and the terms say so in the same words.
   - The number is the same for everybody. It is not a price in dollars, so there is no holder's price to
     work out and no wallet's balance is read for the quote. A quote holds a week.
   - A quote keeps the wallet, the token and the decimals it was made for. A payment made on it is counted

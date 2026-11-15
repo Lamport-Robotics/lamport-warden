@@ -573,9 +573,10 @@ describe("a chain that answers badly", () => {
 });
 
 describe("what somebody is told before they pay in LAMPORT", () => {
-  it("says what it pays for, that it goes to Lamport's treasury wallet, that it is public, and how a refund is made", () => {
+  it("says what it pays for, that it goes to Lamport's treasury wallet, that it is public, how a refund is made, and what becomes of the tokens", () => {
     const terms = lamportTerms("25,000", 1);
-    expect(terms).toHaveLength(3);
+    expect(terms).toHaveLength(4);
+    expect(terms[3]).toBe("Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. Lamport does that itself, after the payment; this page does not, and none of it is a promise about what the token is worth.");
     expect(terms[0]).toBe("25,000 LAMPORT pays for one month, once. Nothing is charged again and nothing renews: when the time is up your profile goes back to Watch, and nothing is deleted. Your alert channels are told three days before.");
     expect(terms.slice(1)).toEqual([...LAMPORT_TERMS]);
     expect(terms[1]).toContain("to Lamport's treasury wallet");

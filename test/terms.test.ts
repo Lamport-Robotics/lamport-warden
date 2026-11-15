@@ -50,8 +50,11 @@ describe("the terms", () => {
     expect(text).toContain("The service looks for a payment while the Sentinel page is open and, by itself, about once an hour for three days after it was last asked about, so it does not depend on the page staying open.");
     expect(prepaid).toContain("SWEEP_SECONDS = 3 * 86_400");
     expect(read("sentinel", "service", "src", "main.ts")).toContain("await prepaid.sweep()");
-    // what Lamport does with the tokens is not part of what is bought
-    expect(text).toContain("What Lamport does with the tokens it is paid is not part of what you buy, and nothing here is a promise about what the token is worth.");
+    // what becomes of the tokens is said, as Lamport's own doing and no promise about the token
+    expect(text).toContain("Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. Lamport does that itself, after the payment; this page does not, and none of it is a promise about what the token is worth.");
+    expect(text).toContain("It is not a share in anything, and what Lamport then does with the tokens is not a promise about what the token is worth.");
+    // and the service does neither: it has no key, and builds nothing but the payer's own transfer
+    expect(prepaid).not.toMatch(/burn/i);
   });
 
   it("promise only what the service does", () => {
