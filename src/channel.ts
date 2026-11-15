@@ -13,8 +13,15 @@
  *   - Each side keeps its own untouched references to addEventListener and dispatchEvent, taken before the
  *     page could replace them.
  *
- * This keeps a hostile page from approving its own request or teaching Warden to trust an address. It does
- * not make the extension a security boundary: a page can still talk to a wallet in ways Warden never sees.
+ * This keeps a page from approving its own request by sending the answer itself, and from teaching Warden to
+ * trust an address: what is trusted is written only on this side, for a request the owner let through.
+ *
+ * It does not hold against a page that sets out to defeat Warden. The page-world script runs in the page's
+ * own world and shares every built-in with it (Map, Promise, JSON, setTimeout). A page that replaces those
+ * can read what that script keeps, answer its own request, or make it ask nothing at all. And a page can
+ * talk to a wallet in ways Warden never sees. The extension is not a security boundary, and nothing here
+ * should be written as though it were. What stays out of a page's reach is on this side: the prompt, the
+ * history, and the marks.
  */
 export const HANDSHAKE = "lamport-warden:handshake";
 export const HELLO = "lamport-warden:hello";

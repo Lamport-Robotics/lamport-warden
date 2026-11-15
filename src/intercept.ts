@@ -84,7 +84,16 @@ function sameAs(r: GuardRequest): string | null {
   return out;
 }
 
-async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Promise<T>): Promise<T> {
+/** What was read does not say what the request says now: it is to be read again, as it now is. */
+class ReadAgain extends Error { constructor(public reqs: GuardRequest[]) { super("read again"); } }
+const sameBytes = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
+const sameRequests = (a: GuardRequest[], b: GuardRequest[]): boolean => a.length === b.length && a.every((r, i) => r.kind === b[i]!.kind && r.owner === b[i]!.owner && sameBytes(r.bytes, b[i]!.bytes));
+
+/**
+ * `again`: reads the request once more at the moment it is about to be handed to the wallet, for a request
+ * that is an object of the page's and not plain data (see `readingAgain`).
+ */
+async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Promise<T>, again?: () => GuardRequest[]): Promise<T> {
   let going = onTheirWay.get(guard);
   if (!going) { going = new Map(); onTheirWay.set(guard, going); }
   const passes = going;
@@ -100,6 +109,10 @@ async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Pr
   } catch (e) {
     for (const t of tickets) t?.done(false);
     throw e;
+  }
+  if (again) {
+    const now = again();
+    if (!sameRequests(now, reqs)) { for (const t of tickets) t?.done(false); throw new ReadAgain(now); }
   }
   // each request asked about here may be met once more while the wallet works on it
   const mine: [string, object][] = [];
@@ -124,6 +137,43 @@ async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Pr
     for (const t of tickets) t?.done(false);
     throw e;
   }
+}
+
+/**
+ * What the wallet is handed is what Warden read. A page keeps hold of whatever it passes in: it can write
+ * other bytes into the same array, or change a field, while the owner is still being asked. So a request
+ * that is plain data (bytes, text, an object of fields) is copied before it is read, and the copy is what
+ * goes on to the wallet. The page has nothing that points at the copy.
+ */
+const isBytes = (x: unknown): boolean => x instanceof Uint8Array || ArrayBuffer.isView(x) || x instanceof ArrayBuffer;
+const ownBytes = (x: unknown): Uint8Array => Uint8Array.from(toBytes(x));
+/** A Wallet Standard input with each of its fields read once, and its bytes Warden's own. */
+function ownInput(i: any, field: "transaction" | "message"): any {
+  if (!i || typeof i !== "object") return i;
+  const copy = { ...i };
+  if (field in copy) copy[field] = ownBytes(copy[field]);
+  return copy;
+}
+/** A sign-in request, or any object of plain fields, with each field read once. */
+function ownFields(i: any): any {
+  if (!i || typeof i !== "object" || isBytes(i)) return i;
+  const copy = { ...i };
+  for (const k of Object.keys(copy)) { if (isBytes(copy[k])) copy[k] = ownBytes(copy[k]); else if (Array.isArray(copy[k])) copy[k] = copy[k].map((x: unknown) => (isBytes(x) ? ownBytes(x) : x)); }
+  return copy;
+}
+/**
+ * A transaction handed to an injected provider is an object of the page's, and what it says when the wallet
+ * asks it is the page's to decide: it cannot be copied without the wallet's own library. It is read again
+ * at the moment it is handed on; if it says something else by then, that is what the owner is asked about,
+ * and a request that will not hold still is refused. (An object written to answer differently the third
+ * time, when the wallet asks, is not caught by this. The README says so.)
+ */
+async function readingAgain<T>(guard: Guard, read: () => GuardRequest[], call: () => T | Promise<T>): Promise<T> {
+  let reqs = read();
+  for (let round = 0; round < 3; round++) {
+    try { return await guarded(guard, reqs, call, read); } catch (e) { if (!(e instanceof ReadAgain)) throw e; reqs = e.reqs; }
+  }
+  throw new WardenRejected("Blocked by Lamport Warden: this request kept changing while it was being read");
 }
 
 function toBytes(x: unknown): Uint8Array {
@@ -308,11 +358,12 @@ function guardFeature(name: string, feature: any, guard: Guard, wallet: any): an
   const original = feature[method];
   if (typeof original !== "function" || ours.has(original)) return feature;
   let fn: AnyFn;
-  if (name === SIGN_TX || name === SIGN_SEND) fn = (...inputs: any[]) => guarded(guard, inputs.map((i) => ({ kind: "tx" as const, bytes: toBytes(i?.transaction), owner: ownerAt(wallet, named(i)) })), () => original.apply(feature, inputs));
-  else if (name === SIGN_MSG || name === SIGN_OFFCHAIN) fn = (...inputs: any[]) => guarded(guard, inputs.map((i) => ({ kind: "msg" as const, bytes: toBytes(i?.message), owner: ownerAt(wallet, named(i)) })), () => original.apply(feature, inputs));
+  // (each input is copied first, and the copy is both what is read and what the wallet is handed: see ownInput)
+  if (name === SIGN_TX || name === SIGN_SEND) fn = (...inputs: any[]) => { const mine = inputs.map((i) => ownInput(i, "transaction")); return guarded(guard, mine.map((i) => ({ kind: "tx" as const, bytes: toBytes(i?.transaction), owner: ownerAt(wallet, named(i)) })), () => original.apply(feature, mine)); };
+  else if (name === SIGN_MSG || name === SIGN_OFFCHAIN) fn = (...inputs: any[]) => { const mine = inputs.map((i) => ownInput(i, "message")); return guarded(guard, mine.map((i) => ({ kind: "msg" as const, bytes: toBytes(i?.message), owner: ownerAt(wallet, named(i)) })), () => original.apply(feature, mine)); };
   // Sign-in may be called with no input at all: the wallet then signs in to the site it is on. It is the
   // wallet's own account that signs in, whatever address the request carries (that address is in what is read).
-  else if (name === SIGN_IN) fn = (...inputs: any[]) => guarded(guard, (inputs.length ? inputs : [undefined]).map((i) => ({ kind: "signin" as const, bytes: signInBytes(i), owner: ownerAt(wallet, "") })), () => original.apply(feature, inputs));
+  else if (name === SIGN_IN) fn = (...inputs: any[]) => { const mine = inputs.map(ownFields); return guarded(guard, (mine.length ? mine : [undefined]).map((i) => ({ kind: "signin" as const, bytes: signInBytes(i), owner: ownerAt(wallet, "") })), () => original.apply(feature, mine)); };
   else return feature;
   ours.add(fn);
   // a copy with the feature's own getters still getters: Backpack's `supportedTransactionVersions` is one, and changes when the wallet has finished loading
@@ -503,22 +554,45 @@ export function requestsOf(arg: any, owner: string): GuardRequest[] | null {
 /** The guarded version of one provider method. `call` runs the wallet's own method with the caller's `this`. */
 function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => any): AnyFn | null {
   const run = (that: any, args: any[]) => original.apply(that, args);
+  const owner = (that: any) => ownerOf(self() ?? that);
+  /** A transaction as bytes is Warden's own copy from here on; as an object it is the page's, and is read again when handed on. */
+  const txOf = (tx: any, who: string): { mine: any; read: () => GuardRequest } => {
+    if (isBytes(tx)) { const mine = ownBytes(tx); return { mine, read: () => ({ kind: "tx", bytes: mine, owner: who }) }; }
+    return { mine: tx, read: () => ({ kind: "tx", bytes: serializeForGuard(tx), owner: who }) };
+  };
   switch (name) {
     case "signTransaction":
     case "signAndSendTransaction":
-      return function (this: any, tx: any, ...rest: any[]) { return guarded(guard, [{ kind: "tx", bytes: serializeForGuard(tx), owner: ownerOf(self() ?? this) }], () => run(this, [tx, ...rest])); };
+      return function (this: any, tx: any, ...rest: any[]) {
+        const one = txOf(tx, owner(this));
+        return readingAgain(guard, () => [one.read()], () => run(this, [one.mine, ...rest]));
+      };
     case "signAllTransactions":
     case "signAndSendAllTransactions":
-      return function (this: any, txs: any[], ...rest: any[]) { return guarded(guard, Array.from(txs ?? []).map((tx) => ({ kind: "tx" as const, bytes: serializeForGuard(tx), owner: ownerOf(self() ?? this) })), () => run(this, [txs, ...rest])); };
+      return function (this: any, txs: any[], ...rest: any[]) {
+        // (the list itself is copied too: nothing can be added to it after it was read)
+        const who = owner(this), all = Array.from(txs ?? []).map((tx) => txOf(tx, who));
+        return readingAgain(guard, () => all.map((t) => t.read()), () => run(this, [all.map((t) => t.mine), ...rest]));
+      };
     case "signMessage":
     case "signOffchainMessage":
-      return function (this: any, message: any, ...rest: any[]) { return guarded(guard, [{ kind: "msg", bytes: typeof message === "string" ? new TextEncoder().encode(message) : toBytes(message), owner: ownerOf(self() ?? this) }], () => run(this, [message, ...rest])); };
+      return function (this: any, message: any, ...rest: any[]) {
+        const mine = typeof message === "string" ? message : isBytes(message) ? ownBytes(message) : ownFields(message);
+        const bytes = typeof mine === "string" ? new TextEncoder().encode(mine) : toBytes(mine);
+        return guarded(guard, [{ kind: "msg", bytes, owner: owner(this) }], () => run(this, [mine, ...rest]));
+      };
     case "signIn":
-      return function (this: any, input: any, ...rest: any[]) { return guarded(guard, [{ kind: "signin", bytes: signInBytes(input), owner: ownerOf(self() ?? this) }], () => run(this, [input, ...rest])); };
+      return function (this: any, input: any, ...rest: any[]) {
+        const mine = ownFields(input);
+        return guarded(guard, [{ kind: "signin", bytes: signInBytes(mine), owner: owner(this) }], () => run(this, [mine, ...rest]));
+      };
     case "request":
       return function (this: any, arg: any, ...rest: any[]) {
-        const reqs = requestsOf(arg, ownerOf(self() ?? this));
-        return reqs ? guarded(guard, reqs, () => run(this, [arg, ...rest])) : run(this, [arg, ...rest]);
+        if (requestsOf(arg, "") === null) return run(this, [arg, ...rest]); // not a signing call: straight through, untouched
+        // a signing call: its fields are read once, and what was read is what the wallet is handed
+        const mine = { ...arg, params: ownFields(arg.params) };
+        const reqs = requestsOf(mine, owner(this));
+        return reqs ? guarded(guard, reqs, () => run(this, [mine, ...rest])) : run(this, [mine, ...rest]);
       };
     default:
       return null;
