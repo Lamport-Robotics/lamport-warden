@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { WardenRejected, fromBase58, installLegacyHook, installStandardHook, messageToTransaction, patchProviderInPlace, patchStandardWalletInPlace, requestsOf, serializeForGuard, wrapLegacyProvider, wrapStandardWallet, type Guard, type GuardRequest } from "../src/intercept.js";
+import { WardenRejected, fromBase58, signersIn, installLegacyHook, installStandardHook, messageToTransaction, patchProviderInPlace, patchStandardWalletInPlace, requestsOf, serializeForGuard, wrapLegacyProvider, wrapStandardWallet, type Guard, type GuardRequest } from "../src/intercept.js";
 
 /** A guard that records what it was asked and what it was told afterwards. */
 function recorder(decide: (r: GuardRequest) => boolean = () => true) {
@@ -869,6 +869,95 @@ describe("what is read is what there is: forms a request can come in", () => {
     expect(got[0]).toBe(mine);
     expect(got[1]).toBe(unlisted);
     expect(r.asked.map((a) => a.owner)).toEqual([account.address, account.address]);
+  });
+});
+
+describe("one reading: what a page hands over is looked at once, and that look is what goes on", () => {
+  const SECOND = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2", ATTACKER = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
+  const keyOf = (a: string) => fromBase58(a)!;
+  /** A serialized transaction that these accounts must sign, with one more account after them. */
+  const signedBy = (signers: string[], versioned = false): Uint8Array => Uint8Array.from([signers.length, ...new Uint8Array(64 * signers.length), ...(versioned ? [0x80] : []), signers.length, 0, 1, signers.length + 1, ...signers.flatMap((a) => [...keyOf(a)]), ...new Uint8Array(32).fill(1), ...new Uint8Array(32).fill(2), 0]);
+  /** Backpack's older object, as far as it reads an account: text as it is, bytes as the key they are, anything else by its toBase58(). */
+  function backpack(guard: Guard) {
+    const signedAs: string[] = [], calls: string[] = [];
+    const hO = (q: any): string => (typeof q === "string" ? q : q instanceof Uint8Array ? "bytes:" + [...q].join(",") : q.toBase58());
+    class Provider {
+      constructor() { Object.freeze(this); }
+      get isBackpack() { return true; }
+      get publicKey() { return { toBase58: () => account.address }; }
+      async signTransaction(tx: any, named?: any) { signedAs.push(hO(named ?? account.address)); return tx; }
+      async send(tx: any) { calls.push(typeof tx?.serialize === "function" ? "send: " + [...tx.serialize()].join(",") : "send: nothing to serialize"); return "hash"; }
+    }
+    const win: Record<string, any> = { backpack: Object.freeze({ solana: new Provider() }) };
+    installLegacyHook(win, guard);
+    return { door: win.backpack.solana as any, signedAs, calls };
+  }
+
+  it("reads the accounts that must sign a transaction", () => {
+    expect(signersIn(signedBy([account.address]))).toEqual([account.address]);
+    expect(signersIn(signedBy([ATTACKER, account.address]))).toEqual([ATTACKER, account.address]);
+    expect(signersIn(signedBy([SECOND], true))).toEqual([SECOND]);
+    expect(signersIn(Uint8Array.of(0x81, 1, 2, 3))).toBeNull();
+    expect(signersIn(Uint8Array.of(1, 2, 3))).toBeNull();
+    expect(signersIn(new Uint8Array(0))).toBeNull();
+  });
+
+  it("takes anything that is not plain text for a transaction at Backpack's send, whatever it looks like at the first look", async () => {
+    // an object whose serialize is not there when first looked at, and is there when the wallet looks
+    const r = recorder(), b = backpack(r.guard);
+    let looks = 0;
+    const real = () => Uint8Array.of(9, 9, 9);
+    await b.door.send({ version: 0, get serialize() { return ++looks > 1 ? real : undefined; } });
+    // it was asked about: first as something that cannot be read (which the worker refuses), then as what it turned out to say
+    expect(r.asked.map((a) => [a.kind, [...a.bytes]])).toEqual([["tx", []], ["tx", [9, 9, 9]]]);
+    // refused at the first reading, as the worker does with what it cannot read, it never reaches the wallet
+    const strict = recorder((q) => q.bytes.length > 0), c = backpack(strict.guard);
+    looks = 0;
+    await expect(c.door.send({ version: 0, get serialize() { return ++looks > 1 ? real : undefined; } })).rejects.toBeInstanceOf(WardenRejected);
+    expect(c.calls).toEqual([]);
+    // plain text is not a transaction to anybody: another wallet's send("method") is left as it is
+    await b.door.send("getBalance").catch(() => undefined);
+    expect(r.asked).toHaveLength(2);
+  });
+
+  it("reads a named account once, the way Backpack reads one, and hands the wallet what it read", async () => {
+    const r = recorder(), b = backpack(r.guard);
+    // bytes that are the second account's key, carrying a toBase58 that says the active one: Backpack goes by the bytes
+    const bytes: any = Uint8Array.from(keyOf(SECOND));
+    bytes.toBase58 = () => account.address;
+    await b.door.signTransaction(Uint8Array.of(1), bytes);
+    // an object that says the active account the first time it is asked, and the second account after
+    let asked = 0;
+    await b.door.signTransaction(Uint8Array.of(2), { toBase58: () => (asked++ === 0 ? account.address : SECOND) });
+    // an object that names no account when Warden looks, and would name one when the wallet looks
+    let seen = 0;
+    await b.door.signTransaction(Uint8Array.of(3), { get toBase58() { return seen++ === 0 ? undefined : () => SECOND; } }).catch(() => undefined);
+    expect(r.asked.map((a) => [a.bytes[0], a.owner])).toEqual([[1, account.address], [1, SECOND], [2, account.address], [3, account.address]]);
+    // the wallet signed as the account that was read each time: the second, the active one, and (handed an object with no toBase58 left in it) nobody
+    expect(b.signedAs).toEqual([SECOND, account.address]);
+  });
+
+  it("reads a transaction only from the sides that sign it", async () => {
+    // the second account's own payment, named: it is not the active account's to sign, and is not read as if it were
+    const r = recorder(), b = backpack(r.guard);
+    await b.door.signTransaction(signedBy([SECOND]), SECOND);
+    // both sign: both are read. A drain of the wallet's own account with somebody else paying the fee is this
+    await b.door.signTransaction(signedBy([ATTACKER, account.address]), ATTACKER);
+    // neither signs: nothing says which, so both
+    await b.door.signTransaction(signedBy([ATTACKER]), SECOND);
+    expect(r.asked.map((a) => a.owner)).toEqual([SECOND, account.address, ATTACKER, account.address, SECOND]);
+  });
+
+  it("reads the address a page's account object says once, at the Wallet Standard door", async () => {
+    const got: any[] = [];
+    const first = Object.freeze({ address: account.address }), second = Object.freeze({ address: SECOND });
+    const wallet: any = { name: "W", version: "1.0.0", accounts: [first, second], features: { "solana:signTransaction": { version: "1.0.0", signTransaction: async (...i: any[]) => { got.push(i[0].account); return i.map((x) => ({ signedTransaction: x.transaction })); } } } };
+    const r = recorder();
+    patchStandardWalletInPlace(wallet, r.guard);
+    let n = 0;
+    await wallet.features["solana:signTransaction"].signTransaction({ account: { get address() { return n++ === 0 ? account.address : SECOND; } }, transaction: Uint8Array.of(1) });
+    expect(r.asked.map((a) => a.owner)).toEqual([account.address]);
+    expect(got[0]).toBe(first); // the wallet's own object for the account that was read
   });
 });
 

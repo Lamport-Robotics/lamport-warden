@@ -59,9 +59,11 @@ wallet to sign, and can name any; what a transaction does is read from the side 
 it. So the page's word is taken only for an account the wallet lists as its own, and otherwise the request
 is read as the wallet's own account's; the account handed on to the wallet is the wallet's own object for
 that account, when the page named one the wallet lists. At a wallet's older door, where a method may take
-the account to sign with as an argument (Backpack's do), the request is read from that account's side as
-well as from the wallet's own. Warden does not ask the wallet's object which wallet it is: a page can make
-it say anything.
+the account to sign with as an argument (Backpack's do), the argument is read once, the way Backpack reads
+it, and the wallet is handed the address that was read in place of the page's object. The request is read
+from that account's side as well as from the wallet's own, or from whichever of the two the transaction
+says must sign it. Warden does not ask the wallet's object which wallet it is, and at Backpack's `send` it
+does not ask the page's object whether it is a transaction: a page can make either say anything.
 
 Sign-in requests (Sign In With Solana) are read too. A sign-in to the site that asks goes through without a
 prompt. One that would sign you in to a different site is blocked: that is a page collecting a sign-in to use

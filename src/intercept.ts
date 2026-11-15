@@ -324,6 +324,27 @@ export function messageToTransaction(message: Uint8Array): Uint8Array {
   return out;
 }
 
+/**
+ * The accounts that must sign a serialized transaction, base58: the first keys of its message. Null when it is
+ * not in a form read here (version 1, or not a transaction).
+ */
+export function signersIn(tx: Uint8Array): string[] | null {
+  try {
+    if (tx.length < 70 || tx[0] === 0x81) return null;
+    const slots = tx[0]!;
+    if (slots === 0 || slots > 127) return null;
+    let at = 1 + 64 * slots;
+    if (tx[at]! & 0x80) at += 1; // version 0 has a version byte before the header
+    const required = tx[at]!;
+    at += 3;
+    let count = tx[at]!;
+    at += 1;
+    if (count & 0x80) { count = (count & 0x7f) | (tx[at]! << 7); at += 1; }
+    if (required === 0 || required > count || tx.length < at + 32 * required) return null;
+    return Array.from({ length: required }, (_, i) => toBase58(tx.subarray(at + 32 * i, at + 32 * (i + 1))));
+  } catch { return null; }
+}
+
 /** The bytes of a transaction object as an injected provider receives it (web3.js Transaction or VersionedTransaction). */
 export function serializeForGuard(tx: any): Uint8Array {
   try {
@@ -415,10 +436,11 @@ function guardFeature(name: string, feature: any, guard: Guard, wallet: any): an
    */
   const settled = (i: any, field: "transaction" | "message"): { input: any; owner: string } => {
     const input = ownInput(i, field);
-    const owner = ownerAt(wallet, named(input));
+    const said = named(input); // read once: an account object of the page's can say one address now and another later
+    const owner = ownerAt(wallet, said);
     // (an account the wallet does not list is handed on as the page gave it: a wallet that checks refuses it, as
     // it always did, and one that does not check signs as its own, which is the side this was read from)
-    if (input && typeof input === "object" && owner && owner === named(input)) {
+    if (input && typeof input === "object" && owner && owner === said) {
       let listed: any;
       try { listed = Array.from(wallet?.accounts ?? []).find((a: any) => a?.address === owner); } catch { /* a list that cannot be read lists nobody */ }
       if (listed) input.account = listed;
@@ -629,62 +651,103 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
    * Phantom, which ignores the argument, would then have its request read from a side it does not sign from).
    * Read from both sides, whichever account the wallet signs with has been read.
    */
-  const sides = (that: any, namedAccount?: unknown): string[] => {
-    const own = owner(that);
-    if (namedAccount === undefined || namedAccount === null) return [own];
-    let said = "";
+  /**
+   * An account named in a call, read once and the way Backpack reads one (text as it is; bytes as the key they
+   * are; anything else by its toBase58()). `said` is the address when it is one. `handOn` is what goes to the
+   * wallet in the argument's place: the text that was read, so that the wallet reads what Warden read and not
+   * the page's object a second time; and for an object that names no account, its other fields as they were
+   * at this one look.
+   */
+  const accountIn = (x: unknown): { said: string | null; handOn: unknown } => {
+    if (x === undefined || x === null) return { said: null, handOn: x };
+    const address = (t: string) => (fromBase58(t)?.length === 32 ? t : null);
+    if (typeof x === "string") return { said: address(x), handOn: x };
+    if (typeof x !== "object" && typeof x !== "function") return { said: null, handOn: x };
     try {
-      const a: any = namedAccount;
-      said = typeof a === "string" ? a : typeof a.toBase58 === "function" ? String(a.toBase58()) : isBytes(a) && toBytes(a).length === 32 ? toBase58(toBytes(a)) : "";
-    } catch { /* not an account */ }
-    return said && said !== own && fromBase58(said)?.length === 32 ? [own, said] : [own];
+      if (isBytes(x)) { const bytes = ownBytes(x); const text = bytes.length === 32 ? toBase58(bytes) : null; return { said: text, handOn: text ?? bytes }; }
+      const read = (x as any).toBase58;
+      if (typeof read === "function") { const text = String(read.call(x)); return { said: address(text), handOn: text }; }
+      // It names no account at this look. What goes on is its other fields, each read once, and no toBase58
+      // at all: a second look at the page's own object could find one there.
+      const rest: Record<string, unknown> = {};
+      for (const k of Object.keys(x as object)) if (k !== "toBase58") rest[k] = (x as any)[k];
+      return { said: null, handOn: rest };
+    } catch { return { said: null, handOn: undefined }; }
   };
-  /** Something a page would hand over as a transaction: bytes, or an object that serializes. */
-  const isTx = (x: any): boolean => isBytes(x) || (!!x && typeof x === "object" && typeof x.serialize === "function");
+  /**
+   * Whose side a request is read from. The provider's own account, and when another account is named in the
+   * call (Backpack's methods take the account to sign with as an argument), that one's as well. Which wallet
+   * this is is not asked of the provider: a page can make any provider say it is Backpack, and Phantom, which
+   * ignores the argument, would then have its request read from a side it does not sign from. Read from both
+   * sides, whichever account the wallet signs with has been read.
+   */
+  const sides = (that: any, named: string | null): string[] => { const own = owner(that); return named && named !== own ? [own, named] : [own]; };
+  /**
+   * Of two sides, the ones that sign. A transaction says which accounts must sign it. An account that is not
+   * among them authorises nothing in it, so reading it from that side says only that it is not that account's
+   * to sign, which would refuse an honest request made of the other account. When the signers cannot be read,
+   * or neither side is one, both sides are read.
+   */
+  const signing = (who: string[], bytes: Uint8Array): string[] => {
+    if (who.length < 2) return who;
+    const signers = signersIn(bytes);
+    const are = signers ? who.filter((w) => signers.includes(w)) : [];
+    return are.length ? are : who;
+  };
   /** A transaction as bytes is Warden's own copy from here on; as an object it is the page's, and is read again when handed on. */
   const txOf = (tx: any, who: string[]): { mine: any; read: () => GuardRequest[] } => {
-    if (isBytes(tx)) { const mine = ownBytes(tx); return { mine, read: () => who.map((w) => ({ kind: "tx" as const, bytes: mine, owner: w })) }; }
-    return { mine: tx, read: () => { const bytes = serializeForGuard(tx); return who.map((w) => ({ kind: "tx" as const, bytes, owner: w })); } };
+    if (isBytes(tx)) { const mine = ownBytes(tx); return { mine, read: () => signing(who, mine).map((w) => ({ kind: "tx" as const, bytes: mine, owner: w })) }; }
+    return { mine: tx, read: () => { const bytes = serializeForGuard(tx); return signing(who, bytes).map((w) => ({ kind: "tx" as const, bytes, owner: w })); } };
   };
+  /** The arguments after the first, with the one that names an account replaced by what was read of it. */
+  const withAccount = (rest: any[], at: number, handOn: unknown): any[] => { if (rest.length <= at) return rest; const out = rest.slice(); out[at] = handOn; return out; };
   switch (name) {
     case "signTransaction":
     case "signAndSendTransaction":
       return function (this: any, tx: any, ...rest: any[]) {
         // (Backpack: signTransaction(tx, account, ...); its signAndSendTransaction takes options there, which are not an account)
-        const one = txOf(tx, sides(this, name === "signTransaction" ? rest[0] : undefined));
-        return readingAgain(guard, () => one.read(), () => run(this, [one.mine, ...rest]), name);
+        const account = name === "signTransaction" ? accountIn(rest[0]) : null;
+        const one = txOf(tx, sides(this, account?.said ?? null));
+        const args = account ? withAccount(rest, 0, account.handOn) : rest;
+        return readingAgain(guard, () => one.read(), () => run(this, [one.mine, ...args]), name);
       };
     case "send":
     case "sendAndConfirm":
       // Backpack's own: (tx, signers, options, connection, account). They sign and send, like signAndSendTransaction.
-      // Another wallet's `send` may be an older way of making any request, so it is by what is handed over
-      // that this is known for a transaction, and not by which wallet the provider says it is.
+      // Another wallet's `send` may be an older way of making any request by name, so a call whose first
+      // argument is plain text or a number is left as it is: nothing signs one of those. Anything else is
+      // taken for a transaction, whatever it looks like at this moment; what cannot be read as one is refused.
       return function (this: any, tx: any, ...rest: any[]) {
-        if (!isTx(tx)) return run(this, [tx, ...rest]);
-        const one = txOf(tx, sides(this, rest[3]));
-        return readingAgain(guard, () => one.read(), () => run(this, [one.mine, ...rest]), name);
+        if (tx === null || (typeof tx !== "object" && typeof tx !== "function")) return run(this, [tx, ...rest]);
+        const account = accountIn(rest[3]);
+        const one = txOf(tx, sides(this, account.said));
+        return readingAgain(guard, () => one.read(), () => run(this, [one.mine, ...withAccount(rest, 3, account.handOn)]), name);
       };
     case "signAllTransactions":
     case "signAndSendAllTransactions":
     case "sendAll":
       return function (this: any, txs: any[], ...rest: any[]) {
-        // sendAll takes a list of { tx, signers }; anything else under that name is not a list of transactions, and is left as it is
-        const entryTx = (entry: any) => (name === "sendAll" && entry && typeof entry === "object" && !isBytes(entry) && "tx" in entry ? entry.tx : entry);
-        if (name === "sendAll" && !(Array.isArray(txs) && txs.every((e) => isTx(entryTx(e))))) return run(this, [txs, ...rest]);
+        // sendAll takes a list of { tx, signers }; anything under that name that is not a list is left as it is
+        if (name === "sendAll" && !Array.isArray(txs)) return run(this, [txs, ...rest]);
         // (the list itself is copied too: nothing can be added to it after it was read)
-        const who = sides(this, name === "sendAll" ? undefined : rest[0]);
+        const account = name === "sendAll" ? null : accountIn(rest[0]);
+        const who = sides(this, account?.said ?? null);
         const all = Array.from(txs ?? []).map((entry) => {
           if (name === "sendAll" && entry && typeof entry === "object" && !isBytes(entry) && "tx" in entry) { const copy = { ...entry }; const t = txOf(copy.tx, who); copy.tx = t.mine; return { mine: copy, read: t.read }; }
           return txOf(entry, who);
         });
-        return readingAgain(guard, () => all.flatMap((t) => t.read()), () => run(this, [all.map((t) => t.mine), ...rest]), name);
+        const args = account ? withAccount(rest, 0, account.handOn) : rest;
+        return readingAgain(guard, () => all.flatMap((t) => t.read()), () => run(this, [all.map((t) => t.mine), ...args]), name);
       };
     case "signMessage":
     case "signOffchainMessage":
       return function (this: any, message: any, ...rest: any[]) {
         const mine = ownMessage(message);
         const bytes = messageBytes(mine);
-        return guarded(guard, sides(this, name === "signMessage" ? rest[0] : undefined).map((w) => ({ kind: "msg" as const, bytes, owner: w })), () => run(this, [mine, ...rest]));
+        // (signMessage's second argument is how to show the message on most wallets, and the account on Backpack: text either way)
+        const account = name === "signMessage" ? accountIn(rest[0]) : null;
+        const args = account ? withAccount(rest, 0, account.handOn) : rest;
+        return guarded(guard, sides(this, account?.said ?? null).map((w) => ({ kind: "msg" as const, bytes, owner: w })), () => run(this, [mine, ...args]));
       };
     case "signIn":
       return function (this: any, input: any, ...rest: any[]) {
