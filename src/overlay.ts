@@ -107,12 +107,16 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
       // Standing still: a plain move does not hide a button from the check above (the page can turn its whole
       // document right-to-left, shift it, or put the prompt's element somewhere else), so where the button is
       // gets looked at too, and it counts only once it has been in one place for a moment.
+      // (where there is no layout to ask, as under test outside a browser, there is nothing to look at)
+      const placed = typeof go.getBoundingClientRect === "function";
       const place = () => { const r = go.getBoundingClientRect(); return `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`; };
       let at = "", atSince = performance.now();
-      const look = () => { const now = place(); if (now !== at) { at = now; atSince = performance.now(); } };
-      const looking = setInterval(look, 100);
-      (looking as { unref?: () => void }).unref?.();
-      watching.push({ disconnect: () => clearInterval(looking) });
+      const look = () => { if (!placed) return; const now = place(); if (now !== at) { at = now; atSince = performance.now(); } };
+      if (placed) {
+        const looking = setInterval(look, 100);
+        (looking as { unref?: () => void }).unref?.();
+        watching.push({ disconnect: () => clearInterval(looking) });
+      }
       const SEEN_FOR_MS = 400;
       go.addEventListener("click", (e) => {
         if (!e.isTrusted || go.disabled) return;
@@ -120,8 +124,8 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
         for (const since of seenSince.values()) if (tracked && (since === null || now - since < SEEN_FOR_MS)) return; // covered, altered, or only just shown
         if (now - stirred < SEEN_FOR_MS) return; // its element was changed a moment ago
         look();
-        if (now - atSince < SEEN_FOR_MS) return; // moved a moment ago: a button slid under a pointer is not a button somebody chose to press
-        if (host.parentNode !== parent) return; // put somewhere else in the page
+        if (placed && now - atSince < SEEN_FOR_MS) return; // moved a moment ago: a button slid under a pointer is not a button somebody chose to press
+        if (host.parentNode != null && host.parentNode !== parent) return; // put somewhere else in the page
         if (topLayer && !host.matches(":popover-open")) return; // taken out of the browser's top layer, where the page can paint over it
         finish(true);
       });
