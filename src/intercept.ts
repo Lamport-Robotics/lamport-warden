@@ -339,7 +339,8 @@ export function signersIn(tx: Uint8Array): string[] | null {
     at += 3;
     let count = tx[at]!;
     at += 1;
-    if (count & 0x80) { count = (count & 0x7f) | (tx[at]! << 7); at += 1; }
+    // (a count written in three bytes is more keys than a transaction can carry: not read here)
+    if (count & 0x80) { if (tx[at]! & 0x80) return null; count = (count & 0x7f) | (tx[at]! << 7); at += 1; }
     if (required === 0 || required > count || tx.length < at + 32 * required) return null;
     return Array.from({ length: required }, (_, i) => toBase58(tx.subarray(at + 32 * i, at + 32 * (i + 1))));
   } catch { return null; }
@@ -664,7 +665,16 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
     if (typeof x === "string") return { said: address(x), handOn: x };
     if (typeof x !== "object" && typeof x !== "function") return { said: null, handOn: x };
     try {
-      if (isBytes(x)) { const bytes = ownBytes(x); const text = bytes.length === 32 ? toBase58(bytes) : null; return { said: text, handOn: text ?? bytes }; }
+      if (isBytes(x)) {
+        // Fewer than 32 bytes are a key too: the library the wallet makes a key with puts zeros in front of them.
+        // (About one key in 256 begins with a zero, and can be named by its other 31 bytes.) More than 32 are no key.
+        const bytes = ownBytes(x);
+        if (bytes.length > 32) return { said: null, handOn: bytes };
+        const key = new Uint8Array(32);
+        key.set(bytes, 32 - bytes.length);
+        const text = toBase58(key);
+        return { said: text, handOn: text };
+      }
       const read = (x as any).toBase58;
       if (typeof read === "function") { const text = String(read.call(x)); return { said: address(text), handOn: text }; }
       // It names no account at this look. What goes on is its other fields, each read once, and no toBase58

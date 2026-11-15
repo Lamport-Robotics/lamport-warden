@@ -897,6 +897,9 @@ describe("one reading: what a page hands over is looked at once, and that look i
     expect(signersIn(signedBy([account.address]))).toEqual([account.address]);
     expect(signersIn(signedBy([ATTACKER, account.address]))).toEqual([ATTACKER, account.address]);
     expect(signersIn(signedBy([SECOND], true))).toEqual([SECOND]);
+    // a count of keys written in three bytes is not a transaction anybody can send: not read, so nothing is concluded from it
+    const three = Uint8Array.from([1, ...new Uint8Array(64), 2, 0, 1, 0x82, 0x80, 0x00, ...keyOf(account.address), ...keyOf(SECOND), ...new Uint8Array(40)]);
+    expect(signersIn(three)).toBeNull();
     expect(signersIn(Uint8Array.of(0x81, 1, 2, 3))).toBeNull();
     expect(signersIn(Uint8Array.of(1, 2, 3))).toBeNull();
     expect(signersIn(new Uint8Array(0))).toBeNull();
@@ -929,6 +932,16 @@ describe("one reading: what a page hands over is looked at once, and that look i
     // an object that says the active account the first time it is asked, and the second account after
     let asked = 0;
     await b.door.signTransaction(Uint8Array.of(2), { toBase58: () => (asked++ === 0 ? account.address : SECOND) });
+    // The last 31 bytes of a key that begins with a zero: the library a wallet makes a key with puts the zero
+    // back, so they name that account. Read as it, and handed on as its address.
+    const zeroFirst = Uint8Array.from([0, ...new Uint8Array(31).fill(7)]);
+    const b58 = (bytes: Uint8Array) => { let n = 0n; for (const x of bytes) n = (n << 8n) | BigInt(x); let out = ""; const A = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"; while (n > 0n) { out = A[Number(n % 58n)] + out; n /= 58n; } for (const x of bytes) { if (x !== 0) break; out = "1" + out; } return out; };
+    const OTHER = b58(zeroFirst);
+    await b.door.signTransaction(Uint8Array.of(4), zeroFirst.subarray(1));
+    expect(r.asked.slice(-2).map((a) => [a.bytes[0], a.owner])).toEqual([[4, account.address], [4, OTHER]]);
+    expect(b.signedAs.at(-1)).toBe(OTHER);
+    r.asked.length = 3;
+    b.signedAs.length = 2;
     // an object that names no account when Warden looks, and would name one when the wallet looks
     let seen = 0;
     await b.door.signTransaction(Uint8Array.of(3), { get toBase58() { return seen++ === 0 ? undefined : () => SECOND; } }).catch(() => undefined);

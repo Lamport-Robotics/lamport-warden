@@ -199,6 +199,10 @@ prompt's own element is in the page, and a page can try to hide it, move it or p
 that is where Warden put it in the browser's top layer, and whose button has been in one place for a
 moment. A page that fights the prompt can keep it from being answered; it cannot answer it.
 
+Known and not fixed: a transaction handed to Backpack's `send()` without a fee payer or a blockhash, for
+Backpack to fill in, cannot be read and is refused; and a message signed with a named second account at
+Backpack's older door is asked about twice, once from each account's side.
+
 Not built yet: token names beyond a handful of well-known ones (others show as a shortened mint address),
 Firefox, mobile and agent policy. The icons are the Lamport mark on a light tile until there is a drawn one.
 It has been run against the real wallets only as far as the prompt: no test has a funded wallet sign a real
