@@ -95,7 +95,7 @@ export function grouped(units: bigint, decimals: number): string {
 export const burnTerms = (amount: string, months: number): string[] => [
   `${amount} LAMPORT pays for ${months === 1 ? "one month" : `${months} months`}, once. Nothing is charged again and nothing renews: when the time is up your profile goes back to Watch, and nothing is deleted. Your alert channels are told three days before.`,
   "It is one transaction that burns exactly the amount shown, or what is still owed of it, from the wallet that signs it. The tokens are destroyed: they go to nobody, Lamport included, and there is that much less LAMPORT. Like everything on the chain it is public: anyone can see that the paying wallet burned them.",
-  "Burned tokens cannot be brought back by anybody, so they are not refunded. Nothing burned for this amount is dropped: a burn that is short counts toward it, and more than the amount pays for the same months again. If the time you paid for was not given, write to support@lamportrobotics.com and it will be.",
+  "Burned tokens cannot be brought back by anybody, so they are not refunded. A burn that is short counts toward the amount, more than the amount pays for the same months again, and what is left over counts toward the next amount you ask for. If the time you paid for was not given, write to support@lamportrobotics.com and it will be.",
 ];
 /** The two of those lines that hold for any amount: what the terms page states. */
 export const BURN_TERMS: readonly string[] = burnTerms("0", 1).slice(1);

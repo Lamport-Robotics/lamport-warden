@@ -493,12 +493,17 @@ function payAhead(offer: NonNullable<Extract<Plan, { enabled: true }>["crypto"]>
   pick.append(asset, document.createTextNode(" for "), months, document.createTextNode(" "), show);
   const out = el("div", "", "quote");
   out.hidden = true;
+  // While a payment that was handed to a wallet is being looked for, no other amount is shown: showing the
+  // same one again would put the pay buttons back, and a second payment would be one press away.
+  let held = false;
+  const holdPicker = (on: boolean) => { held = on; show.disabled = on; asset.disabled = on; months.disabled = on; };
   show.addEventListener("click", async () => {
+    if (held) return;
     show.disabled = true;
     const r = await call("POST", "/billing/crypto/quote", { asset: asset.value, months: Number(months.value) });
-    show.disabled = false;
+    show.disabled = held;
     if (r.status !== 201 || typeof r.body?.reference !== "string") { say(String(r.body?.error ?? "That did not work."), true); return; }
-    quoted(out, r.body as PayQuote);
+    quoted(out, r.body as PayQuote, holdPicker);
   });
   box.append(pick, out);
   return box;
@@ -523,9 +528,12 @@ function keepSent(reference: string, sent: string[]): void {
   try { sessionStorage.setItem(`sentinel:sent:${reference}`, JSON.stringify(sent.slice(-5))); } catch { /* the service looks by itself too */ }
 }
 
-function quoted(out: HTMLElement, q: PayQuote): void {
+function quoted(out: HTMLElement, q: PayQuote, holdPicker: (on: boolean) => void): void {
   const amount = `${(q.burned ? grouped : decimal)(BigInt(q.units), q.decimals)} ${q.asset}`;
-  const already = q.burned && q.counted && BigInt(q.counted) > 0n ? ` So far ${grouped(BigInt(q.counted), q.decimals)} of it has been burned: paying burns only the rest.` : "";
+  const counted = q.burned && q.counted ? BigInt(q.counted) : 0n;
+  // what this profile burned before and did not use counts toward this: only the rest is burned, or nothing at all
+  const already = counted >= BigInt(q.units) ? ` What you burned before covers it: press "look for it" and it is counted. Nothing more is burned.`
+    : counted > 0n ? ` So far ${grouped(counted, q.decimals)} of it has been burned: paying burns only the rest.` : "";
   const line = el("p", q.burned ? `This burns exactly ${amount}. It is not sent to anybody.${already}` : `Send exactly ${amount} to `, "plain");
   if (!q.burned) line.append(el("code", q.payTo, "addr"));
   const terms = el("ul", "", "terms");
@@ -541,7 +549,7 @@ function quoted(out: HTMLElement, q: PayQuote): void {
   look.addEventListener("click", () => void watchFor(q, status, 1, known()));
   // a wallet in this browser can be handed the payment ready-made; any other wallet opens the request below
   const pays = el("div", "", "choices");
-  const hold = (on: boolean) => { for (const x of Array.from(pays.querySelectorAll("button"))) x.disabled = on; };
+  const hold = (on: boolean) => { for (const x of Array.from(pays.querySelectorAll("button"))) x.disabled = on; holdPicker(on); };
   for (const w of (registry.get() as unknown as AnyWallet[]).filter((x) => "standard:connect" in x.features && "solana:signAndSendTransaction" in x.features && x.chains.some((c) => c.startsWith("solana:")))) {
     const b = el("button", `Pay with ${w.name}`, "solid");
     b.addEventListener("click", async () => {
@@ -562,7 +570,8 @@ function quoted(out: HTMLElement, q: PayQuote): void {
           // A wallet that says no has sent nothing. One that failed after it sent has, and nothing here can
           // tell the two apart: so it is looked for before anybody is asked to pay again.
           say(q.burned ? "The wallet did not say it sent anything. If you approved it there, do not burn again: it is being looked for." : "The wallet did not say it sent anything. If you approved it there, do not pay again: it is being looked for.", true);
-          await watchFor(q, status, 5, known());
+          // a few seconds is how long a payment that did go out takes to show; after that the service itself refuses to build a second one over it
+          await watchFor(q, status, 3, known(), "Nothing has shown up for it. If you said no in the wallet, nothing was sent. If you approved it there, look again in a minute before you pay again.");
           return;
         }
         const signature = (Array.isArray(answer) ? answer[0] : answer)?.signature;
@@ -588,7 +597,7 @@ function quoted(out: HTMLElement, q: PayQuote): void {
 }
 
 /** Asks the service whether the payment has arrived, every five seconds, so many times. A payment counts when the chain has made it final, which takes about a quarter of a minute. `signatures`: the payments this page knows were sent for it. */
-async function watchFor(q: PayQuote, status: HTMLElement, times: number, signatures: string[] = []): Promise<void> {
+async function watchFor(q: PayQuote, status: HTMLElement, times: number, signatures: string[] = [], notThere = "Not there yet. A payment counts once the chain has made it final; look again in a minute. The service also looks by itself every hour, and tells your alert channels when it finds it."): Promise<void> {
   for (let i = 0; i < times; i++) {
     status.textContent = "Looking for the payment on the chain…";
     const r = await call("POST", "/billing/crypto/check", { reference: q.reference, signatures: signatures.slice(-5) });
@@ -601,7 +610,7 @@ async function watchFor(q: PayQuote, status: HTMLElement, times: number, signatu
     if (r.status !== 200) { status.textContent = String(r.body?.error ?? "That could not be looked up just now."); return; }
     if (i < times - 1) await new Promise((res) => setTimeout(res, 5000));
   }
-  status.textContent = "Not there yet. A payment counts once the chain has made it final; look again in a minute. The service also looks by itself every hour, and tells your alert channels when it finds it.";
+  status.textContent = notThere;
 }
 
 function plans(mine: Me): void {

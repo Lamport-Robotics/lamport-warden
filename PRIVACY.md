@@ -81,8 +81,9 @@ What it keeps, on that server:
 - Your plan. If you pay by card: Stripe's ids for the customer and the subscription, the price, its status
   and its dates. Not your card, your name or your email address: those are with Stripe and never reach
   Sentinel. If you pay ahead in USDC or SOL, or by burning LAMPORT: the amounts you were shown in the last
-  week (an amount to burn, for five weeks, with how much has been burned for it), and for each payment the
-  transaction, what it paid, for how many months, and when.
+  week (an amount to burn, for five weeks or until what was burned for it is used, with how much that is),
+  when a payment for one was last asked about, the transactions your browser said paid them, and for each
+  payment the transaction, what it paid, for how many months, and when.
 - If you set a wallet up for rescue: the address that wallet approved for it, which is on the chain for
   anyone to read, and whether you switched rescue without asking on. Not your vault's key or its 24 words:
   those never leave you, and Sentinel has no use for them.

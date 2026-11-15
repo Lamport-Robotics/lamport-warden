@@ -148,10 +148,15 @@ export interface Payment { signature: string; asset: PayAsset; units: string; mo
  */
 export interface PayIntent {
   reference: string; profile: string; asset: PayAsset; units: string; months: number; cents: number; createdAt: number; expiresAt: number; paidBy?: string;
-  /** For a burn: the token that was quoted, and what has been burned for this quote and not yet used to pay (smallest units). */
-  mint?: string; counted?: string;
+  /**
+   * For a burn: the token that was quoted; what has been burned for this quote and not yet used to pay
+   * (smallest units); and the last transaction counted for it.
+   */
+  mint?: string; counted?: string; lastCounted?: string;
   /** When a payment for it was last built or looked for: such a quote is looked for by the service too (prepaid.ts, sweep). */
   askedAt?: number;
+  /** The transactions the payer's page said paid it, the newest five: read by signature, whatever else names the quote. */
+  sent?: string[];
 }
 /** Which profile a watched wallet belongs to, and the hash of the token its owner's browser reports with. */
 export interface WalletOwner {

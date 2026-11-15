@@ -167,10 +167,10 @@ export class Accounts {
   /**
    * Notes an amount quoted to a profile. It keeps the newest twenty, for a week. A quote to burn is kept
    * five weeks and is not dropped for being one of many: a transfer made on a forgotten quote can be sent
-   * back, and a burn cannot.
+   * back, and a burn cannot. One with something burned for it and not used is kept until that is used.
    */
   addIntent(intent: PayIntent, now: number): void {
-    const kept = (this.data.intents ?? []).filter((i) => now - i.createdAt < (i.asset === "LAMPORT" ? 35 : 7) * 86_400);
+    const kept = (this.data.intents ?? []).filter((i) => now - i.createdAt < (i.asset === "LAMPORT" ? 35 : 7) * 86_400 || BigInt(i.counted ?? "0") > 0n);
     const mine = kept.filter((i) => i.profile === intent.profile && i.asset !== "LAMPORT");
     const drop = new Set(mine.slice(0, Math.max(0, mine.length - 19)).filter((i) => !i.paidBy).map((i) => i.reference));
     this.data.intents = [...kept.filter((i) => !drop.has(i.reference)), intent];
@@ -218,24 +218,51 @@ export class Accounts {
     if (!p || units <= 0n || this.credited(signature)) return false;
     (this.data.credited ??= {})[signature] = { profile: p.id, at };
     intent.counted = (BigInt(intent.counted ?? "0") + units).toString();
+    intent.lastCounted = signature;
     this.store.flush();
     return true;
   }
 
   /**
-   * Pays a quote once from what was burned for it: the quote's amount is taken off what was counted, and
-   * the profile is paid until `until`. False when less than the amount is counted. What is over stays
-   * counted, toward the same months again.
+   * Pays a quote once from what was burned for it: `want` is taken off what is counted, and the profile is
+   * paid until `until`. False when less than that is counted. What is over stays counted.
    */
-  payFromBurned(intent: PayIntent, payment: Payment, until: number): boolean {
+  payFromBurned(intent: PayIntent, want: bigint, payment: Payment, until: number): boolean {
     const p = this.profile(intent.profile);
-    const have = BigInt(intent.counted ?? "0"), want = BigInt(intent.units);
+    const have = BigInt(intent.counted ?? "0");
     if (!p || want <= 0n || have < want) return false;
     intent.counted = (have - want).toString();
     intent.paidBy = payment.signature;
     p.prepaid = { until, payments: [...(p.prepaid?.payments ?? []), payment].slice(-12) };
     this.store.flush();
     return true;
+  }
+
+  /**
+   * Moves onto a quote what was burned for its profile's other quotes of the same token and is not used
+   * there: quotes that are paid, where it is what was over, and quotes that have run out, where it is what
+   * was short. So nothing burned stays behind on a quote nobody will pay again.
+   */
+  carryBurned(into: PayIntent, now: number): void {
+    let carried = 0n;
+    for (const i of this.data.intents ?? []) {
+      if (i === into || i.profile !== into.profile || i.asset !== "LAMPORT" || i.mint !== into.mint || !(i.paidBy || now > i.expiresAt)) continue;
+      const left = BigInt(i.counted ?? "0");
+      if (left <= 0n) continue;
+      carried += left;
+      i.counted = "0";
+    }
+    if (carried <= 0n) return;
+    into.counted = (BigInt(into.counted ?? "0") + carried).toString();
+    this.store.flush();
+  }
+
+  /** Notes the transactions a payer's page says paid a quote: the newest five are kept, and read by signature at every look. */
+  reported(intent: PayIntent, signatures: readonly string[]): void {
+    const next = [...new Set([...(intent.sent ?? []), ...signatures])].slice(-5);
+    if (next.length === (intent.sent ?? []).length && next.every((x, i) => x === intent.sent![i])) return;
+    intent.sent = next;
+    this.store.flush();
   }
 
   /** Notes that the profile's owner was told its paid time is ending. */

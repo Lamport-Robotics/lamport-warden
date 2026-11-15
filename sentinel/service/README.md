@@ -599,8 +599,10 @@ of the customer and the subscription.
     that much smaller. No key of Lamport's is involved, and Lamport holds nothing afterwards that it could
     sell.
   - The number is the same for everybody. It is not a price in dollars, so there is no holder's price to
-    work out and no wallet's balance is read for the quote. A quote holds a week, and asked for again
-    while it stands it is the same quote: a page that was closed and opened again has the reference it had.
+    work out and no wallet's balance is read for the quote. Asked for again while it stands and is not
+    paid, a quote is the same quote: a page that was closed and opened again has the reference it had.
+  - A quote holds its number for a week. A burn made for it after that still counts, at the number then in
+    force if that is higher (`wantOf`): a quote does not go on paying at an old number once it has run out.
   - It is counted by what the chain did, at `finalized`: by how much the signers' own accounts of the token
     fell, less everything any account of it rose by (`burned`). A transfer comes to nothing. So does a burn
     of tokens that were not the signer's: the token program lets anyone burn what sits in an account owned
@@ -608,28 +610,47 @@ of the customer and the subscription.
   - It is offered only for a token with no more to it than a name and a picture (`PLAIN_EXTENSIONS`). A
     token that keeps a fee on transfers, or keeps balances out of sight, would lose some from that sum
     without a burn. LAMPORT has neither and can never be given either.
-  - Nothing burned for a quote is dropped, because none of it can be sent back. Each burn is spent the
+  - What is burned for a quote stays counted, because none of it can be sent back. Each burn is spent the
     moment it is counted (`countBurn`), toward that one quote. A burn that is short stays counted; each
     time what is counted comes to the amount, the months are paid for once (`payFromBurned`); what is over
-    stays counted toward the same months again. So 10,000 and then 25,000 for a quote of 25,000 is a month
-    with 10,000 still counted, and two whole burns are two months.
+    stays counted. When the profile next asks for an amount, what was left on its paid and run-out quotes
+    moves onto the new one (`carryBurned`), and a quote that still has something counted is never dropped.
+    So 10,000 and then 25,000 for a quote of 25,000 is a month with 10,000 toward the next, and two whole
+    burns are two months.
   - A wallet is asked for no more than is owed: the transaction the service builds burns the amount less
-    what is counted and less what is already on the chain for the quote and not yet final, and is refused
-    when that is nothing. The page hands a wallet nothing more for a quote while a payment it sent is being
-    looked for.
-  - One look at a time (`oneAtATime`). Two at once could each find the same burn unspent and each count it.
-  - How a payment is found. The page gives the service the signature its wallet returned, and a signature
-    can be typed in for a payment made somewhere else: that transaction is read whatever else names the
-    quote. Beside that, the chain's list for the quote's address is read from its old end, twenty-five
-    not yet read at a time: the payment is older than anything sent to bury it, since nobody else knows
-    the address until the payment shows it. What was read and was nothing is not read again.
-  - The service looks by itself every hour, for three days, for every quote a payment was built for or
-    asked about (`sweep`). A tab closed before the chain made a payment final does not lose it, and the
-    owner's channels are told when it is found. This goes for USDC and SOL as well.
-  - A quote to burn is kept five weeks and is not dropped for being one of many (other quotes: the newest
-    twenty, for a week).
+    what is counted and less what is already on the chain for the quote and not yet final. It is refused
+    when that is nothing, and when what is on the chain for the quote could not be read. While a payment
+    the page handed to a wallet is being looked for, the page hands a wallet nothing more and shows no
+    other amount.
+  - Nothing is counted twice, however many looks overlap: a transaction is marked spent in the same step
+    that counts it, with nothing awaited in between. Looks at one quote take turns (`inTurn`); looks at
+    different quotes do not wait for each other, so one profile's cannot hold up another's.
+  - How a payment is found.
+    - By its signature, for certain. The page gives the service the signature its wallet returned, and one
+      can be typed in for a payment made somewhere else. The service keeps the newest five with the quote
+      and reads those transactions at every look, whatever else names the quote.
+    - By the chain's list for the quote's address, as a convenience: the newest thousand that name it,
+      read twelve at a time from each end. From the old end, because a payment is older than what is sent
+      after it to bury it; from the new end, because the latest payment may be what completes an earlier
+      one. Anyone can add to that list once a payment has shown the address, and for a few thousandths of
+      a SOL can push a payment out of the thousand, or keep the middle of it unread for a while. Such a
+      payment is not lost: it is found by its signature.
+    - A final transaction is read once (`seen`): what was nothing, short or late is remembered, so a pile
+      of small payments costs one read each and cannot fill every look. One transaction that cannot be
+      read does not lose the others.
+  - The service looks by itself, about once an hour (`sweep`), for every quote a payment was built for or
+    asked about in the last three days (a paid quote to burn: six hours, for a second burn made by
+    mistake). Sixty quotes an hour, three of any one profile, the ones looked for longest ago first, so
+    every quote gets its turn and nobody's asking pushes another's out. A tab closed before the chain made
+    a payment final does not lose it, and the owner's channels are told when it is found. This goes for
+    USDC and SOL as well.
+  - A quote to burn is kept five weeks, or longer while something is counted on it, and is not dropped
+    for being one of many (other quotes: the newest twenty, for a week).
   - With burning switched off, or pointed at another token, a quote to burn is answered with whom to write
     to. It is not said to be on its way.
+  - What this does not do. A burn that names no quote of any profile, or the quote of a profile that has
+    since been deleted, pays for nothing. So does one that is neither found on the list nor ever named by
+    its signature, until it is named.
   - There is nothing to refund: what was burned cannot be brought back by anybody. The page says so before
     the wallet is asked (`burnTerms` in `src/plans.ts`), and so do the terms.
   - Warden, in front of the wallet, says that transaction on the Sentinel page as "Burns 25,000 LAMPORT

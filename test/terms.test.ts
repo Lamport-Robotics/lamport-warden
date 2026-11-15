@@ -27,7 +27,8 @@ describe("the terms", () => {
     const prepaid = read("sentinel", "service", "src", "prepaid.ts");
     // final, and at least the amount: both are what the code checks
     expect(text).toContain("A payment counts when the chain has made it final and the amount that arrived is at least the amount shown.");
-    expect(prepaid).toContain('commitment: "finalized"');
+    expect(prepaid).toContain('const list = await this.listed(intent, "finalized");');
+    expect(prepaid).toContain('const tx = await this.readOne(intent, signature, "finalized");');
     expect(prepaid).toContain("if (got < BigInt(intent.units))");
     // ten minutes for a price in SOL, three days' notice before the time is up
     expect(prepaid).toContain("export const SOL_QUOTE_SECONDS = 600;");
@@ -42,14 +43,18 @@ describe("the terms", () => {
     expect(burnTerms("25000", 3).slice(1)).toEqual([...BURN_TERMS]);
     const prepaid = read("sentinel", "service", "src", "prepaid.ts");
     // final, the signer's own tokens, the same number for everyone, and looked for by the service: what the code does
-    expect(text).toContain("A burn counts when the chain has made it final, and only tokens that the wallet signing it held itself count. The service looks for it while the Sentinel page is open, and by itself every hour for three days after, so it does not depend on the page staying open.");
-    expect(prepaid).toContain('for (const tx of await this.naming(intent, signatures, "finalized"))');
+    expect(text).toContain("A burn counts when the chain has made it final, and only tokens that the wallet signing it held itself count. The service looks for it while the Sentinel page is open and, by itself, about once an hour for three days after it was last asked about, so it does not depend on the page staying open. An amount shown holds for a week: what is burned for it after that counts at the number of tokens then in force, if that is higher.");
+    expect(prepaid).toContain('const tx = await this.readOne(intent, signature, "finalized");');
+    expect(prepaid).toContain("if (at <= intent.expiresAt) return quoted;");
+    expect(prepaid).toContain("return current > quoted ? current : quoted;");
+    expect(prepaid).toContain("export const USDC_QUOTE_SECONDS = 7 * 86_400;");
     expect(prepaid).toContain("else if (signers.has(was.owner)) fell += was.amount - now;");
     expect(prepaid).toContain("BigInt(this.cfg.burn!.perMonth) * BigInt(months)");
     expect(prepaid).toContain("SWEEP_SECONDS = 3 * 86_400");
     expect(read("sentinel", "service", "src", "main.ts")).toContain("await prepaid.sweep()");
-    // short counts toward it, and more than the amount pays for the months again
-    expect(prepaid).toContain("while (BigInt(intent.counted ?? \"0\") >= want)");
+    // short counts toward it, more than the amount pays for the months again, and what is left over goes to the next amount asked for
+    expect(prepaid).toContain("if (!this.accounts.payFromBurned(intent, want,");
+    expect(prepaid).toContain("this.accounts.carryBurned(intent, at);");
     expect(text).toContain("A payment made by burning $LAMPORT is the exception: there is nothing left of it to send back, at any time.");
     expect(text).toContain("not a promise about what it is worth");
   });

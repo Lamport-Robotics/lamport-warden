@@ -23,9 +23,12 @@
  * can, so nothing burned for a quote is dropped: burns that name one quote add up, each is spent the moment
  * it is counted, and whatever is over the amount stays counted toward the same months again.
  *
- * One look at a time (`oneAtATime`): two at once could each find the same payment unspent. And the service
- * looks by itself, every hour, for the quotes somebody built a payment for or asked about (`sweep`), so a
- * payment does not depend on the page that made it staying open.
+ * Nothing is counted twice, however many looks overlap: a transaction is marked spent in the same step that
+ * counts it (accounts.ts), with nothing awaited in between. Looks at one quote take turns (`inTurn`), so two
+ * answers about it never disagree; looks at different quotes do not wait for each other, so one profile
+ * cannot hold up another's. A final transaction is read once (`seen`). And the service looks by itself,
+ * every hour, for the quotes somebody built a payment for or asked about (`sweep`), so a payment does not
+ * depend on the page that made it staying open.
  */
 import { randomBytes } from "node:crypto";
 import { PublicKey, SystemProgram, Transaction, TransactionInstruction, VersionedMessage } from "@solana/web3.js";
@@ -87,13 +90,21 @@ const ASSOCIATED_TOKEN_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25
 /** What a Token-2022 token may have and still be burned to pay: where its name and picture are kept, and nothing that moves or hides a balance. */
 const PLAIN_EXTENSIONS = new Set(["metadataPointer", "tokenMetadata"]);
 /**
- * How many transactions naming a quote the chain is asked to list, and how many of those are read in one
- * look: the oldest not yet read. The payment is older than anything sent to bury it, since the quote's
- * address is not known to anyone else until the payment shows it, so it is among the first read.
+ * How many transactions naming a quote the chain is asked to list (the most it gives at once), and how many
+ * of those not read yet are read in one look from each end. From the old end, because a payment is older
+ * than what is sent after it to bury it; from the new end, because the latest payment may be what completes
+ * an earlier one. Anyone can add to the list once a payment has shown the quote's address, so this is a
+ * convenience and not the certain way: a payment is found for certain by its signature.
  */
-const LISTED = 1000, SCAN = 25;
-/** How many quotes the hourly look goes through, and for how long after a payment for one was last built or asked about. */
-const SWEEP_MOST = 30, SWEEP_SECONDS = 3 * 86_400;
+const LISTED = 1000, EACH_END = 12;
+/**
+ * The hourly look: how many quotes it goes through, how many of one profile's, and for how long after a
+ * payment for a quote was last built or asked about (a paid quote to burn: for a second burn made by
+ * mistake, which lands within minutes or not at all).
+ */
+const SWEEP_MOST = 60, SWEEP_EACH = 3, SWEEP_SECONDS = 3 * 86_400, SWEEP_PAID_SECONDS = 6 * 3600;
+type Commitment = "finalized" | "confirmed";
+const CHAIN_DOWN: Refusal = { ok: false, status: 502, why: "the chain could not be read just now. Try again in a minute." };
 /** The token account a wallet keeps a token in unless it says otherwise. `program`: the token program the token is under. */
 export const tokenAccountOf = (owner: PublicKey, mint: PublicKey, program: PublicKey = TOKEN_PROGRAM): PublicKey => PublicKey.findProgramAddressSync([owner.toBytes(), program.toBytes(), mint.toBytes()], ASSOCIATED_TOKEN_PROGRAM)[0];
 
@@ -209,15 +220,28 @@ export class Prepaid {
   private now(): number { return this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000); }
   private get mint(): string { return this.cfg.usdcMint ?? USDC_MINT; }
   private burnFacts: { program: PublicKey; decimals: number } | null = null;
-  /** Final transactions already read for a quote and found to be nothing toward it: not fetched again. Lost on a restart, which costs a read. */
-  private nothing = new Set<string>();
-  private line: Promise<unknown> = Promise.resolve();
-  /** One look at the chain at a time: two at once could each find the same payment unspent, and each count it. */
-  private oneAtATime<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.line.then(work, work);
-    this.line = run.catch(() => undefined);
+  /**
+   * What a final transaction that names a quote was found to be toward it, where it could not be counted:
+   * nothing, short, or late. A final transaction does not change, so it is read once. Keyed
+   * `${reference}:${signature}`: a transaction is nothing toward one quote and may be the payment of another.
+   * Lost on a restart, which costs the reads again.
+   */
+  private seen = new Map<string, { got: bigint; late: boolean }>();
+  private note(intent: PayIntent, signature: string, got: bigint, late = false): void {
+    if (this.seen.size >= 50_000) this.seen.clear();
+    this.seen.set(`${intent.reference}:${signature}`, { got, late });
+  }
+  private lines = new Map<string, Promise<unknown>>();
+  /** Looks at one quote take turns. Looks at different quotes do not wait for each other. */
+  private inTurn<T>(reference: string, work: () => Promise<T>): Promise<T> {
+    const run = (this.lines.get(reference) ?? Promise.resolve()).then(work, work);
+    const tail = run.catch(() => undefined);
+    this.lines.set(reference, tail);
+    void tail.then(() => { if (this.lines.get(reference) === tail) this.lines.delete(reference); });
     return run;
   }
+  /** When the service last looked for a quote by itself, so that every quote gets its turn. */
+  private swept = new Map<string, number>();
   /** Which token program the token to burn is under, and its decimals: read from the chain once. Throws when that could not be read. */
   private async burnToken(): Promise<{ program: PublicKey; decimals: number }> {
     if (this.burnFacts) return this.burnFacts;
@@ -259,6 +283,8 @@ export class Prepaid {
       const open = this.accounts.intents().find((i) => i.profile === profile && i.asset === "LAMPORT" && !i.paidBy && i.months === months && i.units === units.toString() && i.mint === mint && at <= i.expiresAt);
       const intent: PayIntent = open ?? { reference: new PublicKey(randomBytes(32)).toBase58(), profile, asset, units: units.toString(), months, cents: 0, createdAt: at, expiresAt: at + USDC_QUOTE_SECONDS, mint };
       if (!open) this.accounts.addIntent(intent, at);
+      // what was burned for this profile's finished and run-out quotes and not used there counts toward this one
+      this.accounts.carryBurned(intent, at);
       const counted = BigInt(intent.counted ?? "0");
       return { ok: true, quote: { reference: intent.reference, payTo: "", asset, units: intent.units, decimals: token.decimals, mint, months, cents: 0, expiresAt: intent.expiresAt, url: "", burned: true, ...(counted > 0n ? { counted: counted.toString() } : {}) } };
     }
@@ -301,12 +327,20 @@ export class Prepaid {
         if (off) return off;
         const token = await this.burnToken(), burnMint = new PublicKey(this.cfg.burn!.mint);
         this.accounts.asked(intent, this.now());
-        // Only what is still owed is burned: the amount, less what was counted toward it, less what is on
-        // the chain for it and not yet final. A wallet is not asked to burn the same tokens' worth twice.
+        // Only what is still owed is burned: the amount, less what is counted toward it, less what is on
+        // the chain for it and not yet final. A wallet is not asked to burn the same tokens' worth twice;
+        // and when what is on its way cannot be read, it is not asked at all.
+        const list = await this.listed(intent, "confirmed");
+        if (list === null) return CHAIN_DOWN;
         let onItsWay = 0n;
-        for (const tx of await this.naming(intent, [], "confirmed")) onItsWay += burned(tx, this.cfg.burn!.mint);
-        const owed = units - BigInt(intent.counted ?? "0") - onItsWay;
-        if (owed <= 0n) return { ok: false, status: 409, why: "the burn for this has been sent already. It counts once the chain has made it final: look for it in a minute." };
+        for (const signature of this.toRead(intent, intent.sent ?? [], list)) {
+          const tx = await this.readOne(intent, signature, "confirmed");
+          if (tx === null && list.includes(signature)) return CHAIN_DOWN;
+          if (tx && tx !== "nothing") onItsWay += burned(tx, this.cfg.burn!.mint);
+        }
+        const counted = BigInt(intent.counted ?? "0");
+        const owed = units - counted - onItsWay;
+        if (owed <= 0n) return { ok: false, status: 409, why: onItsWay > 0n ? "the burn for this has been sent already. It counts once the chain has made it final: look for it in a minute." : "what was burned before covers this. Look for it and it is counted: nothing more needs burning." };
         let have: bigint;
         try {
           const theirs = await this.rpc.call("getTokenAccountBalance", [tokenAccountOf(from, burnMint, token.program).toBase58(), { commitment: "confirmed" }]);
@@ -348,90 +382,153 @@ export class Prepaid {
   }
 
   /**
-   * The transactions that name a quote, are on the chain at `commitment`, did not fail and are not spent:
-   * the ones named by signature first, then the oldest not yet read of those the chain lists for the
-   * quote's address. Anyone can add to that list once the address has been seen on the chain, so it is read
-   * from its old end, a few at a time, and a signature is how a payment is found whatever else is there.
+   * The transactions the chain lists for a quote's address that did not fail and are not spent, oldest
+   * first. Null when the chain did not answer.
    */
-  private async naming(intent: PayIntent, signatures: readonly string[], commitment: "finalized" | "confirmed"): Promise<ObservedTx[]> {
-    const listed: any[] = (await this.rpc.call("getSignaturesForAddress", [intent.reference, { limit: LISTED, commitment }])) ?? [];
-    const read = (signature: string) => this.accounts.credited(signature) || this.nothing.has(`${intent.reference}:${signature}`);
-    const fromList = [...listed].reverse().filter((e) => !e?.err && typeof e?.signature === "string").map((e) => e.signature as string).filter((sig) => !read(sig)).slice(0, SCAN);
-    const out: ObservedTx[] = [];
-    for (const signature of new Set([...signatures, ...fromList])) {
-      const known = `${intent.reference}:${signature}`;
-      if (read(signature)) continue;
-      const tx = fromRpc(signature, await this.rpc.call("getTransaction", [signature, { encoding: "base64", maxSupportedTransactionVersion: 0, commitment }]));
-      if (!tx) continue; // not there, or not yet
-      // the list is the RPC's word; that the transaction names the reference is read from the transaction itself
-      if (tx.failed || !accountKeys(tx).includes(intent.reference)) { if (commitment === "finalized") this.isNothing(known); continue; }
-      out.push(tx);
-    }
-    return out;
+  private async listed(intent: PayIntent, commitment: Commitment): Promise<string[] | null> {
+    try {
+      const list: any[] = (await this.rpc.call("getSignaturesForAddress", [intent.reference, { limit: LISTED, commitment }])) ?? [];
+      return [...list].reverse().filter((e) => !e?.err && typeof e?.signature === "string" && !this.accounts.credited(e.signature)).map((e) => e.signature as string);
+    } catch { return null; }
   }
-  private isNothing(known: string): void {
-    if (this.nothing.size >= 20_000) this.nothing.clear();
-    this.nothing.add(known);
+
+  /** Which to read in one look: the ones named by signature, then the oldest and the newest of the listed ones not read yet. */
+  private toRead(intent: PayIntent, named: readonly string[], list: readonly string[]): string[] {
+    const unread = (sig: string) => !this.accounts.credited(sig) && !this.seen.has(`${intent.reference}:${sig}`);
+    const rest = list.filter(unread);
+    const ends = rest.length <= 2 * EACH_END ? rest : [...rest.slice(0, EACH_END), ...rest.slice(-EACH_END)];
+    return [...new Set([...named.filter(unread), ...ends])];
+  }
+
+  /**
+   * One transaction, when it is on the chain at `commitment`, did not fail and names the quote. "nothing":
+   * it is there and is nothing toward the quote (remembered, once final). Null: it is not there, or could
+   * not be read this time. One that cannot be read does not keep the others from being read.
+   */
+  private async readOne(intent: PayIntent, signature: string, commitment: Commitment): Promise<ObservedTx | "nothing" | null> {
+    const nothing = (): "nothing" => { if (commitment === "finalized") this.note(intent, signature, 0n); return "nothing"; };
+    let result: any;
+    try { result = await this.rpc.call("getTransaction", [signature, { encoding: "base64", maxSupportedTransactionVersion: 0, commitment }]); }
+    catch (e) {
+      // a transaction in a form newer than this reads is nothing toward a quote, now and later
+      const why = String((e as Error)?.message ?? "");
+      return /version/i.test(why) && /not supported/i.test(why) ? nothing() : null;
+    }
+    if (result === null || result === undefined) return null;
+    const tx = fromRpc(signature, result);
+    // the list is the RPC's word; that the transaction names the reference is read from the transaction itself
+    if (!tx || tx.failed || !accountKeys(tx).includes(intent.reference)) return nothing();
+    return tx;
   }
 
   /**
    * Looks on the chain for the payment of a quote, and credits it when it is there. Safe to ask as often as
    * the caller is allowed to: a payment is credited once, and asking again says "paid". `signatures`: the
-   * transactions the caller says paid it, which are read whatever else names the quote.
+   * transactions the caller says paid it. They are kept with the quote and read at every look, whatever
+   * else names the quote.
    */
   check(profile: string, reference: unknown, signatures?: unknown): Promise<{ ok: true; result: CheckView } | Refusal> {
+    const intent = typeof reference === "string" && ADDRESS.test(reference) ? this.accounts.intentOf(profile, reference) : undefined;
+    if (!intent) return Promise.resolve({ ok: false, status: 404, why: "there is no such quote. Ask for the amount again." });
     const named = (Array.isArray(signatures) ? signatures : []).filter(looksLikeSignature).slice(0, 5);
-    return this.oneAtATime(() => this.look(profile, reference, named, true));
+    if (named.length) this.accounts.reported(intent, named);
+    return this.inTurn(intent.reference, () => this.look(intent, true));
   }
 
   /** `asking`: somebody asked, which keeps the quote in the service's own hourly look for three days more. */
-  private async look(profile: string, reference: unknown, signatures: readonly string[], asking: boolean): Promise<{ ok: true; result: CheckView } | Refusal> {
-    const intent = typeof reference === "string" && ADDRESS.test(reference) ? this.accounts.intentOf(profile, reference) : undefined;
-    if (!intent) return { ok: false, status: 404, why: "there is no such quote. Ask for the amount again." };
-    if (intent.asset === "LAMPORT") return this.lookForBurns(intent, signatures, asking);
-    if (intent.paidBy) return { ok: true, result: { status: "paid", until: this.accounts.prepaidUntil(profile) } };
+  private async look(intent: PayIntent, asking: boolean): Promise<{ ok: true; result: CheckView } | Refusal> {
+    if (intent.asset === "LAMPORT") return this.lookForBurns(intent, asking);
+    const profile = intent.profile;
+    const paid = () => ({ ok: true as const, result: { status: "paid" as const, until: this.accounts.prepaidUntil(profile) } });
+    if (intent.paidBy) return paid();
     if (asking) this.accounts.asked(intent, this.now());
-    let best: CheckView = { status: "waiting" };
     // finalized: a payment that could still be undone is not one yet
-    for (const tx of await this.naming(intent, signatures, "finalized")) {
+    const list = await this.listed(intent, "finalized");
+    let read = 0;
+    for (const signature of this.toRead(intent, intent.sent ?? [], list ?? [])) {
+      const tx = await this.readOne(intent, signature, "finalized");
+      if (tx === null) continue;
+      read += 1;
+      if (tx === "nothing") continue;
       const got = arrived(tx, this.cfg.payTo, intent.asset, this.mint);
-      if (got <= 0n) { this.isNothing(`${intent.reference}:${tx.signature}`); continue; }
-      if (got < BigInt(intent.units)) { best = { status: "short", arrived: got.toString(), wanted: intent.units }; continue; }
+      // nothing, short, or late: read once and remembered, so that what cannot be counted is not read at every look
+      if (got < BigInt(intent.units)) { this.note(intent, signature, got > 0n ? got : 0n); continue; }
       // a price in SOL holds for ten minutes: a payment made after that was made at another price
-      if (intent.asset === "SOL" && (tx.blockTime ?? this.now()) > intent.expiresAt + SOL_QUOTE_GRACE_SECONDS) { best = { status: "late" }; continue; }
+      if (intent.asset === "SOL" && (tx.blockTime ?? this.now()) > intent.expiresAt + SOL_QUOTE_GRACE_SECONDS) { this.note(intent, signature, got, true); continue; }
       const now = this.now();
       const until = addMonths(Math.max(now, this.accounts.prepaidUntil(profile)), intent.months);
-      if (!this.accounts.credit(intent, { signature: tx.signature, asset: intent.asset, units: got.toString(), months: intent.months, cents: intent.cents, at: now }, until)) continue;
+      if (!this.accounts.credit(intent, { signature, asset: intent.asset, units: got.toString(), months: intent.months, cents: intent.cents, at: now }, until)) continue;
       this.started(profile, until);
-      return { ok: true, result: { status: "paid", until } };
+      return paid();
+    }
+    if (intent.paidBy) return paid();
+    if (list === null && read === 0) return CHAIN_DOWN;
+    // what was read, now or before, and could not be counted: one that came late, or the largest that was short
+    let best: CheckView = { status: "waiting" };
+    for (const signature of new Set([...(intent.sent ?? []), ...(list ?? [])])) {
+      const was = this.seen.get(`${intent.reference}:${signature}`);
+      if (!was || was.got <= 0n) continue;
+      if (was.late) best = { status: "late" };
+      else if (best.status === "waiting" || (best.status === "short" && BigInt(best.arrived) < was.got)) best = { status: "short", arrived: was.got.toString(), wanted: intent.units };
     }
     return { ok: true, result: best };
   }
 
   /**
-   * The same for a quote to burn. Every burn that names it is counted toward it, and spent, as it is found.
-   * Each time what is counted comes to the quote's amount, the months are paid for once: so a second burn
-   * made by mistake pays for the months again and is not lost, and what is over waits for the rest.
+   * The amount a quote to burn pays at: its own while it stands, and once it has run out never less than
+   * the number then in force. A quote holds a week; it does not go on paying at an old number after that.
    */
-  private async lookForBurns(intent: PayIntent, signatures: readonly string[], asking: boolean): Promise<{ ok: true; result: CheckView } | Refusal> {
-    const profile = intent.profile, want = BigInt(intent.units);
-    const off = this.burnOff(intent);
-    if (off) return intent.paidBy ? { ok: true, result: { status: "paid", until: this.accounts.prepaidUntil(profile) } } : off;
-    if (asking) this.accounts.asked(intent, this.now());
-    for (const tx of await this.naming(intent, signatures, "finalized")) {
-      const here = burned(tx, this.cfg.burn!.mint);
-      if (here <= 0n) { this.isNothing(`${intent.reference}:${tx.signature}`); continue; }
-      if (!this.accounts.countBurn(intent, tx.signature, here, this.now())) continue;
-      while (BigInt(intent.counted ?? "0") >= want) {
-        const now = this.now();
-        const until = addMonths(Math.max(now, this.accounts.prepaidUntil(profile)), intent.months);
-        if (!this.accounts.payFromBurned(intent, { signature: tx.signature, asset: "LAMPORT", units: intent.units, months: intent.months, cents: 0, at: now }, until)) break;
-        this.started(profile, until);
-      }
+  private wantOf(intent: PayIntent, decimals: number, at: number): bigint {
+    const quoted = BigInt(intent.units);
+    if (at <= intent.expiresAt) return quoted;
+    const current = BigInt(this.cfg.burn!.perMonth) * BigInt(intent.months) * 10n ** BigInt(decimals);
+    return current > quoted ? current : quoted;
+  }
+
+  /** Pays a quote from what is counted toward it, once for each time that covers the amount. `at`: when what tipped it was burned. */
+  private payCounted(intent: PayIntent, decimals: number, at: number): void {
+    const want = this.wantOf(intent, decimals, at);
+    for (;;) {
+      const now = this.now();
+      const until = addMonths(Math.max(now, this.accounts.prepaidUntil(intent.profile)), intent.months);
+      // (paid for by burns before this quote was made, where no burn names it: there is no one transaction to name)
+      if (!this.accounts.payFromBurned(intent, want, { signature: intent.lastCounted ?? "carried", asset: "LAMPORT", units: want.toString(), months: intent.months, cents: 0, at: now }, until)) return;
+      this.started(intent.profile, until);
     }
-    if (intent.paidBy) return { ok: true, result: { status: "paid", until: this.accounts.prepaidUntil(profile) } };
+  }
+
+  /**
+   * The same for a quote to burn. Every burn that names it is counted toward it, and spent, as it is read.
+   * Each time what is counted comes to the amount, the months are paid for once: so a second burn made by
+   * mistake pays for the months again and is not lost, and what is over waits for the rest, or for the
+   * profile's next quote.
+   */
+  private async lookForBurns(intent: PayIntent, asking: boolean): Promise<{ ok: true; result: CheckView } | Refusal> {
+    const profile = intent.profile;
+    const paid = () => ({ ok: true as const, result: { status: "paid" as const, until: this.accounts.prepaidUntil(profile) } });
+    const off = this.burnOff(intent);
+    if (off) return intent.paidBy ? paid() : off;
+    let decimals: number;
+    try { decimals = (await this.burnToken()).decimals; } catch { return intent.paidBy ? paid() : CHAIN_DOWN; }
+    if (asking) this.accounts.asked(intent, this.now());
+    // First what is counted and not yet paid for: carried over from another quote, or counted by a look
+    // that was cut short before it could pay. It is paid for whether or not anything new is found.
+    this.payCounted(intent, decimals, this.now());
+    const list = await this.listed(intent, "finalized");
+    let read = 0;
+    for (const signature of this.toRead(intent, intent.sent ?? [], list ?? [])) {
+      const tx = await this.readOne(intent, signature, "finalized");
+      if (tx === null) continue;
+      read += 1;
+      if (tx === "nothing") continue;
+      const here = burned(tx, this.cfg.burn!.mint);
+      if (here <= 0n) { this.note(intent, signature, 0n); continue; }
+      if (this.accounts.countBurn(intent, signature, here, this.now())) this.payCounted(intent, decimals, tx.blockTime ?? this.now());
+    }
+    if (intent.paidBy) return paid();
     const counted = BigInt(intent.counted ?? "0");
-    return { ok: true, result: counted > 0n ? { status: "short", arrived: counted.toString(), wanted: intent.units } : { status: "waiting" } };
+    if (counted > 0n) return { ok: true, result: { status: "short", arrived: counted.toString(), wanted: this.wantOf(intent, decimals, this.now()).toString() } };
+    return list === null && read === 0 ? CHAIN_DOWN : { ok: true, result: { status: "waiting" } };
   }
 
   /** A payment was credited: the profile has the plan, and its owner is told. */
@@ -445,19 +542,35 @@ export class Prepaid {
    * The hourly look for payments nobody is waiting on a page for: the quotes a payment was built for or
    * asked about in the last three days. A tab that was closed before the chain made a payment final, and a
    * second burn that landed after the first was counted, are found here.
+   *
+   * So many an hour and no more, and every quote gets its turn: the ones looked for longest ago go first,
+   * and no profile has more than a few of its quotes looked for in one hour. A profile that keeps asking
+   * about its own quotes does not push anybody else's out.
    */
   async sweep(): Promise<{ looked: number; paid: number }> {
     const now = this.now();
-    const due = this.accounts.intents()
-      .filter((i) => i.askedAt !== undefined && now - i.askedAt <= SWEEP_SECONDS && (i.asset === "LAMPORT" || !i.paidBy))
-      .sort((a, b) => (b.askedAt ?? 0) - (a.askedAt ?? 0)).slice(0, SWEEP_MOST);
-    let paid = 0;
+    const live = new Set<string>();
+    const due = this.accounts.intents().filter((i) => {
+      if (i.askedAt === undefined) return false;
+      const ok = i.paidBy ? i.asset === "LAMPORT" && now - i.askedAt <= SWEEP_PAID_SECONDS : now - i.askedAt <= SWEEP_SECONDS;
+      if (ok) live.add(i.reference);
+      return ok;
+    }).sort((a, b) => (this.swept.get(a.reference) ?? 0) - (this.swept.get(b.reference) ?? 0) || (b.askedAt ?? 0) - (a.askedAt ?? 0));
+    for (const reference of this.swept.keys()) if (!live.has(reference)) this.swept.delete(reference);
+    const each = new Map<string, number>();
+    let looked = 0, paid = 0;
     for (const intent of due) {
+      if (looked >= SWEEP_MOST) break;
+      const mine = each.get(intent.profile) ?? 0;
+      if (mine >= SWEEP_EACH) continue;
+      each.set(intent.profile, mine + 1);
+      looked += 1;
+      this.swept.set(intent.reference, now);
       const before = this.accounts.prepaidUntil(intent.profile);
-      await this.oneAtATime(() => this.look(intent.profile, intent.reference, [], false)).catch(() => undefined);
+      await this.inTurn(intent.reference, () => this.look(intent, false)).catch(() => undefined);
       if (this.accounts.prepaidUntil(intent.profile) > before) paid += 1;
     }
-    return { looked: due.length, paid };
+    return { looked, paid };
   }
 
   /**

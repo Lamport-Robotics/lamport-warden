@@ -35,6 +35,10 @@ class Chain implements Rpc {
   down = false;
   /** How long reading one transaction takes, so that looks made at once overlap. */
   slow = 0;
+  /** Transactions the RPC fails to read, and ones in a form it says it does not support; and the list itself failing. */
+  broken = new Set<string>();
+  unsupported = new Set<string>();
+  noList = false;
   private n = 0;
 
   /**
@@ -60,6 +64,9 @@ class Chain implements Rpc {
   async call(method: string, params: any[]): Promise<any> {
     this.asked.push(method);
     const seen = (t: { final: boolean }, commitment: unknown) => commitment !== "finalized" || t.final;
+    if (method === "getSignaturesForAddress" && this.noList) throw new Error("timed out");
+    if (method === "getTransaction" && this.broken.has(params[0])) throw new Error("timed out");
+    if (method === "getTransaction" && this.unsupported.has(params[0])) throw new Error("Transaction version (1) is not supported by the requesting client. Please try the request again with the following configuration parameter: \"maxSupportedTransactionVersion\": 1");
     if (method === "getSignaturesForAddress") return this.txs.filter((t) => t.listed && t.names.includes(params[0]) && seen(t, params[1]?.commitment)).reverse().slice(0, params[1]?.limit ?? 1000).map((t) => ({ signature: t.signature, err: t.failed ? {} : null }));
     if (method === "getTransaction") { if (this.slow) await new Promise((r) => setTimeout(r, this.slow)); return this.txs.find((t) => t.signature === params[0] && seen(t, params[1]?.commitment))?.result ?? null; }
     if (method === "getAccountInfo") return this.mintAnswers;
@@ -71,7 +78,8 @@ class Chain implements Rpc {
 const bs58 = (bytes: Uint8Array): string => new PublicKey(bytes.subarray(0, 32)).toBase58().padEnd(44, "1") + new PublicKey(bytes.subarray(32, 64)).toBase58().padEnd(44, "1");
 
 function setup(o: { perMonth?: number | null; holder?: () => Promise<boolean> } = {}) {
-  const accounts = new Accounts(new MemoryStore(), Buffer.alloc(32, 9));
+  const store = new MemoryStore();
+  const accounts = new Accounts(store, Buffer.alloc(32, 9));
   const chain = new Chain();
   const said: string[] = [];
   let now = T0;
@@ -83,7 +91,8 @@ function setup(o: { perMonth?: number | null; holder?: () => Promise<boolean> } 
   const quoted = async (months = 1, of = profile) => { const r = await prepaid.quote(of, "LAMPORT", months); if (!r.ok) throw new Error(r.why); return r.quote; };
   const check = async (reference: string, signatures?: string[], of = profile) => { const r = await prepaid.check(of, reference, signatures); if (!r.ok) throw new Error(r.why); return r.result; };
   const months = (of = profile) => (accounts.profile(of)?.prepaid?.payments ?? []).reduce((sum, p) => sum + p.months, 0);
-  return { accounts, chain, prepaid, said, profile, quoted, check, admit, made, months, later: (seconds: number) => { now += seconds; } };
+  const reads = () => chain.asked.filter((m) => m === "getTransaction").length;
+  return { store, accounts, chain, prepaid, said, profile, quoted, check, admit, made, months, reads, later: (seconds: number) => { now += seconds; } };
 }
 
 describe("paying by burning, when it is not turned on", () => {
@@ -398,19 +407,48 @@ describe("a burn that is hard to find", () => {
     expect((await s.check(q.reference)).status).toBe("paid");
   });
 
-  it("is found behind them when it came later, a few at a time, and at once by its signature", async () => {
+  it("is found when it came after them: the list is read from its new end too, since the latest payment may be what completes an earlier one", async () => {
     const s = setup();
     const q = await s.quoted(1);
     s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(290_000)]] });
     for (let i = 0; i < 60; i++) s.chain.did({ references: [q.reference], balances: [] });
-    const rest = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(290_000), TOKENS(275_000)]] });
-    expect((await s.check(q.reference)).status).toBe("short");
-    // each look reads the next few of what it has not read, and does not read again what was nothing
-    const before = s.chain.asked.filter((m) => m === "getTransaction").length;
-    expect((await s.check(q.reference)).status).toBe("short");
-    expect(s.chain.asked.filter((m) => m === "getTransaction").length - before).toBe(25);
-    // named by its signature, it is read whatever else is there
-    expect((await s.check(q.reference, [rest])).status).toBe("paid");
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(290_000), TOKENS(275_000)]] });
+    expect((await s.check(q.reference)).status).toBe("paid");
+  });
+
+  it("is found in the middle of them a few at a time, and at once by its signature; what was read and was nothing is not read again", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    for (let i = 0; i < 30; i++) s.chain.did({ references: [q.reference], balances: [] });
+    const real = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    for (let i = 0; i < 30; i++) s.chain.did({ references: [q.reference], balances: [] });
+    // twelve from each end at a look: 24, 24, and the 13 that are left
+    expect(await s.check(q.reference)).toEqual({ status: "waiting" });
+    expect(s.reads()).toBe(24);
+    expect(await s.check(q.reference)).toEqual({ status: "waiting" });
+    expect(s.reads()).toBe(48);
+    expect((await s.check(q.reference)).status).toBe("paid");
+    expect(s.reads()).toBeLessThanOrEqual(61);
+    // another quote, buried the same way: named by its signature the payment is read first, whatever else is there
+    const t = setup();
+    const p = await t.quoted(1);
+    for (let i = 0; i < 30; i++) t.chain.did({ references: [p.reference], balances: [] });
+    const named = t.chain.did({ references: [p.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    for (let i = 0; i < 30; i++) t.chain.did({ references: [p.reference], balances: [] });
+    expect((await t.check(p.reference, [named])).status).toBe("paid");
+    expect(real).not.toBe("");
+  });
+
+  it("named once by its signature is looked for by that from then on: the page says it when the wallet returns, and the tab can close", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    const sent = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]], final: false, listed: false });
+    // the page's first look, a second after the wallet sent it: not final yet
+    expect(await s.check(q.reference, [sent])).toEqual({ status: "waiting" });
+    expect(s.accounts.intentOf(s.profile, q.reference)?.sent).toEqual([sent]);
+    s.chain.finalize(sent);
+    // the chain's list never shows it, and nobody names it again: the service's own look reads it by the signature it was given
+    expect(await s.prepaid.sweep()).toEqual({ looked: 1, paid: 1 });
   });
 
   it("is found by its signature when the chain's list does not show it at all; a signature for some other quote finds nothing and harms nothing", async () => {
@@ -454,6 +492,194 @@ describe("a burn that is hard to find", () => {
     expect(await s.made({ burn: { mint: key(90).toBase58(), perMonth: 25_000 } }).transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 409, why });
     // switched on again, it is counted
     expect((await s.check(q.reference)).status).toBe("paid");
+  });
+});
+
+describe("a chain that answers badly", () => {
+  it("one transaction that cannot be read does not lose the others: the burn beside it is counted", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    const real = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    s.chain.broken.add(s.chain.did({ references: [q.reference], balances: [] }));
+    expect((await s.check(q.reference, [real])).status).toBe("paid");
+    expect((await s.check(q.reference)).status).toBe("paid");
+  });
+
+  it("a transaction in a form the RPC will not hand over is nothing toward a quote, and does not stand in the way of paying it", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    s.chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(300_000);
+    s.chain.unsupported.add(s.chain.did({ references: [q.reference], balances: [] }));
+    expect(await s.check(q.reference)).toEqual({ status: "waiting" });
+    expect((await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).ok).toBe(true);
+    // read once, and not again
+    const before = s.reads();
+    await s.check(q.reference);
+    expect(s.reads()).toBe(before);
+  });
+
+  it("is said to be a chain that could not be read, and not that nothing is there; and no burn is built over one that could not be read", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    s.chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(300_000);
+    const sent = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    const down = { ok: false, status: 502, why: "the chain could not be read just now. Try again in a minute." };
+    s.chain.noList = true;
+    expect(await s.prepaid.check(s.profile, q.reference)).toEqual(down);
+    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual(down);
+    // the list answers and the transaction in it does not: it may be the burn, so nothing is built
+    s.chain.noList = false;
+    s.chain.broken.add(sent);
+    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual(down);
+    // with the list still failing, a payment named by its signature is found all the same
+    s.chain.broken.clear();
+    s.chain.noList = true;
+    expect((await s.check(q.reference, [sent])).status).toBe("paid");
+  });
+
+  it("a burn that was counted and then not paid for, because the look was cut short, is paid for at the next look", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    // the disk is full at the moment the burn is counted
+    const flush = s.store.flush.bind(s.store);
+    let fail = true;
+    s.store.flush = () => { if (fail) { fail = false; throw new Error("no space left on device"); } flush(); };
+    await expect(s.prepaid.check(s.profile, q.reference)).rejects.toThrow("no space");
+    expect(s.accounts.profile(s.profile)?.tier).toBe("watch");
+    expect((await s.check(q.reference)).status).toBe("paid");
+    expect(s.months()).toBe(1);
+  });
+});
+
+describe("many looks and many quotes", () => {
+  it("one profile's looks do not hold up another's, and what cannot be counted is read once and not at every look", async () => {
+    const s = setup();
+    const other = s.admit(2);
+    // twenty-five payments of one unit toward a quote in USDC, and twenty looks at it
+    const usdc = await s.prepaid.quote(s.profile, "USDC", 1);
+    if (!usdc.ok) throw new Error(usdc.why);
+    const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    for (let i = 0; i < 25; i++) s.chain.did({ references: [usdc.quote.reference], balances: [[PAY_TO, 0n, 1n]], mint: USDC });
+    const mine = await s.quoted(1, other);
+    s.chain.did({ references: [mine.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    s.chain.slow = 3;
+    const order: string[] = [];
+    const flood = Array.from({ length: 20 }, () => s.prepaid.check(s.profile, usdc.quote.reference).then((r) => { order.push("flood"); return r; }));
+    const theirs = s.check(mine.reference, undefined, other).then((r) => { order.push("theirs"); return r; });
+    expect((await theirs).status).toBe("paid");
+    const answers = await Promise.all(flood);
+    // the other profile's burn was answered while the flood was still being worked through
+    expect(order.indexOf("theirs")).toBeLessThan(order.lastIndexOf("flood"));
+    // and the twenty looks read each of the twenty-five once
+    expect(answers.at(-1)).toEqual({ ok: true, result: { status: "short", arrived: "1", wanted: usdc.quote.units } });
+    expect(s.reads()).toBe(25 + 1);
+  });
+
+  it("a payment in USDC that follows a short one and a pile of small ones is found: none of them is read twice, so they cannot fill every look", async () => {
+    const s = setup();
+    const r = await s.prepaid.quote(s.profile, "USDC", 1);
+    if (!r.ok) throw new Error(r.why);
+    const q = r.quote, USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    s.chain.did({ references: [q.reference], balances: [[PAY_TO, 0n, 1n]], mint: USDC });
+    for (let i = 0; i < 40; i++) s.chain.did({ references: [q.reference], balances: [[PAY_TO, 0n, 1n]], mint: USDC });
+    expect(await s.check(q.reference)).toEqual({ status: "short", arrived: "1", wanted: q.units });
+    s.chain.did({ references: [q.reference], balances: [[PAY_TO, 0n, BigInt(q.units)]], mint: USDC });
+    expect((await s.check(q.reference)).status).toBe("paid");
+  });
+
+  it("the service's own look gets to every quote: the ones looked for longest ago go first, and nobody's asking pushes another's out", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    s.chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(300_000);
+    // a burn was built and sent, and the tab closed
+    expect((await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).ok).toBe(true);
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    // then twenty-five other profiles ask about three quotes each, later than that
+    s.later(60);
+    const others: [string, string][] = [];
+    for (let n = 2; n <= 26; n++) { const p = s.admit(n); for (const months of [1, 3, 12]) { const o = await s.quoted(months, p); others.push([p, o.reference]); await s.check(o.reference, undefined, p); } }
+    // sixty an hour: the first hour does not reach it, the second does, though the others keep asking
+    expect(await s.prepaid.sweep()).toEqual({ looked: 60, paid: 0 });
+    for (const [p, reference] of others) await s.check(reference, undefined, p);
+    const second = await s.prepaid.sweep();
+    expect(second.paid).toBe(1);
+    expect(s.accounts.profile(s.profile)?.tier).toBe("pro");
+  });
+});
+
+describe("what a quote is worth later", () => {
+  it("holds its number for a week and no longer: a quote that has run out does not go on paying at a number that was since raised", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    // the number is raised to 50,000 a month; the same store, another setting
+    const dearer = s.made({ burn: { mint: LAMPORT_MINT, perMonth: 50_000 } });
+    // within its week the quote is honoured as it was shown
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    expect(await dearer.check(s.profile, q.reference)).toMatchObject({ ok: true, result: { status: "paid" } });
+    expect(s.months()).toBe(1);
+    // on day twenty, three burns of the old amount naming the old quote: 75,000 burned is one month at 50,000, with 25,000 over, and not three
+    s.later(20 * 86_400);
+    for (let i = 0; i < 3; i++) s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(275_000), TOKENS(250_000)]] });
+    for (const t of s.chain.txs.slice(-3)) t.result.blockTime = T0 + 20 * 86_400;
+    await dearer.check(s.profile, q.reference);
+    expect(s.months()).toBe(2);
+    expect(s.accounts.intentOf(s.profile, q.reference)?.counted).toBe(TOKENS(25_000).toString());
+  });
+
+  it("what was over on a quote that is paid counts toward the profile's next one, and so does what was short on one that ran out", async () => {
+    const s = setup();
+    s.chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(1_000_000);
+    const first = await s.quoted(1);
+    s.chain.did({ references: [first.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(290_000)]] });
+    s.chain.did({ references: [first.reference], balances: [[payer.toBase58(), TOKENS(290_000), TOKENS(265_000)]] });
+    expect((await s.check(first.reference)).status).toBe("paid");
+    // 10,000 over: the next quote starts with it, and burns only the rest
+    const next = await s.quoted(1);
+    expect(next.reference).not.toBe(first.reference);
+    expect(next.counted).toBe(TOKENS(10_000).toString());
+    expect(s.accounts.intentOf(s.profile, first.reference)?.counted).toBe("0");
+    const rest = await s.prepaid.transaction(s.profile, next.reference, payer.toBase58());
+    if (!rest.ok) throw new Error(rest.why);
+    expect(Transaction.from(Buffer.from(rest.transaction, "base64")).instructions[0]!.data.readBigUInt64LE(1)).toBe(TOKENS(15_000));
+
+    // 40,000 toward three months, and the quote runs out
+    const three = await s.quoted(3);
+    s.chain.did({ references: [three.reference], balances: [[payer.toBase58(), TOKENS(265_000), TOKENS(225_000)]] });
+    expect(await s.check(three.reference)).toMatchObject({ status: "short", arrived: TOKENS(40_000).toString() });
+    s.later(8 * 86_400);
+    expect(await s.prepaid.transaction(s.profile, three.reference, payer.toBase58())).toMatchObject({ ok: false, status: 410 });
+    // asked for again, it is a new quote that has the 40,000, and the 10,000 from before: nothing burned stays behind
+    const again = await s.quoted(3);
+    expect(again.reference).not.toBe(three.reference);
+    expect(again.counted).toBe(TOKENS(50_000).toString());
+  });
+
+  it("what was burned before covers a smaller amount whole: it is counted on asking, and nothing more is burned", async () => {
+    const s = setup();
+    s.chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(1_000_000);
+    const three = await s.quoted(3);
+    s.chain.did({ references: [three.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(260_000)]] });
+    await s.check(three.reference);
+    s.later(8 * 86_400);
+    const one = await s.quoted(1);
+    expect(one.counted).toBe(TOKENS(40_000).toString());
+    expect(await s.prepaid.transaction(s.profile, one.reference, payer.toBase58())).toEqual({ ok: false, status: 409, why: "what was burned before covers this. Look for it and it is counted: nothing more needs burning." });
+    expect((await s.check(one.reference)).status).toBe("paid");
+    expect(s.months()).toBe(1);
+    expect(s.accounts.intentOf(s.profile, one.reference)?.counted).toBe(TOKENS(15_000).toString());
+  });
+
+  it("with something burned for it and not used is never dropped, however old", async () => {
+    const s = setup();
+    const q = await s.quoted(3);
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(260_000)]] });
+    await s.check(q.reference);
+    s.later(200 * 86_400);
+    // other profiles ask for amounts, which is when old quotes are cleared out
+    for (let n = 2; n < 6; n++) await s.quoted(1, s.admit(n));
+    expect(s.accounts.intentOf(s.profile, q.reference)?.counted).toBe(TOKENS(40_000).toString());
+    expect((await s.quoted(12)).counted).toBe(TOKENS(40_000).toString());
   });
 });
 
