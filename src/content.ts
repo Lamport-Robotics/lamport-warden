@@ -51,7 +51,10 @@ async function useMine(): Promise<void> {
     if (!(await prompt(CAUGHT_BEFORE(caughtBefore), location.origin)) || caughtHere) return;
     noted = await goOn(true);
   }
-  if (!noted.noted) return; // nothing was written down: the decoy stays where it is
+  // Not written down because the site was caught, and the owner did not type past that: the decoy stays.
+  // Not written down for any other reason (the experiment was turned off in another tab, the extension was
+  // reloaded): the owner still asked for their wallet on this page, and gets it.
+  if (!noted.noted && typeof noted.caughtOn === "string") return;
   takeDown();
   window.dispatchEvent(new CustomEvent(channel.own));
 }

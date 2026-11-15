@@ -108,11 +108,14 @@ seen the owner's address (`src/decoy.ts`):
 
 "Does nothing else" means it calls only programs whose every instruction Warden reads. What is sent out is
 added up over everything asked in one call, so a balance taken in pieces is taken. What moves into the
-decoy's own accounts is not sent out (wrapping SOL), unless the same transaction closes that account to
-somebody else. More than the decoy holds of something is a price and not a balance, and is not counted. And
-when nothing is known of what the decoy holds (the RPC is off), how much is asked says nothing: only a power
-handed over catches anybody then. The first sixteen requests of a call are read; a call that asks for more
-is not gone on with at a press.
+decoy's own accounts is not sent out (wrapping SOL), unless the same transaction takes it out of there:
+closes that account to somebody else, sends the wrapped SOL on, or lets somebody spend it. More than the
+decoy holds of something is a price and not a balance, and is not counted; what the decoy holds is read
+again before that is believed, because it is somebody's live wallet and may have been sent more since. And
+when nothing is known of what the decoy holds (the RPC is off, or does not answer), how much is asked says
+nothing: only a power handed over catches anybody then, and the owner is told the amounts could not be
+weighed. The first sixteen requests of a call are read; a call that asks for more is not gone on with at a
+press.
 
 While a site is being shown the decoy, Warden says so in a corner of the page, with a button: **use my
 wallet here**. A site that has nothing to ask a wallet for straight away (a portfolio page, a swap form that
@@ -152,6 +155,11 @@ What it is not:
   the decoy holds. So is a permission for nearly all of a holding, whatever uses it. A page that was caught
   gets nothing more until it is loaded again, and the site is remembered. The button in the corner is the
   way round, pressed before the site asks for anything; and "Forget them" in the settings.
+- **A page can keep the notice from being pressed.** Its element is in the page: a page that keeps taking it
+  out or changing it has it put back each time, and the button does not count for a moment after. A page
+  cannot press it. Turning the experiment off in the settings ends a decoy on any page.
+- **No answer, no decoy.** If Warden's own worker has not said within three seconds of a page's first
+  connect whether that page has a decoy, the page is connected as always.
 - **The top frame only.** A page inside a frame is connected as always, and a page that was caught can
   still reach a wallet from inside a frame. Warden reads what is asked there like any other request.
 - **Not at Solflare's older door.** Nothing can be put in front of `window.solflare` (see the table above),

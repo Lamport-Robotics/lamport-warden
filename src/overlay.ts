@@ -177,7 +177,7 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
 }
 
 const NOTICE_CSS = `
-:host { all: initial; }
+:host { all: initial; direction: ltr; unicode-bidi: isolate; }
 .note { box-sizing: border-box; width: min(340px, calc(100vw - 24px)); background: #f2eee3; color: #14130f; border-radius: 12px; padding: 12px 14px 12px; box-shadow: 0 10px 36px rgba(0, 0, 0, 0.4); font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
 .tag { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; color: #4a4a40; margin-bottom: 6px; }
 .tag.warn { color: #a1260d; }
@@ -201,32 +201,53 @@ export function notice(o: { text: string; button: string; warn?: boolean; onPres
   const el = (tag: string, cls: string, text: string) => { const e = document.createElement(tag); e.className = cls; e.textContent = text; return e; };
   const button = el("button", "", o.button) as HTMLButtonElement;
   card.append(el("div", o.warn ? "tag warn" : "tag", "Lamport Warden · A decoy first"), el("p", "", o.text), button);
+  const parent: ParentNode = document.documentElement ?? document;
+  const topLayer = typeof (host as { showPopover?: unknown }).showPopover === "function";
+  const watching: { disconnect(): void }[] = [];
+  let taken = false;
+  // The same care as the prompt's button (see `prompt`): a press counts from a person, on a card the browser
+  // reports fully in view and unaltered, in the top layer where Warden put it, whose button has been in one
+  // place for a moment.
   const tracked = typeof IntersectionObserver === "function" && typeof IntersectionObserverEntry === "function" && "isVisible" in IntersectionObserverEntry.prototype;
-  let seenSince: number | null = null;
-  let io: IntersectionObserver | null = null;
+  const seenSince = new Map<Element, number | null>([[button, null], [card, null]]);
   if (tracked) {
-    io = new IntersectionObserver((entries) => {
-      const last = entries[entries.length - 1] as IntersectionObserverEntry & { isVisible?: boolean };
-      seenSince = last.isIntersecting && last.isVisible ? (seenSince ?? performance.now()) : null;
+    const io = new IntersectionObserver((entries) => {
+      for (const entry of entries as (IntersectionObserverEntry & { isVisible?: boolean })[]) {
+        seenSince.set(entry.target, entry.isIntersecting && entry.isVisible ? (seenSince.get(entry.target) ?? performance.now()) : null);
+      }
     }, { threshold: 1, trackVisibility: true, delay: 100 } as IntersectionObserverInit);
     io.observe(button);
+    io.observe(card);
+    watching.push(io);
   }
-  /** When the page last moved the notice, or took it out. */
+  const placed = typeof button.getBoundingClientRect === "function";
+  const place = () => { const r = button.getBoundingClientRect(); return `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`; };
+  let at = "", atSince = performance.now();
+  const look = () => { if (!placed) return; const now = place(); if (now !== at) { at = now; atSince = performance.now(); } };
+  if (placed) {
+    const looking = setInterval(look, 100);
+    (looking as { unref?: () => void }).unref?.();
+    watching.push({ disconnect: () => clearInterval(looking) });
+  }
+  /** When the page last changed the notice's own element, or took it out. */
   let stirred = -Infinity;
   button.addEventListener("click", (e) => {
     if (!e.isTrusted) return;
-    if (tracked && (seenSince === null || performance.now() - seenSince < 400)) return; // covered, altered, or only just shown
-    if (performance.now() - stirred < 400) return; // moved a moment ago: a button slid under a pointer is not a button somebody chose to press
+    const now = performance.now();
+    for (const since of seenSince.values()) if (tracked && (since === null || now - since < 400)) return; // covered, altered, or only just shown
+    if (now - stirred < 400) return; // its element was changed, or taken out, a moment ago
+    look();
+    if (placed && now - atSince < 400) return; // moved a moment ago: a button slid under a pointer is not a button somebody chose to press
+    if (host.parentNode != null && host.parentNode !== parent) return; // put somewhere else in the page
+    if (topLayer && !host.matches(":popover-open")) return; // taken out of the browser's top layer, where the page can paint over it
     o.onPress();
   });
   root.append(style, card);
-  const parent = document.documentElement ?? document;
   parent.append(host);
-  const laidOut = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;left:auto !important;bottom:auto !important;width:auto !important;height:auto !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;overflow:visible !important;";
+  // (no colour is named here: see the prompt's own element)
+  const laidOut = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;left:auto !important;bottom:auto !important;width:auto !important;height:auto !important;margin:0 !important;padding:0 !important;overflow:visible !important;direction:ltr !important;unicode-bidi:isolate !important;";
   let raising: ReturnType<typeof setInterval> | undefined;
   let asSet = "";
-  let taken = false;
-  const watching: { disconnect(): void }[] = [];
   try {
     host.setAttribute("popover", "manual");
     host.style.cssText = laidOut;
@@ -236,32 +257,32 @@ export function notice(o: { text: string; button: string; warn?: boolean; onPres
     raising = setInterval(raise, 1000);
     (raising as { unref?: () => void }).unref?.();
   } catch {
-    host.style.cssText = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;z-index:2147483647 !important;";
+    host.style.cssText = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;z-index:2147483647 !important;direction:ltr !important;";
     asSet = host.style.cssText;
   }
-  // The element is the page's to reach, though not what is in it. A page that moves it has its changes put
-  // back, and one that takes it out has it put in again: it is the owner's way of ending the decoy, and is
-  // not the page's to take away. (A page can tell from it that a decoy is showing. It can tell that anyway.)
+  // The element is the page's to reach, though not what is in it. A page that changes it has its changes put
+  // back, and one that takes it out, or puts it somewhere else, has it put in again: it is the owner's way of
+  // ending the decoy. A page that keeps at this can keep the button from counting; it cannot press it. (A
+  // page can tell from the notice that a decoy is showing. It can tell that anyway.)
   if (typeof MutationObserver === "function") {
     const still = new MutationObserver(() => {
-      stirred = performance.now();
-      for (const a of Array.from(host.attributes)) if (a.name !== "popover" && a.name !== "style") host.removeAttribute(a.name);
-      if (host.style.cssText !== asSet) { host.style.cssText = laidOut; asSet = host.style.cssText; }
+      let changed = false;
+      for (const a of Array.from(host.attributes)) if (a.name !== "popover" && a.name !== "style" && !a.name.startsWith("data-") && !a.name.startsWith("aria-")) { host.removeAttribute(a.name); changed = true; }
+      if (host.style.cssText !== asSet) { host.style.cssText = laidOut; asSet = host.style.cssText; changed = true; }
+      if (changed) stirred = performance.now();
       still.takeRecords();
     });
     still.observe(host, { attributes: true });
     let putBack = 0;
+    const back = () => { if (taken || host.parentNode === parent) return; putBack = performance.now(); stirred = putBack; parent.append(host); };
     const there = new MutationObserver(() => {
-      if (taken || host.isConnected) return;
-      stirred = performance.now();
+      if (taken || host.parentNode === parent) return;
       // (not in a loop with a page that keeps taking it out: a few times a second is enough to be seen)
-      if (performance.now() - putBack < 250) { setTimeout(() => { if (!taken && !host.isConnected) { putBack = performance.now(); parent.append(host); } }, 250); return; }
-      putBack = performance.now();
-      parent.append(host);
+      if (performance.now() - putBack < 250) setTimeout(back, 250); else back();
     });
-    there.observe(parent, { childList: true });
+    there.observe(document, { childList: true, subtree: true });
     watching.push(still, there);
   }
-  return { remove() { taken = true; io?.disconnect(); for (const w of watching) w.disconnect(); if (raising !== undefined) clearInterval(raising); host.remove(); } };
+  return { remove() { taken = true; for (const w of watching) w.disconnect(); if (raising !== undefined) clearInterval(raising); host.remove(); } };
 }
 

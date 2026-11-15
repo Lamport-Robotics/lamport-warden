@@ -286,6 +286,23 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     await again.page.close();
   });
 
+  it("reads what the decoy holds again before it believes an amount is above it: a balance that grew is still a balance", async () => {
+    await forget();
+    const door = "standard:FixturePhantom";
+    const { page, prompt } = await open("phantom");
+    // Warden reads the decoy at 12 SOL when the site connects
+    expect(await connect(page, door, "c")).toBe(DECOY.toBase58());
+    // the decoy is somebody's live wallet: it is sent a little, and a thief that reads it now asks for all of 12.5
+    site.setHoldings(DECOY.toBase58(), 12_500_000_000, [{ account: ata(DECOY).toBase58(), mint: USDC.toBase58(), amount: "900000000", decimals: 6 }]);
+    await start(page, "rob", door, "tx", bytesOf(DECOY, SystemProgram.transfer({ fromPubkey: DECOY, toPubkey: THIEF, lamports: 12_490_000_000n })));
+    const caught = await prompt.text(10_000);
+    expect(caught?.tag).toBe("Lamport Warden · Blocked");
+    expect(caught?.sentence).toContain("send out 12.49 SOL, of the 12.5 SOL it holds");
+    await prompt.click("Close");
+    await page.close();
+    site.setHoldings(DECOY.toBase58(), 12_000_000_000, [{ account: ata(DECOY).toBase58(), mint: USDC.toBase58(), amount: "900000000", decimals: 6 }]);
+  });
+
   it("does not go on at a press with a site that was caught in another tab since this one was opened", async () => {
     await forget();
     const door = "standard:FixturePhantom";

@@ -81,6 +81,10 @@ export interface DecoyFinding {
   to: string | null;
   /** Part of what was asked was not read here. A site that passes is then said to have passed on what could be read. */
   unread: boolean;
+  /** Something was to be sent out and nothing is known of what the decoy holds: how much of it that is could not be weighed. */
+  unweighed?: true;
+  /** An amount above what the decoy was last known to hold was set aside as a price. What it holds is worth reading again. */
+  above?: true;
 }
 
 const tokenOf = (decoy: Decoy, mint: string | null, source: string) => decoy.tokens?.find((t) => t.account === source || (mint !== null && t.mint === mint));
@@ -92,6 +96,8 @@ interface Out { kind: string; mint: string | null; amount: bigint; held: bigint 
 interface Reading {
   /** Calls only programs whose every instruction is read here, with every account known. */
   plainOnly: boolean;
+  /** SOL this transaction puts into one of the decoy's own wrapped-SOL accounts and leaves there. */
+  wrapped: Map<string, bigint>;
   /** Powers it would hand over, each as the end of "It asked the decoy to …", and to whom. */
   hands: string[];
   handsTo: string[];
@@ -134,22 +140,38 @@ function reading(parsed: ParsedTx, decoy: Decoy): Reading {
   }
 
   const outs: Out[] = [];
-  // Closing one of the decoy's wrapped-SOL accounts to somebody else pays out everything in it: what it held,
-  // and whatever this same transaction put into it first.
+  // SOL wrapped into one of the decoy's own wrapped-SOL accounts has not left the decoy, unless the same
+  // transaction then takes it out of there: closes the account to somebody else, sends the wrapped SOL on, or
+  // lets somebody spend it. Then what was put in went where that goes.
+  const leaksTo = new Map<string, string>();
+  for (const ix of parsed.instructions) {
+    if (ix.label === "Token.closeAccount" && ix.accounts[2] === decoy.address) {
+      const account = ix.accounts[0] ?? "", dest = ix.accounts[1] ?? "";
+      if (wrappedOwn.has(account) && !own.has(dest)) leaksTo.set(account, dest);
+    } else if (ix.label === "Token.approve" || ix.label === "Token.approveChecked") {
+      const checked = ix.label === "Token.approveChecked";
+      const account = ix.accounts[0] ?? "", delegate = ix.accounts[checked ? 2 : 1] ?? "";
+      if (wrappedOwn.has(account) && ix.accounts[checked ? 3 : 2] === decoy.address && !leaksTo.has(account)) leaksTo.set(account, delegate);
+    }
+  }
+  for (const m of parsed.tokenOut) if (m.amount > 0n && wrappedOwn.has(m.source) && !own.has(m.dest) && !leaksTo.has(m.source)) leaksTo.set(m.source, m.dest);
   const closedTo = new Map<string, string>();
   for (const ix of parsed.instructions) {
     if (ix.label !== "Token.closeAccount" || ix.accounts[2] !== decoy.address) continue;
     const account = ix.accounts[0] ?? "", dest = ix.accounts[1] ?? "";
     if (wrappedOwn.has(account) && !own.has(dest)) closedTo.set(account, dest);
   }
-  // SOL: what goes into the decoy's own wrapped-SOL account stays the decoy's, unless that account is closed away
   let kept = 0n, solDest = parsed.dest && !own.has(parsed.dest) ? parsed.dest : "";
+  /** What this transaction wraps into each of the decoy's own wrapped-SOL accounts. */
+  const wrappedIn = new Map<string, bigint>();
   for (const ix of parsed.instructions) {
     if (ix.label !== "System.transfer" || ix.accounts[0] !== decoy.address) continue;
     const into = ix.accounts[1] ?? "";
     if (!own.has(into)) continue;
-    if (closedTo.has(into)) solDest ||= closedTo.get(into)!;
-    else kept += u64(ix.data, 4);
+    const amount = u64(ix.data, 4);
+    if (wrappedOwn.has(into)) wrappedIn.set(into, (wrappedIn.get(into) ?? 0n) + amount);
+    if (leaksTo.has(into)) solDest ||= leaksTo.get(into)!;
+    else kept += amount;
   }
   const solOut = parsed.lamportsOut > kept ? parsed.lamportsOut - kept : 0n;
   if (solOut > 0n) outs.push({ kind: "SOL", mint: null, amount: solOut, held: decoy.lamports ?? null, dest: solDest });
@@ -157,13 +179,19 @@ function reading(parsed: ParsedTx, decoy: Decoy): Reading {
     if (m.amount <= 0n || own.has(m.dest)) continue;
     const held = tokenOf(decoy, m.mint, m.source);
     const mint = m.mint ?? held?.mint ?? null;
-    outs.push({ kind: mint ?? m.source, mint, amount: m.amount, held: held ? held.amount : decoy.tokens !== undefined ? 0n : null, decimals: held?.decimals, dest: m.dest });
+    // wrapped SOL sent on from an account this transaction wrapped into: that part is the SOL counted above
+    const fresh = wrappedOwn.has(m.source) ? wrappedIn.get(m.source) ?? 0n : 0n;
+    const amount = m.amount > fresh ? m.amount - fresh : 0n;
+    if (amount === 0n) continue;
+    outs.push({ kind: mint ?? m.source, mint, amount, held: held ? held.amount : decoy.tokens !== undefined ? 0n : null, decimals: held?.decimals, dest: m.dest });
   }
   for (const [account, dest] of closedTo) {
     const held = decoy.tokens?.find((t) => t.account === account && t.amount > 0n);
     if (held) outs.push({ kind: WSOL, mint: WSOL, amount: held.amount, held: held.amount, wrapped: true, dest });
   }
-  return { plainOnly, hands, handsTo, outs };
+  const wrapped = new Map<string, bigint>();
+  for (const [account, amount] of wrappedIn) if (!leaksTo.has(account)) wrapped.set(account, amount);
+  return { plainOnly, wrapped, hands, handsTo, outs };
 }
 
 /**
@@ -174,11 +202,13 @@ function decide(readings: Reading[]): DecoyFinding {
   const asked = [...new Set(readings.flatMap((r) => r.hands))];
   const to = new Set(readings.flatMap((r) => r.handsTo));
   const totals = new Map<string, Out>();
+  let above = false, unweighed = false;
   for (const r of readings) {
     if (!r.plainOnly) continue;
     for (const o of r.outs) {
       // more than the decoy holds was not worked out from what it holds: that is a price, not a balance
-      if (o.held !== null && o.amount > o.held) continue;
+      if (o.held !== null && o.amount > o.held) { above = true; continue; }
+      if (o.held === null) unweighed = true;
       const sum = totals.get(o.kind);
       if (sum) { sum.amount += o.amount; if (sum.dest !== o.dest) sum.dest = ""; } else totals.set(o.kind, { ...o });
     }
@@ -198,7 +228,7 @@ function decide(readings: Reading[]): DecoyFinding {
   }
   const caught = asked.length > 0;
   // who it was for is said only of a robbery: where an ordinary payment goes is the owner's business with the site
-  return { caught, asked, to: caught && to.size === 1 && !to.has("") ? [...to][0]! : null, unread: readings.some((r) => !r.plainOnly) };
+  return { caught, asked, to: caught && to.size === 1 && !to.has("") ? [...to][0]! : null, unread: readings.some((r) => !r.plainOnly), ...(unweighed && !caught ? { unweighed: true as const } : {}), ...(above && !caught ? { above: true as const } : {}) };
 }
 
 /** One thing a site asked a decoy to sign, in a call that may ask for several. */
@@ -265,6 +295,13 @@ export function decoyVerdict(finding: DecoyFinding, decoy: Decoy, o: { caughtOn?
       sentence: `This site asked the decoy to sign ${seen + o.beyond} things at once, and I read the first ${seen}. Nothing I could read in those is a robbery. Go on only if you are sure of this site: your own wallet is then connected to it.`,
       reasons: ["a robbery can be put after more requests than anybody reads.", "an ordinary site does not ask a wallet it has just met for this many signatures."],
       confirm: ACK,
+    };
+  }
+  if (finding.unweighed) {
+    return {
+      level: "explain",
+      sentence: `I showed this site a decoy wallet (${short(decoy.address)}) before yours. I could not find out what the decoy holds, so I cannot tell whether what the site asked it to send is all it has; nothing else in what it asked is a robbery. Continue to connect your own wallet; the site will then ask again, and I will read that request like any other.`,
+      reasons: [],
     };
   }
   return {

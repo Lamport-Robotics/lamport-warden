@@ -174,7 +174,15 @@ async function decoyAsked(reqs: WireRequest[], total: number, origin: string, fr
     } else asks.push({ kind: req.kind === "opaque" ? "unread" : "words" });
   }
   const beyond = Math.max(total, reqs.length) - asks.length;
-  const found = judgeCall(asks, decoy);
+  let found = judgeCall(asks, decoy);
+  // "More than it holds is a price" is only so of what it holds now. What a decoy holds is kept for ten
+  // minutes, and a decoy is somebody's live wallet: a thief that read the balance a moment ago may be
+  // asking for all of a balance that has grown since. So it is read again before that is believed.
+  if (found.above && !found.caught) {
+    holdings.delete(at.address);
+    const now = await heldBy(at.address, at.rpcUrl);
+    if (now) { decoy.lamports = now.lamports; decoy.tokens = now.tokens; found = judgeCall(asks, decoy); }
+  }
   const finding = { ...found, unread: found.unread || beyond > 0 };
   if (finding.caught) await keep(CAUGHT_SITES, at.mark);
   const v = decoyVerdict(finding, decoy, { caughtOn: at.caughtOn, read: asks.length, beyond });
