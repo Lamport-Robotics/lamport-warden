@@ -11,7 +11,7 @@
 import type { WireVerdict } from "./messages.js";
 
 const CSS = `
-:host { all: initial; }
+:host { all: initial; direction: ltr; unicode-bidi: isolate; }
 .veil { position: fixed; inset: 0; z-index: 2147483647; background: rgba(8, 8, 7, 0.62); display: flex; align-items: center; justify-content: center; font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
 .card { width: min(440px, calc(100vw - 32px)); background: #f2eee3; color: #14130f; border-radius: 14px; padding: 20px 20px 16px; box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45); }
 .tag { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; margin-bottom: 10px; }
@@ -53,6 +53,9 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
       card.append(ul);
     }
 
+    const parent: ParentNode = document.documentElement ?? document;
+    /** Whether this browser has a top layer to put the prompt in: where it has, a press counts only while the prompt is in it. */
+    const topLayer = typeof (host as { showPopover?: unknown }).showPopover === "function";
     let done = false;
     let watching: { disconnect(): void }[] = [];
     /** When the page last changed how the prompt's own element is laid out. */
@@ -86,24 +89,44 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
         card.append(lab, input);
         queueMicrotask(() => input.focus());
       }
-      // Seen by a person: the browser reports when the button is fully on screen with nothing painted over it
-      // and no effect (opacity, transform, filter) altering it. Where the browser cannot say, a trusted click is
-      // all there is to go on.
+      // Seen by a person: the browser reports when the button, and the card whose words it answers, are fully
+      // on screen with nothing painted over them and no effect (opacity, transform, filter) altering them.
+      // Where the browser cannot say, a trusted click is all there is to go on.
       const tracked = typeof IntersectionObserver === "function" && typeof IntersectionObserverEntry === "function" && "isVisible" in IntersectionObserverEntry.prototype;
-      let seenSince: number | null = null;
+      const seenSince = new Map<Element, number | null>([[go, null], [card, null]]);
       if (tracked) {
         const io = new IntersectionObserver((entries) => {
-          const last = entries[entries.length - 1] as IntersectionObserverEntry & { isVisible?: boolean };
-          seenSince = last.isIntersecting && last.isVisible ? (seenSince ?? performance.now()) : null;
+          for (const entry of entries as (IntersectionObserverEntry & { isVisible?: boolean })[]) {
+            seenSince.set(entry.target, entry.isIntersecting && entry.isVisible ? (seenSince.get(entry.target) ?? performance.now()) : null);
+          }
         }, { threshold: 1, trackVisibility: true, delay: 100 } as IntersectionObserverInit);
         io.observe(go);
+        io.observe(card);
         watching.push(io);
+      }
+      // Standing still: a plain move does not hide a button from the check above (the page can turn its whole
+      // document right-to-left, shift it, or put the prompt's element somewhere else), so where the button is
+      // gets looked at too, and it counts only once it has been in one place for a moment.
+      // (where there is no layout to ask, as under test outside a browser, there is nothing to look at)
+      const placed = typeof go.getBoundingClientRect === "function";
+      const place = () => { const r = go.getBoundingClientRect(); return `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`; };
+      let at = "", atSince = performance.now();
+      const look = () => { if (!placed) return; const now = place(); if (now !== at) { at = now; atSince = performance.now(); } };
+      if (placed) {
+        const looking = setInterval(look, 100);
+        (looking as { unref?: () => void }).unref?.();
+        watching.push({ disconnect: () => clearInterval(looking) });
       }
       const SEEN_FOR_MS = 400;
       go.addEventListener("click", (e) => {
         if (!e.isTrusted || go.disabled) return;
-        if (tracked && (seenSince === null || performance.now() - seenSince < SEEN_FOR_MS)) return; // covered, altered, or only just shown
-        if (performance.now() - stirred < SEEN_FOR_MS) return; // moved a moment ago: a button slid under a pointer is not a button somebody chose to press
+        const now = performance.now();
+        for (const since of seenSince.values()) if (tracked && (since === null || now - since < SEEN_FOR_MS)) return; // covered, altered, or only just shown
+        if (now - stirred < SEEN_FOR_MS) return; // its element was changed a moment ago
+        look();
+        if (placed && now - atSince < SEEN_FOR_MS) return; // moved a moment ago: a button slid under a pointer is not a button somebody chose to press
+        if (host.parentNode != null && host.parentNode !== parent) return; // put somewhere else in the page
+        if (topLayer && !host.matches(":popover-open")) return; // taken out of the browser's top layer, where the page can paint over it
         finish(true);
       });
       row.append(go);
@@ -111,7 +134,6 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
     card.append(row);
     veil.append(card);
     root.append(style, veil);
-    const parent = document.documentElement ?? document;
     parent.append(host);
     // In the browser's top layer, above every z-index the page can set, and put back on top of anything the page
     // raises after it. This is for the owner's sake, so the prompt can be read; the visibility check above is what
@@ -119,19 +141,22 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
     const raise = () => { try { if (host.matches(":popover-open")) host.hidePopover(); host.showPopover(); } catch { /* no top layer here: the prompt stays where it is */ } };
     try {
       host.setAttribute("popover", "manual");
-      // the browser's own popover styling gives it a size, a border and a background: none of that
-const laidOut = "all:initial !important;position:fixed !important;inset:0 !important;width:auto !important;height:auto !important;max-width:none !important;max-height:none !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;overflow:visible !important;";
+      // the browser's own popover styling gives it a size, a border and a background: `all` takes those away.
+      // (No colour is named here: tools that recolour pages rewrite inline styles that name one, and would
+      // then be at it for as long as this puts its own back.)
+      const laidOut = "all:initial !important;position:fixed !important;inset:0 !important;width:auto !important;height:auto !important;max-width:none !important;max-height:none !important;margin:0 !important;padding:0 !important;overflow:visible !important;direction:ltr !important;unicode-bidi:isolate !important;";
       host.style.cssText = laidOut;
       const asSet = host.style.cssText; // as the browser writes it back
       // The element is the page's to reach, though not what is in it. A page can rewrite its style to move the
-      // whole prompt, and a move does not hide the button from the check above. So what the page changes is
-      // put back, and the button counts again only once it has stood still.
+      // whole prompt, hide it, or make it inert. What the page changes is put back, and the button counts
+      // again only a moment after. Marks other tools leave on every element (data-*, aria-*) are left alone.
       if (typeof MutationObserver === "function") {
         const still = new MutationObserver(() => {
-          stirred = performance.now();
-          for (const a of Array.from(host.attributes)) if (a.name !== "popover" && a.name !== "style") host.removeAttribute(a.name);
-          if (host.getAttribute("popover") !== "manual") host.setAttribute("popover", "manual");
-          if (host.style.cssText !== asSet) host.style.cssText = laidOut;
+          let changed = false;
+          for (const a of Array.from(host.attributes)) if (a.name !== "popover" && a.name !== "style" && !a.name.startsWith("data-") && !a.name.startsWith("aria-")) { host.removeAttribute(a.name); changed = true; }
+          if (host.getAttribute("popover") !== "manual") { host.setAttribute("popover", "manual"); changed = true; }
+          if (host.style.cssText !== asSet) { host.style.cssText = laidOut; changed = true; }
+          if (changed) stirred = performance.now();
           still.takeRecords(); // what was just put back is not the page's doing
         });
         still.observe(host, { attributes: true });
@@ -143,7 +168,8 @@ const laidOut = "all:initial !important;position:fixed !important;inset:0 !impor
     } catch { /* an older browser: an ordinary fixed layer */ }
     // taken out of the page by the page: nobody can answer it any more, so it is a refusal
     if (typeof MutationObserver === "function") {
-      const mo = new MutationObserver(() => { if (!done && !host.isConnected) finish(false); });
+      // (moved somewhere else in the page counts as taken out: where it is put, the page decides what is seen of it)
+      const mo = new MutationObserver(() => { if (!done && (!host.isConnected || host.parentNode !== parent)) finish(false); });
       mo.observe(parent, { childList: true, subtree: true });
       watching.push(mo);
     }

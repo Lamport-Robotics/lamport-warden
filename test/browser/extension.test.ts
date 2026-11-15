@@ -144,6 +144,25 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     await page.close();
   });
 
+  it.each([["backpack", "backpack-send", "send"], ["backpack.solana", "backpack-send", "send"], ["backpack", "backpack-sendAndConfirm", "sendAndConfirm"], ["backpack.solana", "backpack-sendAndConfirm", "sendAndConfirm"]])("asks before a transaction sent through Backpack's own %s.%s", async (door, kind, method) => {
+    // Backpack's older object has ways of signing and sending that no other wallet has: send and sendAndConfirm
+    const { page, prompt } = await open();
+    const to = Keypair.generate().publicKey; // an address never paid: the prompt must come up
+    await start(page, "s", door, kind, pay(to, 0.4));
+    expect((await prompt.text())?.sentence).toContain("0.4 SOL");
+    expect(await calls(page)).toEqual([]);
+    await prompt.click("Cancel");
+    expect(await settled(page, "s")).toBe("WardenRejected");
+    expect(await calls(page)).toEqual([]);
+    // and let through, it is Backpack's own method that runs
+    await start(page, "t", door, kind, pay(to, 0.4));
+    await prompt.text();
+    await prompt.click("Continue to wallet");
+    expect(await settled(page, "t")).toBe("signed");
+    expect(await calls(page)).toEqual([`backpack.${method}`]);
+    await page.close();
+  });
+
   it("asks before a transaction sent through the wallet's generic request call", async () => {
     const { page, prompt } = await open();
     const message = new Transaction({ feePayer: owner.publicKey, recentBlockhash: BLOCKHASH }).add(SystemProgram.transfer({ fromPubkey: owner.publicKey, toPubkey: person(120), lamports: 250_000_000 })).serializeMessage();

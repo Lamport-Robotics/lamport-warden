@@ -86,6 +86,27 @@ describe.each(WALLETS)("Warden in front of the real $name", (wallet) => {
       expect(await settled(page, door)).toBe("WardenRejected");
     });
 
+    it("asks before a transaction sent through the wallet's own send and sendAndConfirm, where it has them", async (ctx) => {
+      // Backpack's older object signs and sends through two methods no other wallet has
+      const has = await page.evaluate(() => { const p = (window as any).backpack?.solana; return !!p && typeof p.send === "function" && typeof p.sendAndConfirm === "function"; });
+      if (!has) { ctx.skip(); return; }
+      // a payment of half a SOL from a made-up account to another: something for Warden to have something to say about
+      const from = Keypair.fromSeed(new Uint8Array(32).fill(61)).publicKey, to = Keypair.fromSeed(new Uint8Array(32).fill(62)).publicKey;
+      const payment = [...new Transaction({ feePayer: from, recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" }).add(SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports: 500_000_000 })).serialize({ requireAllSignatures: false, verifySignatures: false })];
+      for (const method of ["send", "sendAndConfirm"]) {
+        await page.evaluate(([m, bytes]) => {
+          const w = window as any;
+          w.__results[m] = "pending";
+          const tx = { instructions: [], serialize: () => Uint8Array.from(bytes as number[]) };
+          w.backpack.solana[m as string](tx, []).then(() => { w.__results[m as string] = "signed"; }, (e: any) => { w.__results[m as string] = String(e?.name ?? e); });
+        }, [method, payment] as const);
+        const shown = await prompt.text(6000);
+        expect(shown, `Warden's prompt before ${method}`).not.toBeNull();
+        await prompt.click(shown!.buttons.includes("Cancel") ? "Cancel" : "Close");
+        expect(await settled(page, method)).toBe("WardenRejected");
+      }
+    });
+
     it("blocks a sign-in for another site before it reaches the wallet", async () => {
       const door = wallet.guarded[0]!; // the Wallet Standard door
       const has = await page.evaluate((n) => (window as any).__app.names().includes(n), door.slice(9));

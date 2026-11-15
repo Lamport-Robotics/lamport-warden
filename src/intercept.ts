@@ -167,6 +167,8 @@ export function signInBytes(input: any): Uint8Array {
   const pick: Record<string, string> = {};
   if (input && typeof input === "object") {
     for (const k of ["domain", "address", "statement", "uri", "chainId"]) if (typeof input[k] === "string") pick[k] = input[k].slice(0, 2000);
+      // (a field that is there and is not text has not been read: it is made text before this is asked, see ownSignIn)
+      else if (input[k] !== undefined && input[k] !== null) pick[k] = "";
   }
   return new TextEncoder().encode(JSON.stringify(pick));
 }
@@ -260,18 +262,53 @@ async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Pr
  */
 const isBytes = (x: unknown): boolean => x instanceof Uint8Array || ArrayBuffer.isView(x) || x instanceof ArrayBuffer;
 const ownBytes = (x: unknown): Uint8Array => Uint8Array.from(toBytes(x));
+/**
+ * A message as it was handed over, read once. Text stays text (Backpack's off-chain message is text) and
+ * bytes, in whatever form they came, become Warden's own array of them. An object that carries a message
+ * among other fields (the off-chain form) is copied field by field.
+ */
+function ownMessage(m: any): any {
+  if (typeof m === "string") return m;
+  if (isBytes(m) || Array.isArray(m)) return ownBytes(m);
+  if (!m || typeof m !== "object") return m;
+  const copy = ownFields(m);
+  if ("message" in copy && typeof copy.message !== "string") copy.message = ownBytes(copy.message);
+  return copy;
+}
+/** The bytes that a message, as ownMessage left it, asks to have signed. */
+function messageBytes(m: any): Uint8Array {
+  if (typeof m === "string") return new TextEncoder().encode(m);
+  if (isBytes(m)) return toBytes(m);
+  if (m && typeof m === "object" && "message" in m) return typeof m.message === "string" ? new TextEncoder().encode(m.message) : toBytes(m.message);
+  return new Uint8Array(0);
+}
 /** A Wallet Standard input with each of its fields read once, and its bytes Warden's own. */
 function ownInput(i: any, field: "transaction" | "message"): any {
   if (!i || typeof i !== "object") return i;
   const copy = { ...i };
-  if (field in copy) copy[field] = ownBytes(copy[field]);
+  if (field in copy) copy[field] = field === "message" ? ownMessage(copy[field]) : ownBytes(copy[field]);
   return copy;
 }
-/** A sign-in request, or any object of plain fields, with each field read once. */
+/** An object of plain fields, or a list, with each of its entries read once and any bytes among them Warden's own. */
 function ownFields(i: any): any {
   if (!i || typeof i !== "object" || isBytes(i)) return i;
+  const own = (x: unknown) => (isBytes(x) ? ownBytes(x) : Array.isArray(x) ? x.map((y: unknown) => (isBytes(y) ? ownBytes(y) : y)) : x);
+  if (Array.isArray(i)) return i.map(own);
   const copy = { ...i };
-  for (const k of Object.keys(copy)) { if (isBytes(copy[k])) copy[k] = ownBytes(copy[k]); else if (Array.isArray(copy[k])) copy[k] = copy[k].map((x: unknown) => (isBytes(x) ? ownBytes(x) : x)); }
+  for (const k of Object.keys(copy)) copy[k] = own(copy[k]);
+  return copy;
+}
+/** The fields of a sign-in request that decide what is signed. */
+const SIGN_IN_FIELDS = ["domain", "address", "statement", "uri", "chainId"] as const;
+/**
+ * A sign-in request with each field read once. A deciding field that is there and is not text is made text,
+ * here, once: a wallet that would have taken `["other-site.example"]` for a domain is handed the text that
+ * Warden read, and a field cannot be one thing to Warden and another to the wallet.
+ */
+function ownSignIn(i: any): any {
+  if (!i || typeof i !== "object") return i;
+  const copy = ownFields(i);
+  for (const k of SIGN_IN_FIELDS) { if (copy[k] !== undefined && copy[k] !== null && typeof copy[k] !== "string") { try { copy[k] = String(copy[k]); } catch { copy[k] = ""; } } }
   return copy;
 }
 /**
@@ -600,18 +637,28 @@ function guardFeature(name: string, feature: any, guard: Guard, wallet: any, d?:
   const method = name.slice(7); // "solana:signTransaction" -> "signTransaction"
   const original = feature[method];
   if (typeof original !== "function" || ours.has(original)) return feature;
+  /**
+   * An input copied (see ownInput), with whose request it is settled once: `owner` is the account it is read
+   * as, and the account handed on to the wallet is the wallet's own object for that account, where it lists
+   * one. What a page's account object says cannot differ between Warden's reading and the wallet's.
+   */
+  const settled = (i: any, field: "transaction" | "message"): { input: any; owner: string } => {
+    const input = ownInput(i, field);
+    const owner = ownerAt(wallet, named(input));
+    if (input && typeof input === "object" && owner) {
+      let listed: any;
+      try { listed = Array.from(wallet?.accounts ?? []).find((a: any) => a?.address === owner); } catch { /* a list that cannot be read lists nobody */ }
+      if (listed) input.account = listed;
+    }
+    return { input, owner };
+  };
   let fn: AnyFn;
-  // (each input is copied first, and the copy is both what is read and what the wallet is handed: see ownInput)
-  const tx = (mine: any[]) => mine.map((i) => ({ kind: "tx" as const, bytes: toBytes(i?.transaction), owner: ownerAt(wallet, named(i)) }));
-  const msg = (mine: any[]) => mine.map((i) => ({ kind: "msg" as const, bytes: toBytes(i?.message), owner: ownerAt(wallet, named(i)) }));
+  if (name === SIGN_TX || name === SIGN_SEND) fn = (...inputs: any[]) => { const mine = inputs.map((i) => settled(i, "transaction")); const asked = mine.map((m) => ({ kind: "tx" as const, bytes: toBytes(m.input?.transaction), owner: m.owner })); return viaDecoy(d, asked, () => guarded(guard, asked, () => original.apply(feature, mine.map((m) => m.input)))); };
+  else if (name === SIGN_MSG || name === SIGN_OFFCHAIN) fn = (...inputs: any[]) => { const mine = inputs.map((i) => settled(i, "message")); const asked = mine.map((m) => ({ kind: "msg" as const, bytes: messageBytes(m.input?.message), owner: m.owner })); return viaDecoy(d, asked, () => guarded(guard, asked, () => original.apply(feature, mine.map((m) => m.input)))); };
   // Sign-in may be called with no input at all: the wallet then signs in to the site it is on. It is the
   // wallet's own account that signs in, whatever address the request carries (that address is in what is read).
-  const signin = (mine: any[]) => (mine.length ? mine : [undefined]).map((i) => ({ kind: "signin" as const, bytes: signInBytes(i), owner: ownerAt(wallet, "") }));
-  const [copied, reqs] = name === SIGN_TX || name === SIGN_SEND ? [(i: any) => ownInput(i, "transaction"), tx] as const
-    : name === SIGN_MSG || name === SIGN_OFFCHAIN ? [(i: any) => ownInput(i, "message"), msg] as const
-    : name === SIGN_IN ? [ownFields, signin] as const : [null, null] as const;
-  if (!copied || !reqs) return feature;
-  fn = (...inputs: any[]) => { const mine = inputs.map(copied), asked = reqs(mine); return viaDecoy(d, asked, () => guarded(guard, asked, () => original.apply(feature, mine))); };
+  else if (name === SIGN_IN) fn = (...inputs: any[]) => { const mine = inputs.map(ownSignIn); const asked = (mine.length ? mine : [undefined]).map((i) => ({ kind: "signin" as const, bytes: signInBytes(i), owner: ownerAt(wallet, "") })); return viaDecoy(d, asked, () => guarded(guard, asked, () => original.apply(feature, mine))); };
+  else return feature;
   ours.add(fn);
   // a copy with the feature's own getters still getters: Backpack's `supportedTransactionVersions` is one, and changes when the wallet has finished loading
   const own = Object.getOwnPropertyDescriptors(feature);
@@ -1114,7 +1161,22 @@ async function viaLegacy<T>(door: LegacyDoor | undefined, reqs: () => GuardReque
 /** The guarded version of one provider method. Runs the wallet's own method with the caller's `this`. */
 function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => any): AnyFn | null {
   const run = (that: any, args: any[]) => original.apply(that, args);
-  const owner = (that: any) => ownerOf(self() ?? that);
+  /**
+   * Whose request it is: the provider's own account. Backpack's methods also take the account to sign with as
+   * an argument, and it is that account's side the request is then read from.
+   */
+  const isBackpack = (that: any): boolean => { try { return (self() ?? that)?.isBackpack === true; } catch { return false; } };
+  const owner = (that: any, namedAccount?: unknown): string => {
+    const provider = self() ?? that;
+    if (isBackpack(that) && namedAccount !== undefined && namedAccount !== null) {
+      try {
+        const a: any = namedAccount;
+        const said = typeof a === "string" ? a : typeof a.toBase58 === "function" ? String(a.toBase58()) : isBytes(a) && toBytes(a).length === 32 ? toBase58(toBytes(a)) : "";
+        if (said && fromBase58(said)?.length === 32) return said;
+      } catch { /* not an account: the provider's own */ }
+    }
+    return ownerOf(provider);
+  };
   /**
    * The door a call came through: the provider it was called on, and when it was called on anything else, the
    * provider the method was taken from. Phantom's methods are arrow functions and run on whatever they are
@@ -1130,40 +1192,58 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
     case "signTransaction":
     case "signAndSendTransaction":
       return function (this: any, tx: any, ...rest: any[]) {
-        const one = txOf(tx, owner(this));
+        // (Backpack: signTransaction(tx, account, ...); its signAndSendTransaction takes options there, which are not an account)
+        const one = txOf(tx, owner(this, name === "signTransaction" ? rest[0] : undefined));
+        return viaLegacy(doorOf(this), () => [one.read()], () => readingAgain(guard, () => [one.read()], () => run(this, [one.mine, ...rest])));
+      };
+    case "send":
+    case "sendAndConfirm":
+      // Backpack's own: (tx, signers, options, connection, account). They sign and send, like signAndSendTransaction.
+      // (another wallet's `send` may be something else entirely, an older way of making any request: left as it is)
+      return function (this: any, tx: any, ...rest: any[]) {
+        if (!isBackpack(this)) return run(this, [tx, ...rest]);
+        const one = txOf(tx, owner(this, rest[3]));
         return viaLegacy(doorOf(this), () => [one.read()], () => readingAgain(guard, () => [one.read()], () => run(this, [one.mine, ...rest])));
       };
     case "signAllTransactions":
     case "signAndSendAllTransactions":
+    case "sendAll":
       return function (this: any, txs: any[], ...rest: any[]) {
+        if (name === "sendAll" && !isBackpack(this)) return run(this, [txs, ...rest]);
         // (the list itself is copied too: nothing can be added to it after it was read)
-        const who = owner(this), all = Array.from(txs ?? []).map((tx) => txOf(tx, who));
+        // sendAll takes a list of { tx, signers }: the transaction in each is what is read, and the entry is handed on as it was copied
+        const who = owner(this, name === "sendAll" ? undefined : rest[0]);
+        const all = Array.from(txs ?? []).map((entry) => {
+          if (name === "sendAll" && entry && typeof entry === "object" && !isBytes(entry) && "tx" in entry) { const copy = { ...entry }; const t = txOf(copy.tx, who); copy.tx = t.mine; return { mine: copy, read: t.read }; }
+          return txOf(entry, who);
+        });
         return viaLegacy(doorOf(this), () => all.map((t) => t.read()), () => readingAgain(guard, () => all.map((t) => t.read()), () => run(this, [all.map((t) => t.mine), ...rest])));
       };
     case "signMessage":
     case "signOffchainMessage":
       return function (this: any, message: any, ...rest: any[]) {
-        const mine = typeof message === "string" ? message : isBytes(message) ? ownBytes(message) : ownFields(message);
-        const reqs: GuardRequest[] = [{ kind: "msg", bytes: typeof mine === "string" ? new TextEncoder().encode(mine) : toBytes(mine), owner: owner(this) }];
+        const mine = ownMessage(message);
+        const reqs: GuardRequest[] = [{ kind: "msg", bytes: messageBytes(mine), owner: owner(this, name === "signMessage" ? rest[0] : undefined) }];
         return viaLegacy(doorOf(this), () => reqs, () => guarded(guard, reqs, () => run(this, [mine, ...rest])));
       };
     case "signIn":
       return function (this: any, input: any, ...rest: any[]) {
-        const mine = ownFields(input);
+        const mine = ownSignIn(input);
         const reqs: GuardRequest[] = [{ kind: "signin", bytes: signInBytes(mine), owner: owner(this) }];
         return viaLegacy(doorOf(this), () => reqs, () => guarded(guard, reqs, () => run(this, [mine, ...rest])));
       };
     case "request":
       return function (this: any, arg: any, ...rest: any[]) {
+        // read once: what is decided on here is what the wallet is handed, whether or not it is a signing call
+        const mine = arg && typeof arg === "object" && !Array.isArray(arg) ? { ...arg } : arg;
         const door = doorOf(this);
-        const method = arg && typeof arg === "object" && typeof arg.method === "string" ? arg.method : "";
+        const method = mine && typeof mine === "object" && typeof mine.method === "string" ? mine.method : "";
         if (door && method === "connect") {
-          return legacyConnect(door, arg.params, () => Promise.resolve(run(this, [arg, ...rest])));
+          return legacyConnect(door, mine.params, () => Promise.resolve(run(this, [mine, ...rest])));
         }
-        if (door && method === "disconnect") return legacyDisconnect(door, () => Promise.resolve(run(this, [arg, ...rest])));
-        if (requestsOf(arg, "") === null) return run(this, [arg, ...rest]); // not a signing call: straight through, untouched
-        // a signing call: its fields are read once, and what was read is what the wallet is handed
-        const mine = { ...arg, params: ownFields(arg.params) };
+        if (door && method === "disconnect") return legacyDisconnect(door, () => Promise.resolve(run(this, [mine, ...rest])));
+        if (requestsOf(mine, "") === null) return run(this, [mine, ...rest]);
+        mine.params = /^signIn$/i.test(String(mine.method)) ? ownSignIn(mine.params) : ownFields(mine.params);
         const reqs = requestsOf(mine, owner(this));
         return reqs ? viaLegacy(door, () => reqs, () => guarded(guard, reqs, () => run(this, [mine, ...rest]))) : run(this, [mine, ...rest]);
       };
@@ -1183,7 +1263,8 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
   }
 }
 
-export const PROVIDER_METHODS = ["signTransaction", "signAndSendTransaction", "signAllTransactions", "signAndSendAllTransactions", "signMessage", "signOffchainMessage", "signIn", "request"] as const;
+/** The methods of an injected provider that sign. `send`, `sendAndConfirm` and `sendAll` are Backpack's (and Anchor's) names for signing and sending. */
+export const PROVIDER_METHODS = ["signTransaction", "signAndSendTransaction", "signAllTransactions", "signAndSendAllTransactions", "signMessage", "signOffchainMessage", "signIn", "request", "send", "sendAndConfirm", "sendAll"] as const;
 
 /** A stand-in for an injected provider: for a wallet that assigns its provider, or one whose object cannot be changed. */
 export function wrapLegacyProvider<P extends object>(provider: P, guard: Guard, gate?: DecoyGate): P {

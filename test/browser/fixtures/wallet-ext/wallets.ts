@@ -178,6 +178,9 @@ function backpack() {
     get isConnected() { return this.#key !== null; }
     async connect(o?: { onlyIfTrusted?: boolean }) { if (o?.onlyIfTrusted && this.#key === null) throw new Error("not trusted"); called("backpack", "connect"); this.#key = publicKey; this.emit("connect", { publicKey: ADDRESS }); return { publicKey: this.#key }; }
     async disconnect() { called("backpack", "disconnect"); this.#key = null; this.emit("disconnect"); }
+    // send and sendAndConfirm are Backpack's own names for signing and sending
+    async send(_tx: any) { called("backpack", "send"); return "hash"; }
+    async sendAndConfirm(_tx: any) { called("backpack", "sendAndConfirm"); return { signature: "hash" }; }
   }
   for (const [name, f] of Object.entries(methods("backpack"))) if (name !== "connect") Object.defineProperty(Inner.prototype, name, { value: f, writable: true, configurable: true });
   const inner: any = new Inner();

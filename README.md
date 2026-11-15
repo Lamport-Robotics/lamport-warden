@@ -40,7 +40,7 @@ Store ships them (`pnpm test:wallets`; last run against Phantom 26.38.1, Solflar
 | Wallet | Wallet Standard (what dapps built on wallet-adapter use) | The older object on the window |
 |---|---|---|
 | Phantom | guarded | guarded: `window.solana`, `window.phantom.solana`, and its `request()` call |
-| Backpack | guarded | guarded: `window.backpack`, `window.backpack.solana` |
+| Backpack | guarded | guarded: `window.backpack`, `window.backpack.solana`, and its own `send()` and `sendAndConfirm()` |
 | Solflare | guarded | **not guarded**: `window.solflare` |
 
 Solflare freezes `window.solflare` and its place on the window, so nothing can be put in front of it. A page
@@ -56,7 +56,9 @@ in `src/intercept.ts`).
 Whose request it is, Warden takes from the wallet. A page names an account when it asks a Wallet Standard
 wallet to sign, and can name any; what a transaction does is read from the side of the account that signs
 it. So the page's word is taken only for an account the wallet lists as its own, and otherwise the request
-is read as the wallet's own account's.
+is read as the wallet's own account's; the account handed on to the wallet is the wallet's own object for
+that account. At Backpack's older door, whose methods take the account to sign with as an argument, the
+request is read from that account's side.
 
 Sign-in requests (Sign In With Solana) are read too. A sign-in to the site that asks goes through without a
 prompt. One that would sign you in to a different site is blocked: that is a page collecting a sign-in to use
@@ -259,12 +261,17 @@ can, and these are the ways known:
   an object of the page's, and what it says when the wallet reads it is the page's to decide. Warden reads
   it when asked and again when handing it on, and asks about what it then says; an object written to answer
   differently a third time is not caught. (At the Wallet Standard door a request is bytes, and what the
-  wallet is handed is Warden's own copy of the bytes it read. So are bytes, messages and `request()` calls
-  at the older door.)
+  wallet is handed is Warden's own copy of the bytes it read. At the older door so are a transaction given
+  as bytes, a message as bytes, text or a list, and the fields of a sign-in or a `request()` call, each read
+  once; a sign-in field that is not text is made text before it is read, and that text is what is handed
+  on.)
 
 In each of these the wallet's own window still shows what it is asked to sign. What a page cannot reach is
-the prompt, which counts a press only from a person on a button that has been in view and standing still;
-the history of who a wallet has paid; and what Warden remembers of sites.
+what is inside the prompt, the history of who a wallet has paid, and what Warden remembers of sites. The
+prompt's own element is in the page, and a page can try to hide it, move it or paint over it: a press on
+"Continue" counts only from a person, on a prompt that the browser reports fully in view and unaltered,
+that is where Warden put it in the browser's top layer, and whose button has been in one place for a
+moment. A page that fights the prompt can keep it from being answered; it cannot answer it.
 
 Not built yet: token names beyond a handful of well-known ones (others show as a shortened mint address),
 Firefox, mobile and agent policy. The icons are the Lamport mark on a light tile until there is a drawn one.
