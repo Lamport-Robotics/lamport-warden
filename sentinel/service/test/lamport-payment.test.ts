@@ -1,7 +1,7 @@
 /**
- * Paying for the plan in LAMPORT: a fixed number of tokens for a month, sent to Lamport's treasury wallet,
- * which is another wallet than the one USDC and SOL go to. What is quoted, what the wallet is handed to
- * sign, and what counts as paid.
+ * Paying for the plan in LAMPORT: the plan's price in dollars, turned into LAMPORT at the token's price
+ * when the amount is shown, and sent to Lamport's treasury wallet, which is another wallet than the one USDC
+ * and SOL go to. What is quoted, what the wallet is handed to sign, and what counts as paid.
  *
  * And what holds for every way of paying ahead, tried here on this one: nothing is credited twice however
  * many looks overlap, one profile's looks do not hold up another's, a payment is found by its signature
@@ -14,8 +14,10 @@ import { describe, it, expect } from "vitest";
 import { Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { LAMPORT_MINT, configFrom } from "../src/main.js";
 import { Accounts } from "../src/accounts.js";
-import { LAMPORT_TERMS, grouped, lamportTerms } from "../src/plans.js";
-import { Prepaid, USDC_QUOTE_SECONDS, arrived, tokenAccountOf } from "../src/prepaid.js";
+import { LAMPORT_TERMS, grouped, lamportTerms, prepaidTerms } from "../src/plans.js";
+import { LamportPrice, hourAgo, lamportFor } from "../src/lamportprice.js";
+import { Prepaid, SOL_QUOTE_GRACE_SECONDS, SOL_QUOTE_SECONDS, arrived, tokenAccountOf } from "../src/prepaid.js";
+import type { PriceFetch } from "../src/solprice.js";
 import { fromRpc } from "../src/observed.js";
 import type { Rpc } from "../src/rpc.js";
 import { judge } from "../../../src/judge.js";
@@ -30,6 +32,8 @@ const T0 = 1_794_312_000;
 const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"), MEMO = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const MINT = new PublicKey(LAMPORT_MINT), USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const TOKENS = (n: number) => BigInt(n) * 1_000_000n; // six decimals, as the token has
+/** A price at which the plan's fifteen dollars are a round 25,000 LAMPORT. */
+const PRICE = 0.0006;
 const TREASURY_ACCOUNT = tokenAccountOf(new PublicKey(TREASURY), MINT, TOKEN_2022).toBase58();
 
 class Chain implements Rpc {
@@ -91,15 +95,17 @@ class Chain implements Rpc {
 }
 const bs58 = (bytes: Uint8Array): string => new PublicKey(bytes.subarray(0, 32)).toBase58().padEnd(44, "1") + new PublicKey(bytes.subarray(32, 64)).toBase58().padEnd(44, "1");
 
-function setup(o: { perMonth?: number | null } = {}) {
+function setup(o: { off?: true; holder?: () => Promise<boolean> } = {}) {
   const store = new MemoryStore();
   const accounts = new Accounts(store, Buffer.alloc(32, 9));
   const chain = new Chain();
   const said: string[] = [];
   let now = T0;
-  const selling = { sells: () => true, holder: async (): Promise<boolean> => { throw new Error("the RPC is down"); }, byCard: () => false, centsFull: 1500, centsHolder: 1000 };
-  const made = (cfg: { lamport?: { mint: string; perMonth: number; payTo: string } }) => new Prepaid({ payTo: PAY_TO, ...cfg }, accounts, chain, selling, { now: () => now, notice: async (_p, sentence) => { said.push(sentence); } });
-  const prepaid = made(o.perMonth === null ? {} : { lamport: { mint: LAMPORT_MINT, perMonth: o.perMonth ?? 25_000, payTo: TREASURY } });
+  const market = { price: PRICE as number | null };
+  const selling = { sells: () => true, holder: o.holder ?? (async () => false), byCard: () => false, centsFull: 1500, centsHolder: 1000 };
+  const made = (cfg: { lamport?: { mint: string; payTo: string } }, priced = true) => new Prepaid({ payTo: PAY_TO, ...cfg }, accounts, chain, selling,
+    { now: () => now, notice: async (_p, sentence) => { said.push(sentence); }, ...(priced ? { lamportPrice: async () => { if (market.price === null) throw new Error("no two sources agree"); return market.price; } } : {}) });
+  const prepaid = made(o.off ? {} : { lamport: { mint: LAMPORT_MINT, payTo: TREASURY } });
   const admit = (n: number) => { const r = accounts.admit(key(n).toBase58(), null, T0); if (!r.ok) throw new Error("setup"); return r.profile; };
   const profile = admit(1);
   const quoted = async (months = 1, of = profile, by = prepaid) => { const r = await by.quote(of, "LAMPORT", months); if (!r.ok) throw new Error(r.why); return r.quote; };
@@ -107,42 +113,40 @@ function setup(o: { perMonth?: number | null } = {}) {
   const months = (of = profile) => (accounts.profile(of)?.prepaid?.payments ?? []).reduce((sum, p) => sum + p.months, 0);
   const reads = () => chain.asked.filter((m) => m === "getTransaction").length;
   chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(1_000_000);
-  return { store, accounts, chain, prepaid, said, profile, quoted, check, admit, made, months, reads, later: (seconds: number) => { now += seconds; } };
+  return { store, accounts, chain, prepaid, said, profile, quoted, check, admit, made, months, reads, market, later: (seconds: number) => { now += seconds; } };
 }
 
 describe("paying in LAMPORT, when it is not turned on", () => {
-  it("is not offered and not quoted", async () => {
-    const s = setup({ perMonth: null });
+  it("is not offered and not quoted: with no treasury wallet named, or with nothing to price it by", async () => {
+    const s = setup({ off: true });
     expect(s.prepaid.offer()).toEqual({ payTo: PAY_TO, assets: ["USDC"], months: [1, 3, 12] });
     expect(await s.prepaid.quote(s.profile, "LAMPORT", 1)).toEqual({ ok: false, status: 400, why: "it can be paid in USDC or SOL." });
+    const unpriced = s.made({ lamport: { mint: LAMPORT_MINT, payTo: TREASURY } }, false);
+    expect(unpriced.offer()).toEqual({ payTo: PAY_TO, assets: ["USDC"], months: [1, 3, 12] });
+    expect(await unpriced.quote(s.profile, "LAMPORT", 1)).toEqual({ ok: false, status: 400, why: "it can be paid in USDC or SOL." });
   });
 
-  it("is two settings that go together: how many tokens pay for a month, and the treasury wallet they are sent to. Neither has a default", () => {
+  it("is one setting, the treasury wallet, and it has no default. How many tokens is not a setting: it is the price in dollars", () => {
     const base = { SENTINEL_RPC_URL: "https://rpc.example", SENTINEL_DATA_KEY: Buffer.alloc(32, 1).toString("base64"), SENTINEL_STRIPE_SECRET_KEY: "sk_test_x", SENTINEL_STRIPE_WEBHOOK_SECRET: "whsec_x", SENTINEL_STRIPE_PRICE_FULL: "price_1", SENTINEL_STRIPE_PRICE_HOLDER: "price_2", SENTINEL_PAY_TO: PAY_TO };
-    const on = configFrom({ ...base, SENTINEL_LAMPORT_PER_MONTH: "25000", SENTINEL_LAMPORT_PAY_TO: TREASURY });
-    expect(on.ok && on.config.lamportPerMonth).toBe(25_000);
+    const on = configFrom({ ...base, SENTINEL_LAMPORT_PAY_TO: TREASURY });
     expect(on.ok && on.config.lamportPayTo).toBe(TREASURY);
     expect(on.ok && on.config.lamportMint).toBe(LAMPORT_MINT);
     const off = configFrom(base);
-    expect(off.ok && off.config.lamportPerMonth).toBeNull();
     expect(off.ok && off.config.lamportPayTo).toBeNull();
-    for (const bad of ["0", "-5", "2.5", "many"]) expect(configFrom({ ...base, SENTINEL_LAMPORT_PER_MONTH: bad, SENTINEL_LAMPORT_PAY_TO: TREASURY })).toEqual({ ok: false, why: "SENTINEL_LAMPORT_PER_MONTH has to be a whole number of tokens, more than none." });
-    expect(configFrom({ ...base, SENTINEL_LAMPORT_PER_MONTH: "25000", SENTINEL_LAMPORT_PAY_TO: "not an address" })).toEqual({ ok: false, why: "SENTINEL_LAMPORT_PAY_TO has to be a wallet address." });
-    // one without the other: nothing is sent to a wallet nobody named, and no amount is made up
-    const together = { ok: false, why: "SENTINEL_LAMPORT_PER_MONTH and SENTINEL_LAMPORT_PAY_TO go together: how many tokens pay for a month, and the treasury wallet they are sent to." };
-    expect(configFrom({ ...base, SENTINEL_LAMPORT_PER_MONTH: "25000" })).toEqual(together);
-    expect(configFrom({ ...base, SENTINEL_LAMPORT_PAY_TO: TREASURY })).toEqual(together);
+    expect(configFrom({ ...base, SENTINEL_LAMPORT_PAY_TO: "not an address" })).toEqual({ ok: false, why: "SENTINEL_LAMPORT_PAY_TO has to be a wallet address." });
+    expect(configFrom({ ...base, SENTINEL_LAMPORT_PAY_TO: TREASURY, SENTINEL_LAMPORT_PER_MONTH: "25000" })).toEqual({ ok: false, why: "SENTINEL_LAMPORT_PER_MONTH is not a setting any more: the amount is the plan's price in dollars at LAMPORT's price. Take it out." });
     const { SENTINEL_PAY_TO: _gone, ...alone } = base;
-    expect(configFrom({ ...alone, SENTINEL_LAMPORT_PER_MONTH: "25000", SENTINEL_LAMPORT_PAY_TO: TREASURY })).toEqual({ ok: false, why: "SENTINEL_LAMPORT_PER_MONTH needs SENTINEL_PAY_TO beside it: paying in LAMPORT is one of the ways of paying ahead." });
+    expect(configFrom({ ...alone, SENTINEL_LAMPORT_PAY_TO: TREASURY })).toEqual({ ok: false, why: "SENTINEL_LAMPORT_PAY_TO needs SENTINEL_PAY_TO beside it: paying in LAMPORT is one of the ways of paying ahead." });
   });
 });
 
 describe("an amount in LAMPORT", () => {
-  it("is the tokens for a month times the months, in the token's own units, to the treasury wallet and not the one USDC goes to", async () => {
+  it("is the plan's price in dollars at the token's price, in whole tokens, to the treasury wallet and not the one USDC goes to, and holds for ten minutes", async () => {
     const s = setup();
-    expect(s.prepaid.offer()).toEqual({ payTo: PAY_TO, assets: ["USDC", "LAMPORT"], months: [1, 3, 12], lamport: { perMonth: 25_000, payTo: TREASURY } });
+    expect(s.prepaid.offer()).toEqual({ payTo: PAY_TO, assets: ["USDC", "LAMPORT"], months: [1, 3, 12], lamport: { payTo: TREASURY } });
     const q = await s.quoted(3);
-    expect(q).toMatchObject({ asset: "LAMPORT", units: TOKENS(75_000).toString(), decimals: 6, mint: LAMPORT_MINT, months: 3, cents: 0, payTo: TREASURY, account: TREASURY_ACCOUNT, expiresAt: T0 + USDC_QUOTE_SECONDS });
+    // forty-five dollars at six hundredths of a cent a token
+    expect(q).toMatchObject({ asset: "LAMPORT", units: TOKENS(75_000).toString(), decimals: 6, mint: LAMPORT_MINT, months: 3, cents: 4500, payTo: TREASURY, account: TREASURY_ACCOUNT, expiresAt: T0 + SOL_QUOTE_SECONDS });
     // a payment request any wallet can open: the treasury, the token, the amount in whole tokens, the reference
     const url = new URL(q.url.replace("solana:", "https://x/"));
     expect(q.url.startsWith(`solana:${TREASURY}?`)).toBe(true);
@@ -154,9 +158,29 @@ describe("an amount in LAMPORT", () => {
     expect(s.chain.asked.filter((m) => m === "getAccountInfo")).toHaveLength(1);
   });
 
-  it("is the same for everybody: it is not a price in dollars, so no wallet's balance is read to find a lower one", async () => {
-    const s = setup(); // (its `holder` throws: it is never asked)
-    expect((await s.quoted(1)).units).toBe(TOKENS(25_000).toString());
+  it("follows the price: the same dollars are more tokens when the token is worth less, rounded up to a whole token", async () => {
+    const s = setup();
+    s.market.price = 0.000052272863069870546; // what it cost on the day this was written
+    const q = await s.quoted(1);
+    expect(q.cents).toBe(1500);
+    expect(q.units).toBe(TOKENS(286_956).toString()); // 15 / 0.0000522728… = 286,955.7…
+    expect(BigInt(q.units) % 1_000_000n).toBe(0n);
+  });
+
+  it("is at the holder's price for a holder, as in USDC; and is not made up when the wallet's balance cannot be read", async () => {
+    const holder = setup({ holder: async () => true });
+    expect(await holder.quoted(1)).toMatchObject({ cents: 1000, units: TOKENS(16_667).toString() }); // ten dollars: 16,666.67 tokens, rounded up
+    const unread = setup({ holder: async () => { throw new Error("the RPC is down"); } });
+    expect(await unread.prepaid.quote(unread.profile, "LAMPORT", 1)).toEqual({ ok: false, status: 502, why: "I could not read your wallet's balance just now, so I can't tell which price is yours. Try again in a minute." });
+  });
+
+  it("is not quoted when LAMPORT cannot be priced: USDC still is", async () => {
+    const s = setup();
+    s.market.price = null;
+    expect(await s.prepaid.quote(s.profile, "LAMPORT", 1)).toEqual({ ok: false, status: 503, why: "LAMPORT cannot be priced right now. USDC can be used, or try again in a minute." });
+    expect((await s.prepaid.quote(s.profile, "USDC", 1)).ok).toBe(true);
+    // nor at a price that is not one
+    for (const bad of [0, -1, NaN, 1e-15]) { s.market.price = bad; expect(await s.prepaid.quote(s.profile, "LAMPORT", 1), String(bad)).toMatchObject({ ok: false, status: 503 }); }
   });
 
   it("is not quoted when the token cannot be read from the chain, or is not a token", async () => {
@@ -177,6 +201,73 @@ describe("an amount in LAMPORT", () => {
     const s = setup();
     s.chain.mintAnswers = { value: { owner: TOKEN_2022.toBase58(), data: { parsed: { info: { decimals: 6, extensions: [{ extension: "metadataPointer", state: {} }, { extension: "tokenMetadata", state: {} }] } } } } };
     expect((await s.quoted(1)).units).toBe(TOKENS(25_000).toString());
+  });
+});
+
+describe("the price of LAMPORT", () => {
+  // the three sources' answers, in the shapes they gave on the day this was written
+  const jupiter = (p: number | null) => (p === null ? {} : { [LAMPORT_MINT]: { usdPrice: p, liquidity: 9764.24, decimals: 6, priceChange24h: -20.6 } });
+  const gecko = (p: number | null) => ({ data: { attributes: { symbol: "LAMPORT", price_usd: p === null ? null : String(p) } } });
+  const dex = (p: number | null, change: unknown = { h1: -1.61, h6: -0.77, h24: -20.59 }, more: any[] = []) => (p === null ? [] : [{ dexId: "raydium", priceUsd: String(p), liquidity: { usd: 19441.28 }, priceChange: change }, ...more]);
+  function priced(answers: { jupiter?: unknown; gecko?: unknown; dex?: unknown; down?: string[] }) {
+    let now = T0, asked = 0;
+    const fetchImpl: PriceFetch = async (url) => {
+      asked += 1;
+      const which = url.includes("jup.ag") ? "jupiter" : url.includes("geckoterminal") ? "gecko" : "dex";
+      if (answers.down?.includes(which)) return { ok: false, json: async () => ({}) };
+      return { ok: true, json: async () => (answers as any)[which] };
+    };
+    return { price: new LamportPrice(LAMPORT_MINT, fetchImpl, { now: () => now }), asked: () => asked, later: (s: number) => { now += s; } };
+  }
+
+  it("is what two or more of three public sources agree on, to within five in a hundred, and is asked for once in half a minute", async () => {
+    const p = priced({ jupiter: jupiter(0.0000522729), gecko: gecko(0.0000523546), dex: dex(0.00005297, {}) });
+    expect(await p.price.usd()).toBeCloseTo((0.0000522729 + 0.0000523546 + 0.00005297) / 3, 12);
+    expect(p.asked()).toBe(3);
+    await p.price.usd();
+    expect(p.asked()).toBe(3);
+    p.later(31);
+    await p.price.usd();
+    expect(p.asked()).toBe(6);
+    // one of three that is wrong does not set it: the other two stand
+    expect(await priced({ jupiter: jupiter(0.9), gecko: gecko(0.00005), dex: dex(0.000051, {}) }).price.usd()).toBeCloseTo(0.0000505, 10);
+  });
+
+  it("is the lower of the price now and the price an hour ago: a price pushed up for a minute buys nothing", async () => {
+    // doubled within the hour: what is used is what it cost before
+    const pumped = await priced({ jupiter: jupiter(0.0001), gecko: gecko(0.0001), dex: dex(0.0001, { h1: 100 }) }).price.usd();
+    expect(pumped).toBeCloseTo(0.00005, 12);
+    // fallen within the hour: the price now is the lower, and is used
+    const fallen = await priced({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, { h1: -50 }) }).price.usd();
+    expect(fallen).toBeCloseTo(0.00005, 12);
+    // no trade in the hour: nothing changed
+    expect(await priced({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, {}) }).price.usd()).toBeCloseTo(0.00005, 12);
+    expect(hourAgo(0.0001, dex(0.0001, { h1: 25 }))).toBeCloseTo(0.00008, 12);
+    // the pool with the most in it is the one read, not the first listed
+    expect(hourAgo(1, [{ priceUsd: "1", liquidity: { usd: 10 }, priceChange: { h1: 900 } }, { priceUsd: "1", liquidity: { usd: 5000 }, priceChange: { h1: 100 } }])).toBeCloseTo(0.5, 12);
+  });
+
+  it("is not given at all when it cannot be stood behind", async () => {
+    const none = async (a: Parameters<typeof priced>[0]) => expect(priced(a).price.usd()).rejects.toThrow("could not be established");
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00006), dex: dex(0.00007) });                 // no two agree
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(null), dex: dex(null) });                       // one answer
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005), down: ["dex"] });   // the source that knows the hour before is down
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.0001, { h1: 100 }) });      // or is not among those that agree
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, null) });            // or says nothing readable about the hour
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, { h1: "soon" }) });
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, { h1: -100 }) });
+    await none({ jupiter: jupiter(0), gecko: gecko(0), dex: dex(0, {}) });                               // nothing is not a price
+  });
+
+  it("turns dollars into whole tokens, rounded up, in the token's smallest units", () => {
+    expect(lamportFor(1500, 0.0006, 6)).toBe(TOKENS(25_000));
+    expect(lamportFor(1500, 0.00060001, 6)).toBe(TOKENS(25_000));   // 24,999.58…
+    expect(lamportFor(1500, 0.00059999, 6)).toBe(TOKENS(25_001));   // 25,000.41…
+    expect(lamportFor(18_000, 0.000052272863069870546, 6)).toBe(TOKENS(3_443_470)); // twelve months: 3,443,469.05…
+    expect(lamportFor(1, 1, 6)).toBe(TOKENS(1));                    // a cent of a one-dollar token is still a whole token
+    for (const bad of [0, -1, NaN, 1e-15]) expect(() => lamportFor(1500, bad, 6), String(bad)).toThrow();
+    // an amount that would not fit in what a token transfer can carry is not made
+    expect(() => lamportFor(1_000_000_000, 1e-9, 9)).toThrow();
   });
 });
 
@@ -238,7 +329,7 @@ describe("a payment in LAMPORT", () => {
     const signature = s.chain.paid([q.reference], TOKENS(25_000));
     expect((await s.check(q.reference)).status).toBe("paid");
     expect(s.accounts.profile(s.profile)?.tier).toBe("pro");
-    expect(s.accounts.profile(s.profile)?.prepaid?.payments).toEqual([{ signature, asset: "LAMPORT", units: TOKENS(25_000).toString(), months: 1, cents: 0, at: T0 }]);
+    expect(s.accounts.profile(s.profile)?.prepaid?.payments).toEqual([{ signature, asset: "LAMPORT", units: TOKENS(25_000).toString(), months: 1, cents: 1500, at: T0 }]);
     expect(s.said).toHaveLength(1);
     // asked again, it is paid, and not counted twice
     expect((await s.check(q.reference)).status).toBe("paid");
@@ -274,11 +365,29 @@ describe("a payment in LAMPORT", () => {
     expect(s.months()).toBe(1);
   });
 
+  it("made after the price has run out is not counted at that price: it is said to be late, and no payment is built for it by then", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    const other = await s.quoted(1);
+    s.later(SOL_QUOTE_SECONDS + 1);
+    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 410, why: "that price in LAMPORT has run out. Ask for the amount again." });
+    // one that was on its way when it ran out is taken
+    const justLate = s.chain.paid([q.reference], TOKENS(25_000));
+    s.chain.txs.find((t) => t.signature === justLate)!.result.blockTime = T0 + SOL_QUOTE_SECONDS + SOL_QUOTE_GRACE_SECONDS;
+    expect((await s.check(q.reference)).status).toBe("paid");
+    // one made after that is not
+    const late = s.chain.paid([other.reference], TOKENS(25_000));
+    s.chain.txs.find((t) => t.signature === late)!.result.blockTime = T0 + SOL_QUOTE_SECONDS + SOL_QUOTE_GRACE_SECONDS + 1;
+    expect(await s.check(other.reference)).toEqual({ status: "late" });
+    expect(s.months()).toBe(1);
+  });
+
   it("is counted against the wallet and the token its quote was made for, whatever the settings are by then", async () => {
     const s = setup();
     const q = await s.quoted(1);
-    // the treasury is changed to another wallet, and the number of tokens raised: the same store, other settings
-    const moved = s.made({ lamport: { mint: LAMPORT_MINT, perMonth: 50_000, payTo: key(42).toBase58() } });
+    // the treasury is changed to another wallet, and the token's price halves: the same store, other settings
+    const moved = s.made({ lamport: { mint: LAMPORT_MINT, payTo: key(42).toBase58() } });
+    s.market.price = PRICE / 2;
     const next = await s.quoted(1, s.profile, moved);
     expect(next).toMatchObject({ payTo: key(42).toBase58(), units: TOKENS(50_000).toString() });
     // a payment made on the old quote, to the wallet it named, at the amount it named, counts
@@ -573,18 +682,19 @@ describe("a chain that answers badly", () => {
 });
 
 describe("what somebody is told before they pay in LAMPORT", () => {
-  it("says what it pays for, that it goes to Lamport's treasury wallet, that it is public, how a refund is made, and what becomes of the tokens", () => {
-    const terms = lamportTerms("25,000", 1);
-    expect(terms).toHaveLength(4);
-    expect(terms[3]).toBe("Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. Lamport does that itself, after the payment; this page does not, and none of it is a promise about what the token is worth.");
-    expect(terms[0]).toBe("25,000 LAMPORT pays for one month, once. Nothing is charged again and nothing renews: when the time is up your profile goes back to Watch, and nothing is deleted. Your alert channels are told three days before.");
+  it("says what the dollars pay for, how they became tokens, that the tokens go to Lamport's treasury wallet, how a refund is made, and what becomes of them", () => {
+    const terms = lamportTerms(1500, 1);
+    expect(terms).toHaveLength(5);
+    expect(terms[0]).toBe(prepaidTerms(1500, 1)[0]);
+    expect(terms[0]).toContain("$15 pays for one month, once.");
     expect(terms.slice(1)).toEqual([...LAMPORT_TERMS]);
-    expect(terms[1]).toContain("to Lamport's treasury wallet");
-    expect(terms[2]).toContain("is sent back in LAMPORT to the wallet that paid");
-    expect(lamportTerms("75,000", 3)[0]).toContain("75,000 LAMPORT pays for 3 months, once.");
+    expect(terms[1]).toContain("the lower of its price now, on which two public sources have to agree, and its price an hour before");
+    expect(terms[2]).toContain("to Lamport's treasury wallet");
+    expect(terms[3]).toContain("the LAMPORT that was paid is sent back to the wallet that paid");
+    expect(terms[4]).toBe("Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. Lamport does that itself, after the payment; this page does not, and none of it is a promise about what the token is worth.");
+    expect(lamportTerms(4500, 3)[0]).toContain("$45 pays for 3 months, once.");
     // a number of tokens is written with its thousands apart
-    expect(grouped(25_000_000_000n, 6)).toBe("25,000");
+    expect(grouped(286_956_000_000n, 6)).toBe("286,956");
     expect(grouped(1_234_567_000_001n, 6)).toBe("1,234,567.000001");
-    expect(grouped(999n, 6)).toBe("0.000999");
   });
 });

@@ -39,12 +39,19 @@ describe("the terms", () => {
     const list = /<ul id="lamport-terms">([\s\S]*?)<\/ul>/.exec(terms)![1]!;
     const lines = [...list.matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]!.trim());
     expect(lines).toEqual([...LAMPORT_TERMS]);
-    // the two lines that do not depend on the amount are the same for any amount
-    expect(lamportTerms("25,000", 3).slice(1)).toEqual([...LAMPORT_TERMS]);
-    const prepaid = read("sentinel", "service", "src", "prepaid.ts");
-    // the same number for everyone, to the treasury wallet, counted like any other payment, and looked for by the service
-    expect(text).toContain("That number is the same for everyone, it is not a price in dollars, and the holder's price does not apply to it.");
-    expect(prepaid).toContain("BigInt(l.perMonth) * BigInt(months)");
+    // the lines that do not depend on the amount are the same for any amount
+    expect(lamportTerms(4500, 3).slice(1)).toEqual([...LAMPORT_TERMS]);
+    const prepaid = read("sentinel", "service", "src", "prepaid.ts"), price = read("sentinel", "service", "src", "lamportprice.ts");
+    // the price in dollars, the holder's included, at the token's price: two sources that agree, and never above the price an hour before
+    expect(text).toContain("It is the same price in dollars, the holder's price included, and the page shows how many tokens that is before you pay.");
+    expect(prepaid).toContain("const cents = (holder ? this.selling.centsHolder : this.selling.centsFull) * months;");
+    expect(prepaid).toContain("units = lamportFor(cents, await this.opts.lamportPrice!(), token.decimals);");
+    expect(price).toContain("const price = Math.min(now, before);");
+    expect(price).toContain("const now = agreed(answers.map((a) => a.price), LAMPORT_AGREE_WITHIN, LEAST, MOST);");
+    // ten minutes, as for SOL, and late after that
+    expect(text).toContain("Like an amount in SOL, an amount in $LAMPORT holds for ten minutes, and when the token cannot be priced no amount in it is shown.");
+    expect(prepaid).toContain('expiresAt: now + (asset === "USDC" ? USDC_QUOTE_SECONDS : SOL_QUOTE_SECONDS)');
+    expect(prepaid).toContain('if (intent.asset !== "USDC" && (tx.blockTime ?? this.now()) > intent.expiresAt + SOL_QUOTE_GRACE_SECONDS)');
     expect(text).toContain("It counts, like a payment in USDC, when the chain has made it final and the amount that arrived at the treasury wallet is at least the amount shown.");
     expect(prepaid).toContain("const got = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);");
     expect(text).toContain("The service looks for a payment while the Sentinel page is open and, by itself, about once an hour for three days after it was last asked about, so it does not depend on the page staying open.");

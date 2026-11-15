@@ -45,11 +45,10 @@
  *                              closed: a profile one of them is in. For running a real payment before selling.
  *   SENTINEL_PAY_TO            Lamport's wallet address. With it (and the settings above) the plan can also be paid
  *                              ahead in USDC or SOL, to that address (prepaid.ts); without it, by card only.
- *   SENTINEL_LAMPORT_PER_MONTH, SENTINEL_LAMPORT_PAY_TO
- *                              How many whole tokens of the holders' token (LAMPORT) pay for one month of the
- *                              plan, and the treasury wallet they are sent to. With both, the plan can also be
- *                              paid in LAMPORT, by a transfer to that wallet. Left out, that is not offered.
- *                              There is no default for either: nothing is sent to a wallet nobody named.
+ *   SENTINEL_LAMPORT_PAY_TO    Lamport's treasury wallet. With it the plan can also be paid in the holders' token
+ *                              (LAMPORT), by a transfer to that wallet: the same price in dollars, turned into
+ *                              LAMPORT at a price public sources agree on (lamportprice.ts). Left out, that is
+ *                              not offered. There is no default: nothing is sent to a wallet nobody named.
  *   SENTINEL_PAY_SOL           "off" to take USDC only. Otherwise SOL is quoted at a price two public sources agree on.
  *   SENTINEL_PRICE_CENTS, SENTINEL_HOLDER_PRICE_CENTS          what the page shows (default 1500 and 1000)
  *   SENTINEL_HOLDER_MINT, SENTINEL_HOLDER_MIN                  the token and whole-token amount for the holder price
@@ -78,6 +77,7 @@ import { Push, pushUrlFor } from "./push.js";
 import { Rescue } from "./rescue.js";
 import { Rescuer } from "./rescuer.js";
 import { Keypair } from "@solana/web3.js";
+import { LamportPrice } from "./lamportprice.js";
 import { SolPrice } from "./solprice.js";
 import { LinkCodes, TOKEN_SHAPE, TelegramBot, listen as hearTelegram, type TelegramDeps } from "./telegram.js";
 import { channelAddedNotice, channelRemovedNotice } from "./notices.js";
@@ -87,7 +87,7 @@ import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore, type StoredEvent } from "./store.js";
 import { ACCOUNTS_PER_CALL, Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { rescuerKey: Uint8Array | null; rescueRpcUrl: string | null; payTo: string | null; payUsdcMint: string | null; paySol: boolean; /** Paying in the holders' token: how many whole tokens for one month, and the treasury wallet they go to; null: not offered. */ lamportPerMonth: number | null; lamportPayTo: string | null; lamportMint: string; telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rescuerKey: Uint8Array | null; rescueRpcUrl: string | null; payTo: string | null; payUsdcMint: string | null; paySol: boolean; /** Paying in the holders' token: the treasury wallet it goes to; null: not offered. */ lamportPayTo: string | null; lamportMint: string; telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
@@ -168,13 +168,11 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const opsChannel = env.SENTINEL_OPS_CHANNEL ? cleanTarget(env.SENTINEL_OPS_CHANNEL, ntfyHosts) : null;
   // where payments in USDC or SOL go: an address, or nothing; and only beside the rest of the paid plan
   const payTo = (env.SENTINEL_PAY_TO ?? "").trim() || null;
-  const lamportSaid = (env.SENTINEL_LAMPORT_PER_MONTH ?? "").trim();
-  const lamportPerMonth = lamportSaid === "" ? null : Number(lamportSaid);
   const lamportPayTo = (env.SENTINEL_LAMPORT_PAY_TO ?? "").trim() || null;
-  if (lamportPerMonth !== null && (!Number.isSafeInteger(lamportPerMonth) || lamportPerMonth <= 0 || lamportPerMonth > 1_000_000_000_000)) return { ok: false, why: "SENTINEL_LAMPORT_PER_MONTH has to be a whole number of tokens, more than none." };
   if (lamportPayTo && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(lamportPayTo)) return { ok: false, why: "SENTINEL_LAMPORT_PAY_TO has to be a wallet address." };
-  if ((lamportPerMonth === null) !== (lamportPayTo === null)) return { ok: false, why: "SENTINEL_LAMPORT_PER_MONTH and SENTINEL_LAMPORT_PAY_TO go together: how many tokens pay for a month, and the treasury wallet they are sent to." };
-  if (lamportPerMonth !== null && !payTo) return { ok: false, why: "SENTINEL_LAMPORT_PER_MONTH needs SENTINEL_PAY_TO beside it: paying in LAMPORT is one of the ways of paying ahead." };
+  if (lamportPayTo && !payTo) return { ok: false, why: "SENTINEL_LAMPORT_PAY_TO needs SENTINEL_PAY_TO beside it: paying in LAMPORT is one of the ways of paying ahead." };
+  // (an amount of LAMPORT is no longer a setting: it is the price in dollars at the token's price)
+  if ((env.SENTINEL_LAMPORT_PER_MONTH ?? "").trim()) return { ok: false, why: "SENTINEL_LAMPORT_PER_MONTH is not a setting any more: the amount is the plan's price in dollars at LAMPORT's price. Take it out." };
   if (payTo && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(payTo)) return { ok: false, why: "SENTINEL_PAY_TO has to be a wallet address." };
   const payUsdcMint = (env.SENTINEL_PAY_USDC_MINT ?? "").trim() || null;
   const telegramToken = (env.SENTINEL_TELEGRAM_BOT_TOKEN ?? "").trim() || null;
@@ -199,7 +197,7 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   if (rescuerKey === undefined) return { ok: false, why: "SENTINEL_RESCUER_KEY has to be a keypair as solana-keygen writes it (a list of 64 numbers), or those 64 bytes in base64." };
   const rescueRpcUrl = (env.SENTINEL_RESCUE_RPC_URL ?? "").trim() || null;
   try { if (rescueRpcUrl && !/^https?:$/.test(new URL(rescueRpcUrl).protocol)) throw new Error(); } catch { return { ok: false, why: "SENTINEL_RESCUE_RPC_URL has to be the address of a Solana RPC." }; }
-  return { ok: true, config: { rescuerKey, rescueRpcUrl, payTo, payUsdcMint, paySol: env.SENTINEL_PAY_SOL !== "off", lamportPerMonth, lamportPayTo, lamportMint: env.SENTINEL_HOLDER_MINT || LAMPORT_MINT, telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
+  return { ok: true, config: { rescuerKey, rescueRpcUrl, payTo, payUsdcMint, paySol: env.SENTINEL_PAY_SOL !== "off", lamportPayTo, lamportMint: env.SENTINEL_HOLDER_MINT || LAMPORT_MINT, telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -527,10 +525,11 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   // Paying ahead in USDC or SOL: sold to the same people at the same prices as the card plan, checked on
   // the chain, and looked at once an hour for what has run out or is about to.
   const solPrice = new SolPrice();
+  const lamportPrice = new LamportPrice(cfg.lamportMint);
   const prepaid = billing && cfg.payTo
-    ? new Prepaid({ payTo: cfg.payTo, ...(cfg.payUsdcMint ? { usdcMint: cfg.payUsdcMint } : {}), ...(cfg.lamportPerMonth && cfg.lamportPayTo ? { lamport: { mint: cfg.lamportMint, perMonth: cfg.lamportPerMonth, payTo: cfg.lamportPayTo } } : {}) }, accounts, rpc,
+    ? new Prepaid({ payTo: cfg.payTo, ...(cfg.payUsdcMint ? { usdcMint: cfg.payUsdcMint } : {}), ...(cfg.lamportPayTo ? { lamport: { mint: cfg.lamportMint, payTo: cfg.lamportPayTo } } : {}) }, accounts, rpc,
       { sells: (p) => billing.sellsTo(p), holder: (p) => billing.holder(p), byCard: (p) => billing.byCard(p), centsFull: billing.cents.full, centsHolder: billing.cents.holder },
-      { notice: (profile, sentence) => notifier.notice(profile, sentence), ...(cfg.paySol ? { price: () => solPrice.usd() } : {}) })
+      { notice: (profile, sentence) => notifier.notice(profile, sentence), ...(cfg.paySol ? { price: () => solPrice.usd() } : {}), ...(cfg.lamportPayTo ? { lamportPrice: () => lamportPrice.usd() } : {}) })
     : null;
   const stopPrepaid = prepaid ? startRounds(async () => {
     // first the payments nobody is waiting on a page for, so that nothing just paid is ended

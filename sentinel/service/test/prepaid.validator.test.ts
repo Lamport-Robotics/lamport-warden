@@ -139,9 +139,9 @@ describe.skipIf(!onPath)("a payment for the plan on a local validator", () => {
     const admitted = accounts.admit(watched.publicKey.toBase58(), null, Math.floor(Date.now() / 1000));
     if (!admitted.ok) throw new Error("setup");
     profile = admitted.profile;
-    prepaid = new Prepaid({ payTo: lamport.publicKey.toBase58(), usdcMint: mint.toBase58(), lamport: { mint: lamportMint.toBase58(), perMonth: 25, payTo: treasury.publicKey.toBase58() } }, accounts, rpc,
+    prepaid = new Prepaid({ payTo: lamport.publicKey.toBase58(), usdcMint: mint.toBase58(), lamport: { mint: lamportMint.toBase58(), payTo: treasury.publicKey.toBase58() } }, accounts, rpc,
       { sells: () => true, holder: async () => false, byCard: () => false, centsFull: 1500, centsHolder: 1000 },
-      { price: async () => 75, notice: async (_p, sentence) => { said.push(sentence); } });
+      { price: async () => 75, lamportPrice: async () => 0.6, notice: async (_p, sentence) => { said.push(sentence); } });
   }, 120_000);
 
   afterAll(() => { validator?.kill("SIGKILL"); });
@@ -212,8 +212,8 @@ describe.skipIf(!onPath)("a payment for the plan on a local validator", () => {
     const quoted = await prepaid.quote(profile, "LAMPORT", 1);
     if (!quoted.ok) throw new Error(quoted.why);
     const q = quoted.quote;
-    // 25 whole tokens for a month, in the units the chain says the token has, to the treasury and its own token account
-    expect(q).toMatchObject({ units: "25000000", decimals: 6, mint: lamportMint.toBase58(), payTo: treasury.publicKey.toBase58(), account: ours.toBase58() });
+    // fifteen dollars at sixty cents a token is 25 whole tokens, in the units the chain says the token has, to the treasury and its own token account
+    expect(q).toMatchObject({ units: "25000000", cents: 1500, decimals: 6, mint: lamportMint.toBase58(), payTo: treasury.publicKey.toBase58(), account: ours.toBase58() });
 
     // tokens burned in a transaction that names the quote went to nobody: once final, they are counted for nothing
     const burnt = await send([customer], new TransactionInstruction({ programId: TOKEN_2022, data: Buffer.concat([Buffer.from([15]), u64(25_000_000n), Buffer.from([6])]), keys: [
@@ -241,7 +241,7 @@ describe.skipIf(!onPath)("a payment for the plan on a local validator", () => {
     expect(await balance(ours)).toBe(25_000_000n);
     expect(await balance(theirs)).toBe(50_000_000n);
     expect(await supply(lamportMint)).toBe(75_000_000n);
-    expect(accounts.profile(profile)!.prepaid!.payments.at(-1)).toMatchObject({ signature, asset: "LAMPORT", units: "25000000", months: 1, cents: 0 });
+    expect(accounts.profile(profile)!.prepaid!.payments.at(-1)).toMatchObject({ signature, asset: "LAMPORT", units: "25000000", months: 1, cents: 1500 });
     expect(accounts.profile(profile)!.prepaid!.payments).toHaveLength(paidBefore + 1);
   }, 240_000);
 });

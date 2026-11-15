@@ -15,10 +15,11 @@
  * A transaction pays for one thing, once. USDC is a dollar for a dollar and a quote in it is good for a
  * week. A quote in SOL is priced when it is made and is good for ten minutes.
  *
- * And in LAMPORT, where that is turned on: a fixed number of tokens for a month, the same for everybody,
- * sent to Lamport's treasury wallet, which is another wallet than the one USDC and SOL go to. It is a
- * transfer like the one in USDC and is counted the same way, by what arrived. A quote remembers the wallet
- * and the token it was made for, so a payment made on it counts whatever the settings are by then.
+ * And in LAMPORT, where that is turned on: the same price in dollars, the holder's included, turned into
+ * LAMPORT at the token's price when the quote is made (lamportprice.ts), good for ten minutes like a quote
+ * in SOL. It is sent to Lamport's treasury wallet, which is another wallet than the one USDC and SOL go to.
+ * It is a transfer like the one in USDC and is counted the same way, by what arrived. A quote remembers the
+ * wallet and the token it was made for, so a payment made on it counts whatever the settings are by then.
  *
  * Nothing is counted twice, however many looks overlap: a transaction is marked spent in the same step that
  * counts it (accounts.ts), with nothing awaited in between. Looks at one quote take turns (`inTurn`), so two
@@ -33,6 +34,7 @@ import type { Accounts } from "./accounts.js";
 import { prepaidEndingNotice, prepaidExtendedNotice, prepaidStartedNotice, planEndedNotice } from "./notices.js";
 import { accountKeys, fromRpc, type ObservedTx } from "./observed.js";
 import { looksLikeSignature } from "./crypto.js";
+import { lamportFor } from "./lamportprice.js";
 import { PLANS, PREPAID_MONTHS, decimal, grouped } from "./plans.js";
 import type { Rpc } from "./rpc.js";
 import type { PayAsset, PayIntent } from "./store.js";
@@ -51,8 +53,8 @@ export interface PrepaidConfig {
   /** Lamport's wallet: where payments go. */
   payTo: string;
   usdcMint?: string;
-  /** Paying in LAMPORT: the token, how many whole tokens pay for one month, and the treasury wallet they are sent to. Absent: not offered. */
-  lamport?: { mint: string; perMonth: number; payTo: string };
+  /** Paying in LAMPORT: the token, and the treasury wallet it is sent to. Absent: not offered. */
+  lamport?: { mint: string; payTo: string };
 }
 
 /** What the plan's card side says about a profile, so that both ways of paying sell to the same people at the same prices. */
@@ -164,7 +166,7 @@ export function arrived(tx: ObservedTx, payTo: string, asset: PayAsset, usdcMint
 export class Prepaid {
   constructor(
     private cfg: PrepaidConfig, private accounts: Accounts, private rpc: Rpc, private selling: Selling,
-    private opts: { now?: () => number; price?: () => Promise<number>; notice?: (profile: string, sentence: string) => Promise<void> } = {},
+    private opts: { now?: () => number; /** Dollars for one SOL. */ price?: () => Promise<number>; /** Dollars for one LAMPORT. Without it LAMPORT is not offered. */ lamportPrice?: () => Promise<number>; notice?: (profile: string, sentence: string) => Promise<void> } = {},
   ) {
     if (!ADDRESS.test(cfg.payTo)) throw new Error("the address payments go to is not an address");
   }
@@ -211,44 +213,46 @@ export class Prepaid {
   private tell(profile: string, sentence: string): void { void this.opts.notice?.(profile, sentence).catch(() => undefined); }
 
   /** What the page needs to offer it. SOL is offered only where there is a price to quote it at. */
-  offer(): { payTo: string; assets: PayAsset[]; months: readonly number[]; lamport?: { perMonth: number; payTo: string } } {
+  offer(): { payTo: string; assets: PayAsset[]; months: readonly number[]; lamport?: { payTo: string } } {
     const assets: PayAsset[] = this.opts.price ? ["USDC", "SOL"] : ["USDC"];
-    const l = this.cfg.lamport;
-    return l ? { payTo: this.cfg.payTo, assets: [...assets, "LAMPORT"], months: PREPAID_MONTHS, lamport: { perMonth: l.perMonth, payTo: l.payTo } } : { payTo: this.cfg.payTo, assets, months: PREPAID_MONTHS };
+    const l = this.lamport;
+    return l ? { payTo: this.cfg.payTo, assets: [...assets, "LAMPORT"], months: PREPAID_MONTHS, lamport: { payTo: l.payTo } } : { payTo: this.cfg.payTo, assets, months: PREPAID_MONTHS };
   }
+  /** Where LAMPORT is taken: only with a treasury wallet to send it to and a price to turn dollars into it. */
+  private get lamport(): { mint: string; payTo: string } | null { return this.cfg.lamport && this.opts.lamportPrice ? this.cfg.lamport : null; }
 
   /** An amount to pay, and the reference that will mark the payment as this profile's. */
   async quote(profile: string, asset: unknown, months: unknown): Promise<{ ok: true; quote: QuoteView } | Refusal> {
     if (!this.accounts.profile(profile)) return { ok: false, status: 401, why: "sign in again." };
     if (!this.selling.sells(profile)) return { ok: false, status: 403, why: "the paid plan is not on sale yet." };
     if (this.selling.byCard(profile)) return { ok: false, status: 409, why: "this profile has the plan by card, which renews by itself. Cancel that first if you would rather pay ahead." };
-    if (asset !== "USDC" && asset !== "SOL" && !(asset === "LAMPORT" && this.cfg.lamport)) return { ok: false, status: 400, why: this.cfg.lamport ? "it can be paid in USDC, SOL or LAMPORT." : "it can be paid in USDC or SOL." };
+    if (asset !== "USDC" && asset !== "SOL" && !(asset === "LAMPORT" && this.lamport)) return { ok: false, status: 400, why: this.lamport ? "it can be paid in USDC, SOL or LAMPORT." : "it can be paid in USDC or SOL." };
     if (asset === "SOL" && !this.opts.price) return { ok: false, status: 400, why: "it cannot be paid in SOL here. USDC can." };
     if (typeof months !== "number" || !PREPAID_MONTHS.includes(months)) return { ok: false, status: 400, why: `it is paid for ${PREPAID_MONTHS.slice(0, -1).join(", ")} or ${PREPAID_MONTHS.at(-1)} months at a time.` };
-    if (asset === "LAMPORT") {
-      // a number of tokens for a month, the same for everybody: there is no price in dollars to it, and so no lower price to work out
-      let token: { decimals: number };
-      try { token = await this.lamportToken(); } catch { return CHAIN_DOWN; }
-      const l = this.cfg.lamport!;
-      const units = BigInt(l.perMonth) * BigInt(months) * 10n ** BigInt(token.decimals);
-      const at = this.now();
-      // the quote keeps the wallet, the token and its decimals it was made for: a payment made on it counts whatever the settings are by then
-      const intent: PayIntent = { reference: new PublicKey(randomBytes(32)).toBase58(), profile, asset, units: units.toString(), months, cents: 0, createdAt: at, expiresAt: at + USDC_QUOTE_SECONDS, mint: l.mint, payTo: l.payTo, decimals: token.decimals };
-      this.accounts.addIntent(intent, at);
-      return { ok: true, quote: this.view(intent, this.lamportFacts?.program) };
-    }
     let holder: boolean;
     try { holder = await this.selling.holder(profile); } catch { return { ok: false, status: 502, why: "I could not read your wallet's balance just now, so I can't tell which price is yours. Try again in a minute." }; }
     const cents = (holder ? this.selling.centsHolder : this.selling.centsFull) * months;
     let units: bigint;
+    // for LAMPORT the quote keeps the wallet, the token and its decimals it was made for: a payment made on it counts whatever the settings are by then
+    let madeFor: Pick<PayIntent, "mint" | "payTo" | "decimals"> = {};
+    let program: PublicKey | undefined;
     if (asset === "USDC") units = usdcUnits(cents);
-    else {
+    else if (asset === "SOL") {
       try { units = lamportsFor(cents, await this.opts.price!()); } catch { return { ok: false, status: 503, why: "SOL cannot be priced right now. USDC can be used, or try again in a minute." }; }
+    } else {
+      const l = this.lamport!;
+      let token: { program: PublicKey; decimals: number };
+      try { token = await this.lamportToken(); } catch { return CHAIN_DOWN; }
+      // the same dollars, in LAMPORT at its price now: a whole number of tokens, rounded up
+      try { units = lamportFor(cents, await this.opts.lamportPrice!(), token.decimals); } catch { return { ok: false, status: 503, why: "LAMPORT cannot be priced right now. USDC can be used, or try again in a minute." }; }
+      madeFor = { mint: l.mint, payTo: l.payTo, decimals: token.decimals };
+      program = token.program;
     }
     const now = this.now();
-    const intent: PayIntent = { reference: new PublicKey(randomBytes(32)).toBase58(), profile, asset, units: units.toString(), months, cents, createdAt: now, expiresAt: now + (asset === "SOL" ? SOL_QUOTE_SECONDS : USDC_QUOTE_SECONDS) };
+    // a price that was worked out from a market holds for ten minutes; a dollar for a dollar holds a week
+    const intent: PayIntent = { reference: new PublicKey(randomBytes(32)).toBase58(), profile, asset, units: units.toString(), months, cents, createdAt: now, expiresAt: now + (asset === "USDC" ? USDC_QUOTE_SECONDS : SOL_QUOTE_SECONDS), ...madeFor };
     this.accounts.addIntent(intent, now);
-    return { ok: true, quote: this.view(intent) };
+    return { ok: true, quote: this.view(intent, program) };
   }
 
   private view(i: PayIntent, program: PublicKey = TOKEN_PROGRAM): QuoteView {
@@ -268,7 +272,7 @@ export class Prepaid {
     const intent = typeof reference === "string" && ADDRESS.test(reference) ? this.accounts.intentOf(profile, reference) : undefined;
     if (!intent) return { ok: false, status: 404, why: "there is no such quote. Ask for the amount again." };
     if (intent.paidBy) return { ok: false, status: 409, why: "that amount has been paid." };
-    if (this.now() > intent.expiresAt) return { ok: false, status: 410, why: intent.asset === "SOL" ? "that price in SOL has run out. Ask for the amount again." : "that quote is over a week old. Ask for the amount again." };
+    if (this.now() > intent.expiresAt) return { ok: false, status: 410, why: intent.asset === "USDC" ? "that quote is over a week old. Ask for the amount again." : `that price in ${intent.asset} has run out. Ask for the amount again.` };
     let from: PublicKey;
     try { if (typeof payer !== "string" || !ADDRESS.test(payer)) throw new Error(); from = new PublicKey(payer); } catch { return { ok: false, status: 400, why: "that is not a wallet address." }; }
     const units = BigInt(intent.units), mint = new PublicKey(this.mint), payTo = new PublicKey(this.cfg.payTo);
@@ -395,8 +399,8 @@ export class Prepaid {
       const got = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);
       // nothing, short, or late: read once and remembered, so that what cannot be counted is not read at every look
       if (got < BigInt(intent.units)) { this.note(intent, signature, got > 0n ? got : 0n); continue; }
-      // a price in SOL holds for ten minutes: a payment made after that was made at another price
-      if (intent.asset === "SOL" && (tx.blockTime ?? this.now()) > intent.expiresAt + SOL_QUOTE_GRACE_SECONDS) { this.note(intent, signature, got, true); continue; }
+      // a price in SOL or in LAMPORT holds for ten minutes: a payment made after that was made at another price
+      if (intent.asset !== "USDC" && (tx.blockTime ?? this.now()) > intent.expiresAt + SOL_QUOTE_GRACE_SECONDS) { this.note(intent, signature, got, true); continue; }
       const now = this.now();
       const until = addMonths(Math.max(now, this.accounts.prepaidUntil(profile)), intent.months);
       if (!this.accounts.credit(intent, { signature, asset: intent.asset, units: got.toString(), months: intent.months, cents: intent.cents, at: now }, until)) continue;

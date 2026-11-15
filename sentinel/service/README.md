@@ -19,7 +19,7 @@ and answer them. It holds no signing key and moves nothing. There is no rescuer 
 | `src/server.ts` | The HTTP API. |
 | `src/main.ts`, `src/cli.ts` | The process: the watcher on a timer and the API beside it. |
 | `src/billing.ts` | The paid plan: a monthly Stripe subscription at one of two prices, the webhook that moves a profile between tiers, and the daily look at who holds the token. |
-| `src/prepaid.ts`, `src/solprice.ts` | The same plan paid ahead in USDC or SOL: the quote and its reference, the payment read from the chain, and the price of SOL from sources that have to agree. And, where it is turned on, paid in LAMPORT to the treasury wallet. |
+| `src/prepaid.ts`, `src/solprice.ts` | The same plan paid ahead in USDC or SOL: the quote and its reference, the payment read from the chain, and the price of SOL from sources that have to agree. And, where it is turned on, paid in LAMPORT to the treasury wallet (`src/lamportprice.ts`: what a LAMPORT costs). |
 | `src/program.ts` | The rescue program's instructions, for arming (the owner signs) and for a rescue, and the plan of a rescue: which accounts, in what order, in how many transactions. |
 | `src/crypto.ts` | Random tokens and their hashes, the sealed box for channel addresses, and the check of a wallet's signature. All from Node itself. |
 
@@ -617,21 +617,31 @@ of the customer and the subscription.
     subscription, and a card plan is not started over months already paid for.
   - `prepaid.test.ts` runs it against a list of transactions; `prepaid.validator.test.ts` runs a real token
     payment and a real SOL payment on a local validator, and is part of `pnpm test:rescue`.
-- **Paid in LAMPORT** (`src/prepaid.ts`), where `SENTINEL_LAMPORT_PER_MONTH` says how many whole tokens
-  pay for a month and `SENTINEL_LAMPORT_PAY_TO` names Lamport's treasury wallet. It is off until both are
-  set, neither has a default, and it needs `SENTINEL_PAY_TO` beside it, since it is one more way of paying
-  ahead: the same months, the same profiles, nothing renews.
+- **Paid in LAMPORT** (`src/prepaid.ts`, `src/lamportprice.ts`), where `SENTINEL_LAMPORT_PAY_TO` names
+  Lamport's treasury wallet. It is off until that is set, it has no default, and it needs `SENTINEL_PAY_TO`
+  beside it, since it is one more way of paying ahead: the same months, the same profiles, nothing renews.
   - It is a transfer, like the one in USDC, to another wallet: the tokens go to the treasury wallet and
     not to the wallet USDC and SOL go to. Lamport keeps a part of them there, locked for the long term,
     and burns the rest. That is done by Lamport, by hand, from that wallet: the service holds no key, does
     neither, and the page and the terms say so in the same words.
-  - The number is the same for everybody. It is not a price in dollars, so there is no holder's price to
-    work out and no wallet's balance is read for the quote. A quote holds a week.
+  - The price is the plan's price in dollars, the holder's included, turned into LAMPORT when the amount is
+    shown, in whole tokens rounded up. Like a quote in SOL it holds ten minutes, and a payment made after
+    that is late and starts nothing.
+  - What a LAMPORT costs (`src/lamportprice.ts`). Three public sources that need no key are asked at once
+    (Jupiter, GeckoTerminal, DexScreener), and a price is given only when two of them agree to within five
+    in a hundred. LAMPORT trades in one small pool, so somebody could push its price up for a minute, ask
+    for an amount in that minute and be asked for fewer tokens than the plan costs. So the price used is
+    the lower of the price now and the price an hour before, which comes from the one source that reports
+    the change over the hour (DexScreener). When that source does not answer, or is not one of those that
+    agree, there is no price and no amount in LAMPORT is shown; USDC needs no price and always is. Taking
+    the lower can only ask for more tokens, so after the token has risen within the hour a payer is asked
+    for the amount at the earlier, lower price.
   - A quote keeps the wallet, the token and the decimals it was made for. A payment made on it is counted
     against those, whatever the settings are by then: moving the treasury, changing the number or switching
     LAMPORT off does not strand a payment that was already asked for.
   - It is counted like USDC: by what arrived in the treasury's accounts of the token, at `finalized`. A
-    short payment starts nothing and is said to be short; sending it back is done by hand from the treasury.
+    payment that is short or late starts nothing and is said to be; sending it back is done by hand from
+    the treasury.
   - It is taken only for a token with no more to it than a name and a picture (`PLAIN_EXTENSIONS`). A token
     that keeps back a fee on transfers would arrive short of what the page asked a wallet for, every time.
     LAMPORT has no such fee and can never be given one.

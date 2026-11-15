@@ -343,8 +343,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     expect(asked.find((a) => a[0] === "transaction")).toEqual(["transaction", REFERENCE, W1]);
     await expect.poll(() => page.locator("#notice").innerText(), { timeout: 10_000 }).toBe("Paid. Your plan runs until 13 February 2027.");
     expect(asked.some((a) => a[0] === "check" && a[1] === REFERENCE)).toBe(true);
-    // And in LAMPORT, where the service offers that: a number of tokens, sent to Lamport's treasury wallet,
-    // which is another wallet than the one USDC goes to. The page names that wallet and the token account of
+    // And in LAMPORT, where the service offers that: the price in dollars turned into tokens, sent to Lamport's
+    // treasury wallet, which is another wallet than the one USDC goes to. The page names that wallet and the token account of
     // it that the prompts will show, and no other amount can be shown while the payment is being looked for.
     const LAMPORT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun", TREASURY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T", LAMPORT_REFERENCE = "7VfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs";
     const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -357,8 +357,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     let release: () => void = () => undefined;
     const waitingOnChain = new Promise<void>((r) => { release = r; });
     apiDeps.prepaid = {
-      offer: () => ({ payTo: PAY_TO, assets: ["USDC", "SOL", "LAMPORT"], months: [1, 3, 12], lamport: { perMonth: 25_000, payTo: TREASURY } }),
-      quote: async (_profile, asset, months) => { asked.push(["quote", asset, months]); return { ok: true, quote: { reference: LAMPORT_REFERENCE, payTo: TREASURY, asset: "LAMPORT", units: "25000000000", decimals: 6, mint: LAMPORT, months: months as number, cents: 0, expiresAt: Math.floor(Date.now() / 1000) + 600, url: `solana:${TREASURY}?amount=25000&spl-token=${LAMPORT}&reference=${LAMPORT_REFERENCE}`, account: TREASURY_ACCOUNT } }; },
+      offer: () => ({ payTo: PAY_TO, assets: ["USDC", "SOL", "LAMPORT"], months: [1, 3, 12], lamport: { payTo: TREASURY } }),
+      quote: async (_profile, asset, months) => { asked.push(["quote", asset, months]); return { ok: true, quote: { reference: LAMPORT_REFERENCE, payTo: TREASURY, asset: "LAMPORT", units: "25000000000", decimals: 6, mint: LAMPORT, months: months as number, cents: 1000, expiresAt: Math.floor(Date.now() / 1000) + 600, url: `solana:${TREASURY}?amount=25000&spl-token=${LAMPORT}&reference=${LAMPORT_REFERENCE}`, account: TREASURY_ACCOUNT } }; },
       transaction: async (_profile, reference, payer) => { asked.push(["transaction", reference, payer]); return { ok: true, transaction: Buffer.from(inLamport).toString("base64") }; },
       // the first look is held until the test lets it go: the chain has not made the payment final yet
       check: async (_profile, reference, signatures) => { asked.push(["check", reference, signatures]); await waitingOnChain; return { ok: true, result: paidUntil ? { status: "paid", until: paidUntil } : { status: "waiting" } }; },
@@ -372,7 +372,12 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     expect(asked[0]).toEqual(["quote", "LAMPORT", 1]);
     expect(await ahead.locator(".quote code.addr").allInnerTexts()).toEqual([TREASURY, TREASURY_ACCOUNT]);
     expect(await ahead.locator(".quote").innerText()).toContain("Warden gives the amount in the token's smallest units, a million to a token: 25000000000.");
-    expect(await ahead.locator(".quote ul.terms li").allInnerTexts()).toEqual(lamportTerms("25,000", 1));
+    // what the ten dollars pay for, how they became tokens, where the tokens go and what becomes of them; and how long the amount holds
+    const lamportSaid = await ahead.locator(".quote ul.terms li").allInnerTexts();
+    expect(lamportSaid.slice(0, 5)).toEqual(lamportTerms(1000, 1));
+    expect(lamportSaid[0]).toContain("$10 pays for one month, once.");
+    expect(lamportSaid[5]).toMatch(/^This price in LAMPORT holds for ten minutes, until \d/);
+    expect(lamportSaid).toHaveLength(6);
     expect(await ahead.getByLabel("Payment request").inputValue()).toBe(`solana:${TREASURY}?amount=25000&spl-token=${LAMPORT}&reference=${LAMPORT_REFERENCE}`);
     paidUntil = Math.floor(Date.UTC(2027, 1, 13, 12) / 1000);
     await ahead.getByRole("button", { name: "Pay with TestWallet" }).click();

@@ -23,7 +23,7 @@ interface Alert { id: string; wallet: string; at: number | null; level: "info" |
 interface RescueInfo { available: boolean; on: boolean; plan: boolean; auto: boolean; chain: string | null }
 interface TokenView { account: string; mint: string; amount: string; decimals: number }
 interface RescueStanding { armed: boolean; ours: boolean; vault: string | null; rescuers: "lamport" | "own" | null; covered: TokenView[]; uncovered: (TokenView & { why: "not set up" | "frozen" | "cannot be moved"; other?: string })[] }
-type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null; paidUntil?: number | null; crypto?: { payTo: string; assets: ("USDC" | "SOL" | "LAMPORT")[]; months: number[]; lamport?: { perMonth: number; payTo: string } } | null };
+type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null; paidUntil?: number | null; crypto?: { payTo: string; assets: ("USDC" | "SOL" | "LAMPORT")[]; months: number[]; lamport?: { payTo: string } } | null };
 type PayQuote = { reference: string; payTo: string; asset: "USDC" | "SOL" | "LAMPORT"; units: string; decimals: number; months: number; cents: number; expiresAt: number; url: string; account?: string | null };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
 
@@ -552,8 +552,8 @@ function quoted(out: HTMLElement, q: PayQuote, holdPicker: (on: boolean) => void
     if (lamport) lands.append(document.createTextNode(`. Warden gives the amount in the token's smallest units, a million to a token: ${q.units}.`));
   }
   const terms = el("ul", "", "terms");
-  terms.append(...(lamport ? lamportTerms(grouped(BigInt(q.units), q.decimals), q.months) : prepaidTerms(q.cents, q.months)).map((t) => el("li", t)));
-  if (q.asset === "SOL") terms.append(el("li", `This price in SOL holds for ten minutes, until ${new Date(q.expiresAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Paid later than that, it is not counted: ask for the amount again.`));
+  terms.append(...(lamport ? lamportTerms(q.cents, q.months) : prepaidTerms(q.cents, q.months)).map((t) => el("li", t)));
+  if (q.asset !== "USDC") terms.append(el("li", `This price in ${q.asset} holds for ten minutes, until ${new Date(q.expiresAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Paid later than that, it is not counted: ask for the amount again.`));
   const status = el("p", "", "soft");
   const sent = sentFor(q.reference);
   // A payment made somewhere else is found by what names this quote on the chain. Its signature finds it whatever else is there.
@@ -619,7 +619,7 @@ async function watchFor(q: PayQuote, status: HTMLElement, times: number, signatu
     const s = r.status === 200 ? r.body?.status : null;
     if (s === "paid") { status.textContent = ""; say(`Paid. Your plan runs until ${dayOf(Number(r.body.until))}.`); await refresh(); return; }
     if (s === "short") { status.textContent = `A payment arrived that is short: ${(q.asset === "LAMPORT" ? grouped : decimal)(BigInt(r.body.arrived), q.decimals)} ${q.asset} of ${(q.asset === "LAMPORT" ? grouped : decimal)(BigInt(r.body.wanted), q.decimals)}. Nothing was started. Write to support@lamportrobotics.com from the Terms page to have it sent back, or send the full amount.`; return; }
-    if (s === "late") { status.textContent = "A payment arrived after this price in SOL had run out, so it was not counted. Write to support@lamportrobotics.com to have it sent back or counted."; return; }
+    if (s === "late") { status.textContent = `A payment arrived after this price in ${q.asset} had run out, so it was not counted. Write to support@lamportrobotics.com to have it sent back or counted.`; return; }
     if (r.status !== 200) { status.textContent = String(r.body?.error ?? "That could not be looked up just now."); return; }
     if (i < times - 1) await new Promise((res) => setTimeout(res, 5000));
   }
