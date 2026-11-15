@@ -18,13 +18,15 @@ stands at Backpack's own `send()` and `sendAndConfirm()`, which it never had; re
 text messages as the wallet is handed them; and the prompt takes a press only where Warden put it and
 standing still. It also read a request from the side of an account named at the older door when the wallet's
 object said it was Backpack, which a page can make any wallet's object say: **0.7.5 must not be submitted.**
-The current one is 0.7.6, which reads such a request from both sides and asks no wallet what it is; asks
-once about a Backpack payment that goes through three of its doors; and lets a prompt taller than the
-window scroll.
+0.7.6 reads such a request from both sides and asks no wallet what it is; asks once about a Backpack
+payment that goes through three of its doors; and lets a prompt taller than the window scroll. The current
+one is 0.7.7: an account named in a call is read once and the wallet is handed what was read; anything
+handed to Backpack's `send` that is not plain text is taken for a transaction; and a transaction is read
+only from the sides that sign it.
 
-To submit 0.7.6:
+To submit 0.7.7:
 
-1. Package tab: upload `lamport-warden-0.7.6.zip` (`pnpm package`).
+1. Package tab: upload `lamport-warden-0.7.7.zip` (`pnpm package`).
 2. Store listing tab: paste the description below again (it now mentions Sentinel and the practice page)
    and replace the screenshots with the four in `store/screenshots/` (retaken from 0.7.1).
 3. Privacy tab: paste the storage justification and the data-usage note below again.
@@ -154,7 +156,7 @@ No login is needed. No wallet or cryptocurrency is needed.
 1. Install the extension. It opens its own settings page with a short welcome. Press
    "See it work with a practice wallet" there, or open https://warden.lamportrobotics.com/try/
    The page makes a practice wallet that holds nothing. Nothing on it is sent to any blockchain.
-   Near the top it says "Warden 0.7.6 is in this browser and is standing in front of the practice wallet."
+   Near the top it says "Warden 0.7.7 is in this browser and is standing in front of the practice wallet."
 2. Press "Try it" beside "Pay someone for the first time".
    The extension shows its prompt: one sentence saying what the request does, with Cancel and
    "Continue to wallet". Press "Continue to wallet".
