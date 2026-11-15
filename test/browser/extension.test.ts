@@ -339,6 +339,26 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     await page.close();
   });
 
+  it("does not take a click just after the page has moved the prompt: a button slid under a pointer was not chosen", async () => {
+    const { page, prompt } = await open();
+    await start(page, "moved", "standard:FixturePhantom", "tx", pay(Keypair.generate().publicKey, 0.3));
+    expect((await prompt.text())?.buttons).toEqual(["Cancel", "Continue to wallet"]);
+    await page.waitForTimeout(900); // on screen long enough for a click to count
+    // The page shifts the whole prompt, once, by a plain move: nothing covers the button and nothing fades it,
+    // so the browser goes on calling it visible. The click comes straight after, where the button now is.
+    await page.evaluate(`for (const e of document.documentElement.children) if (e.tagName === "DIV") e.style.setProperty("transform", "translate(-140px, 70px)", "important");`);
+    await page.waitForTimeout(60);
+    await prompt.click("Continue to wallet", true);
+    await page.waitForTimeout(300);
+    expect(await result(page, "moved")).toBe("pending");
+    expect(await calls(page)).toEqual([]);
+    // it is back where it was, and once it has stood still it is a prompt like any other
+    expect(await prompt.continueIsPainted()).toBe(true);
+    await prompt.click("Continue to wallet");
+    expect(await settled(page, "moved")).toBe("signed");
+    await page.close();
+  });
+
   it.each([
     ["inverts its colours with a filter on the whole document, as dark-mode extensions do", `document.documentElement.style.filter = "invert(1) hue-rotate(180deg)";`],
     ["is zoomed with a transform on the whole document", `document.documentElement.style.transform = "scale(0.9)"; document.documentElement.style.transformOrigin = "0 0";`],

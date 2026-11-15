@@ -167,6 +167,26 @@ Warden is advice in front of your wallet, not a lock on it. A page can still rea
 never sees, and turning the extension off removes it. On Pincer1 the same rules are enforced by the robot's
 controller, where a compromised computer cannot talk them away.
 
+Said exactly: Warden stops the site that uses a wallet the way sites do. A page written to get round Warden
+can, and these are the ways known:
+
+- **It can talk to the wallet without the wallet's object.** A wallet's object on the page is a messenger to
+  the wallet's own extension. A page that sends those messages itself never touches what Warden stands in
+  front of.
+- **It can replace the browser's built-in functions under Warden.** The half of Warden that stands in front
+  of a wallet runs in the page's own world and uses the same `Map`, `Promise` and `JSON` the page does. A
+  page that replaces them can have Warden ask nothing, or answer for it.
+- **At a wallet's older door it can hand over a transaction that changes its mind.** There a transaction is
+  an object of the page's, and what it says when the wallet reads it is the page's to decide. Warden reads
+  it when asked and again when handing it on, and asks about what it then says; an object written to answer
+  differently a third time is not caught. (At the Wallet Standard door a request is bytes, and what the
+  wallet is handed is Warden's own copy of the bytes it read. So are bytes, messages and `request()` calls
+  at the older door.)
+
+In each of these the wallet's own window still shows what it is asked to sign. What a page cannot reach is
+the prompt, which counts a press only from a person on a button that has been in view and standing still;
+the history of who a wallet has paid; and what Warden remembers of sites.
+
 Not built yet: token names beyond a handful of well-known ones (others show as a shortened mint address),
 Firefox, mobile and agent policy. The icons are the Lamport mark on a light tile until there is a drawn one.
 It has been run against the real wallets only as far as the prompt: no test has a funded wallet sign a real
