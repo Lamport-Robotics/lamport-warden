@@ -19,11 +19,10 @@ text messages as the wallet is handed them; and the prompt takes a press only wh
 standing still. It also read a request from the side of an account named at the older door when the wallet's
 object said it was Backpack, which a page can make any wallet's object say: **0.7.5 must not be submitted.**
 0.7.6 reads such a request from both sides and asks no wallet what it is; asks once about a Backpack
-payment that goes through three of its doors; and lets a prompt taller than the window scroll. The current
-one was 0.7.7: an account named in a call is read once and the wallet is handed what was read; anything
-handed to Backpack's `send` that is not plain text is taken for a transaction; and a transaction is read
-only from the sides that sign it. This branch is 0.8.0, which adds a decoy first: an experiment, off unless
-turned on.
+payment that goes through three of its doors; and lets a prompt taller than the window scroll. 0.7.7: an
+account named in a call is read once and the wallet is handed what was read; anything handed to Backpack's
+`send` that is not plain text is taken for a transaction; and a transaction is read only from the sides that
+sign it. The current one is 0.8.0, which adds a decoy first: an experiment, off unless turned on.
 
 **Before submitting 0.8.0:** `LAMPORT_DECOYS` in `src/defaults.ts` is empty, so a decoy is shown only to
 somebody who names an address themselves. The description below says only that a site "is handed a decoy's
