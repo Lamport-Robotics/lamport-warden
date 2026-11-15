@@ -189,7 +189,15 @@ export function signInBytes(input: any): Uint8Array {
  * have it "asked" to sign a transaction as an account of the page's (which reads as harmless: nothing leaves
  * that account), and then send those bytes to the real wallet. That is not the request that was answered.
  */
-const onTheirWay = new WeakMap<Guard, Map<string, object[]>>();
+const onTheirWay = new WeakMap<Guard, Map<string, { hops: number }[]>>();
+/**
+ * How many doors past the one it was asked at a request may be met. Backpack's Wallet Standard wallet calls its
+ * provider's signAndSendTransaction, which calls its own sendAndConfirm: two. Past that it is asked about
+ * again, so that a page cannot ride one answered request through door after door.
+ */
+const MOST_HOPS = 2;
+/** The doors a request may be met at on its second hop: Backpack's own names for sending, which its other methods call. Nothing else calls on from a second door. */
+const SECOND_HOP = new Set(["send", "sendAndConfirm"]);
 const HEX = "0123456789abcdef";
 /** What makes two requests the same one. Null for a request Warden cannot read: that is asked about every time. */
 function sameAs(r: GuardRequest): string | null {
@@ -206,19 +214,25 @@ const sameRequests = (a: GuardRequest[], b: GuardRequest[]): boolean => a.length
 
 /**
  * `again`: reads the request once more at the moment it is about to be handed to the wallet, for a request
- * that is an object of the page's and not plain data (see `readingAgain`).
+ * that is an object of the page's and not plain data (see `readingAgain`). `via`: the name of the provider
+ * method this came in through, when it came in through one.
  */
-async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Promise<T>, again?: () => GuardRequest[]): Promise<T> {
+async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Promise<T>, again?: () => GuardRequest[], via = ""): Promise<T> {
   let going = onTheirWay.get(guard);
   if (!going) { going = new Map(); onTheirWay.set(guard, going); }
   const passes = going;
   const keys = reqs.map(sameAs);
   /** null: this one was already answered, at the door the wallet was first asked through */
   const tickets: (Ticket | null)[] = [];
+  /** How many doors this request has come through already: 0 for one asked about here. */
+  const hops: number[] = [];
   try {
     for (const [i, r] of reqs.entries()) { // one at a time: the owner reads one request at a time
+      // (a pass for a first hop is taken at any door; one for a second hop only where a wallet's own code goes on to)
       const waiting = keys[i] ? passes.get(keys[i]!) : undefined;
-      if (waiting?.length) { waiting.shift(); tickets.push(null); continue; }
+      const at = waiting ? waiting.findIndex((pass) => pass.hops === 1 || SECOND_HOP.has(via)) : -1;
+      if (waiting && at >= 0) { hops.push(waiting.splice(at, 1)[0]!.hops); tickets.push(null); continue; }
+      hops.push(0);
       tickets.push(await guard(r));
     }
   } catch (e) {
@@ -229,9 +243,9 @@ async function guarded<T>(guard: Guard, reqs: GuardRequest[], call: () => T | Pr
     const now = again();
     if (!sameRequests(now, reqs)) { for (const t of tickets) t?.done(false); throw new ReadAgain(now); }
   }
-  // each request asked about here may be met once more while the wallet works on it
-  const mine: [string, object][] = [];
-  keys.forEach((k, i) => { if (k !== null && tickets[i] !== null) mine.push([k, {}]); });
+  // each request that came this far may be met once more while the wallet works on it, up to MOST_HOPS doors on
+  const mine: [string, { hops: number }][] = [];
+  keys.forEach((k, i) => { if (k !== null && hops[i]! < MOST_HOPS) mine.push([k, { hops: hops[i]! + 1 }]); });
   for (const [k, pass] of mine) { const list = passes.get(k); if (list) list.push(pass); else passes.set(k, [pass]); }
   const settle = () => {
     for (const [k, pass] of mine) {
@@ -318,10 +332,10 @@ function ownSignIn(i: any): any {
  * and a request that will not hold still is refused. (An object written to answer differently the third
  * time, when the wallet asks, is not caught by this. The README says so.)
  */
-async function readingAgain<T>(guard: Guard, read: () => GuardRequest[], call: () => T | Promise<T>): Promise<T> {
+async function readingAgain<T>(guard: Guard, read: () => GuardRequest[], call: () => T | Promise<T>, via = ""): Promise<T> {
   let reqs = read();
   for (let round = 0; round < 3; round++) {
-    try { return await guarded(guard, reqs, call, read); } catch (e) { if (!(e instanceof ReadAgain)) throw e; reqs = e.reqs; }
+    try { return await guarded(guard, reqs, call, read, via); } catch (e) { if (!(e instanceof ReadAgain)) throw e; reqs = e.reqs; }
   }
   throw new WardenRejected("Blocked by Lamport Warden: this request kept changing while it was being read");
 }
@@ -645,7 +659,9 @@ function guardFeature(name: string, feature: any, guard: Guard, wallet: any, d?:
   const settled = (i: any, field: "transaction" | "message"): { input: any; owner: string } => {
     const input = ownInput(i, field);
     const owner = ownerAt(wallet, named(input));
-    if (input && typeof input === "object" && owner) {
+    // (an account the wallet does not list is handed on as the page gave it: a wallet that checks refuses it, as
+    // it always did, and one that does not check signs as its own, which is the side this was read from)
+    if (input && typeof input === "object" && owner && owner === named(input)) {
       let listed: any;
       try { listed = Array.from(wallet?.accounts ?? []).find((a: any) => a?.address === owner); } catch { /* a list that cannot be read lists nobody */ }
       if (listed) input.account = listed;
@@ -1161,21 +1177,23 @@ async function viaLegacy<T>(door: LegacyDoor | undefined, reqs: () => GuardReque
 /** The guarded version of one provider method. Runs the wallet's own method with the caller's `this`. */
 function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => any): AnyFn | null {
   const run = (that: any, args: any[]) => original.apply(that, args);
+  const owner = (that: any) => ownerOf(self() ?? that);
   /**
-   * Whose request it is: the provider's own account. Backpack's methods also take the account to sign with as
-   * an argument, and it is that account's side the request is then read from.
+   * Whose side a request is read from. The provider's own account, always. Backpack's methods also take the
+   * account to sign with as an argument, and then the request is read from that account's side as well: both.
+   * Which wallet this is is not asked of the provider (a page can make any provider say it is Backpack, and
+   * Phantom, which ignores the argument, would then have its request read from a side it does not sign from).
+   * Read from both sides, whichever account the wallet signs with has been read.
    */
-  const isBackpack = (that: any): boolean => { try { return (self() ?? that)?.isBackpack === true; } catch { return false; } };
-  const owner = (that: any, namedAccount?: unknown): string => {
-    const provider = self() ?? that;
-    if (isBackpack(that) && namedAccount !== undefined && namedAccount !== null) {
-      try {
-        const a: any = namedAccount;
-        const said = typeof a === "string" ? a : typeof a.toBase58 === "function" ? String(a.toBase58()) : isBytes(a) && toBytes(a).length === 32 ? toBase58(toBytes(a)) : "";
-        if (said && fromBase58(said)?.length === 32) return said;
-      } catch { /* not an account: the provider's own */ }
-    }
-    return ownerOf(provider);
+  const sides = (that: any, namedAccount?: unknown): string[] => {
+    const own = owner(that);
+    if (namedAccount === undefined || namedAccount === null) return [own];
+    let said = "";
+    try {
+      const a: any = namedAccount;
+      said = typeof a === "string" ? a : typeof a.toBase58 === "function" ? String(a.toBase58()) : isBytes(a) && toBytes(a).length === 32 ? toBase58(toBytes(a)) : "";
+    } catch { /* not an account */ }
+    return said && said !== own && fromBase58(said)?.length === 32 ? [own, said] : [own];
   };
   /**
    * The door a call came through: the provider it was called on, and when it was called on anything else, the
@@ -1183,48 +1201,54 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
    * called on, so `connect.call({})` is a call to Phantom all the same.
    */
   const doorOf = (that: any): LegacyDoor | undefined => (that && typeof that === "object" ? legacyDoors.get(that) : undefined) ?? legacyDoors.get(self());
+  /** Something a page would hand over as a transaction: bytes, or an object that serializes. */
+  const isTx = (x: any): boolean => isBytes(x) || (!!x && typeof x === "object" && typeof x.serialize === "function");
   /** A transaction as bytes is Warden's own copy from here on; as an object it is the page's, and is read again when handed on. */
-  const txOf = (tx: any, who: string): { mine: any; read: () => GuardRequest } => {
-    if (isBytes(tx)) { const mine = ownBytes(tx); return { mine, read: () => ({ kind: "tx", bytes: mine, owner: who }) }; }
-    return { mine: tx, read: () => ({ kind: "tx", bytes: serializeForGuard(tx), owner: who }) };
+  const txOf = (tx: any, who: string[]): { mine: any; read: () => GuardRequest[] } => {
+    if (isBytes(tx)) { const mine = ownBytes(tx); return { mine, read: () => who.map((w) => ({ kind: "tx" as const, bytes: mine, owner: w })) }; }
+    return { mine: tx, read: () => { const bytes = serializeForGuard(tx); return who.map((w) => ({ kind: "tx" as const, bytes, owner: w })); } };
   };
   switch (name) {
     case "signTransaction":
     case "signAndSendTransaction":
       return function (this: any, tx: any, ...rest: any[]) {
         // (Backpack: signTransaction(tx, account, ...); its signAndSendTransaction takes options there, which are not an account)
-        const one = txOf(tx, owner(this, name === "signTransaction" ? rest[0] : undefined));
-        return viaLegacy(doorOf(this), () => [one.read()], () => readingAgain(guard, () => [one.read()], () => run(this, [one.mine, ...rest])));
+        const one = txOf(tx, sides(this, name === "signTransaction" ? rest[0] : undefined));
+        // (asked of a decoy, it is read once: the decoy has one side)
+        return viaLegacy(doorOf(this), () => one.read().slice(0, 1), () => readingAgain(guard, () => one.read(), () => run(this, [one.mine, ...rest]), name));
       };
     case "send":
     case "sendAndConfirm":
       // Backpack's own: (tx, signers, options, connection, account). They sign and send, like signAndSendTransaction.
-      // (another wallet's `send` may be something else entirely, an older way of making any request: left as it is)
+      // Another wallet's `send` may be an older way of making any request, so it is by what is handed over
+      // that this is known for a transaction, and not by which wallet the provider says it is.
       return function (this: any, tx: any, ...rest: any[]) {
-        if (!isBackpack(this)) return run(this, [tx, ...rest]);
-        const one = txOf(tx, owner(this, rest[3]));
-        return viaLegacy(doorOf(this), () => [one.read()], () => readingAgain(guard, () => [one.read()], () => run(this, [one.mine, ...rest])));
+        if (!isTx(tx)) return run(this, [tx, ...rest]);
+        const one = txOf(tx, sides(this, rest[3]));
+        return viaLegacy(doorOf(this), () => one.read().slice(0, 1), () => readingAgain(guard, () => one.read(), () => run(this, [one.mine, ...rest]), name));
       };
     case "signAllTransactions":
     case "signAndSendAllTransactions":
     case "sendAll":
       return function (this: any, txs: any[], ...rest: any[]) {
-        if (name === "sendAll" && !isBackpack(this)) return run(this, [txs, ...rest]);
+        // sendAll takes a list of { tx, signers }; anything else under that name is not a list of transactions, and is left as it is
+        const entryTx = (entry: any) => (name === "sendAll" && entry && typeof entry === "object" && !isBytes(entry) && "tx" in entry ? entry.tx : entry);
+        if (name === "sendAll" && !(Array.isArray(txs) && txs.every((e) => isTx(entryTx(e))))) return run(this, [txs, ...rest]);
         // (the list itself is copied too: nothing can be added to it after it was read)
-        // sendAll takes a list of { tx, signers }: the transaction in each is what is read, and the entry is handed on as it was copied
-        const who = owner(this, name === "sendAll" ? undefined : rest[0]);
+        const who = sides(this, name === "sendAll" ? undefined : rest[0]);
         const all = Array.from(txs ?? []).map((entry) => {
           if (name === "sendAll" && entry && typeof entry === "object" && !isBytes(entry) && "tx" in entry) { const copy = { ...entry }; const t = txOf(copy.tx, who); copy.tx = t.mine; return { mine: copy, read: t.read }; }
           return txOf(entry, who);
         });
-        return viaLegacy(doorOf(this), () => all.map((t) => t.read()), () => readingAgain(guard, () => all.map((t) => t.read()), () => run(this, [all.map((t) => t.mine), ...rest])));
+        return viaLegacy(doorOf(this), () => all.map((t) => t.read()[0]!), () => readingAgain(guard, () => all.flatMap((t) => t.read()), () => run(this, [all.map((t) => t.mine), ...rest]), name));
       };
     case "signMessage":
     case "signOffchainMessage":
       return function (this: any, message: any, ...rest: any[]) {
         const mine = ownMessage(message);
-        const reqs: GuardRequest[] = [{ kind: "msg", bytes: messageBytes(mine), owner: owner(this, name === "signMessage" ? rest[0] : undefined) }];
-        return viaLegacy(doorOf(this), () => reqs, () => guarded(guard, reqs, () => run(this, [mine, ...rest])));
+        const bytes = messageBytes(mine);
+        const reqs: GuardRequest[] = sides(this, name === "signMessage" ? rest[0] : undefined).map((w) => ({ kind: "msg" as const, bytes, owner: w }));
+        return viaLegacy(doorOf(this), () => reqs.slice(0, 1), () => guarded(guard, reqs, () => run(this, [mine, ...rest])));
       };
     case "signIn":
       return function (this: any, input: any, ...rest: any[]) {
@@ -1263,7 +1287,6 @@ function guardMethod(name: string, original: AnyFn, guard: Guard, self: () => an
   }
 }
 
-/** The methods of an injected provider that sign. `send`, `sendAndConfirm` and `sendAll` are Backpack's (and Anchor's) names for signing and sending. */
 export const PROVIDER_METHODS = ["signTransaction", "signAndSendTransaction", "signAllTransactions", "signAndSendAllTransactions", "signMessage", "signOffchainMessage", "signIn", "request", "send", "sendAndConfirm", "sendAll"] as const;
 
 /** A stand-in for an injected provider: for a wallet that assigns its provider, or one whose object cannot be changed. */

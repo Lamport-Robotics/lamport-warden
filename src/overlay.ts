@@ -13,7 +13,7 @@ import type { WireVerdict } from "./messages.js";
 const CSS = `
 :host { all: initial; direction: ltr; unicode-bidi: isolate; }
 .veil { position: fixed; inset: 0; z-index: 2147483647; background: rgba(8, 8, 7, 0.62); display: flex; align-items: center; justify-content: center; font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-.card { width: min(440px, calc(100vw - 32px)); background: #f2eee3; color: #14130f; border-radius: 14px; padding: 20px 20px 16px; box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45); }
+.card { width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; box-sizing: border-box; background: #f2eee3; color: #14130f; border-radius: 14px; padding: 20px 20px 16px; box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45); }
 .tag { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; margin-bottom: 10px; }
 .tag.block { color: #a1260d; } .tag.confirm { color: #8a5a00; } .tag.explain { color: #4a4a40; }
 .sentence { font-size: 16px; margin: 0 0 10px; overflow-wrap: anywhere; white-space: pre-wrap; }

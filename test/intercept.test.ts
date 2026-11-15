@@ -731,7 +731,7 @@ describe("every door that signs", () => {
     expect(b.calls).toEqual(["sendAndConfirm"]);
   });
 
-  it("reads a request from the side of the account Backpack is told to sign with", async () => {
+  it("reads a request from the side of an account named to sign with, as well as from the wallet's own", async () => {
     // Backpack's methods take the account as an argument: a transaction that leaves the active account alone can empty that one
     const second = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
     const r = recorder(), b = backpack(r.guard);
@@ -741,7 +741,44 @@ describe("every door that signs", () => {
     await b.door.send(txOf([4]), [], undefined, undefined, { toBase58: () => second });
     await b.door.signTransaction(txOf([5]));
     await b.door.signTransaction(txOf([6]), "not an account");
-    expect(r.asked.map((a) => a.owner)).toEqual([second, second, second, second, account.address, account.address]);
+    await b.door.signTransaction(txOf([7]), account.address);
+    expect(r.asked.map((a) => [a.bytes[0], a.owner])).toEqual([[1, account.address], [1, second], [2, account.address], [2, second], [3, account.address], [3, second], [4, account.address], [4, second], [5, account.address], [6, account.address], [7, account.address]]);
+    // read harmless from one side and not from the other, it is refused
+    const strict = recorder((q) => q.owner !== second), c = backpack(strict.guard);
+    await expect(c.door.signTransaction(txOf([8]), second)).rejects.toBeInstanceOf(WardenRejected);
+    expect(c.calls).toEqual([]);
+  });
+
+  it("does not ask a provider which wallet it is: a page can make it say anything", async () => {
+    // Phantom's provider is an open object, and Phantom ignores a second argument: it signs as its own account
+    const ATTACKER = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
+    const asked: string[] = [], calls: string[] = [];
+    // (as the worker reads a drain of the owner: harmless from anybody else's side, refused from the owner's)
+    const guard: Guard = async (q) => { asked.push(q.owner); if (q.owner === account.address) throw new WardenRejected(); return { done() {} }; };
+    const phantom: any = { isPhantom: true, publicKey: { toBase58: () => account.address }, signTransaction: async (t: any) => { calls.push("phantom.signTransaction"); return t; } };
+    const win: Record<string, any> = { solana: phantom };
+    installLegacyHook(win, guard);
+    phantom.isBackpack = true; // the page says so
+    await expect(win.solana.signTransaction(txOf([9]), ATTACKER)).rejects.toBeInstanceOf(WardenRejected);
+    expect(asked).toContain(account.address);
+    expect(calls).toEqual([]);
+    // and Backpack made to say it is not Backpack is still stood in front of at its own ways of sending
+    const r = recorder(), b = backpack(r.guard);
+    Object.defineProperty(Object.getPrototypeOf(b.door), "isBackpack", { get: () => false });
+    await b.door.send(txOf([1]), []);
+    await b.door.signTransaction(txOf([2]), "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2");
+    expect(r.asked.map((a) => [a.bytes[0], a.owner])).toEqual([[1, account.address], [2, account.address], [2, "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2"]]);
+  });
+
+  it("asks once about a payment that goes through three of Backpack's doors, and not past the third", async () => {
+    // its Wallet Standard wallet calls its provider's signAndSendTransaction, which calls its own sendAndConfirm
+    const r = recorder(), b = backpack(r.guard);
+    const wallet: any = { name: "Backpack", version: "1.0.0", accounts: [account], features: { "solana:signAndSendTransaction": { version: "1.0.0", signAndSendTransaction: async (...i: any[]) => { await b.door.signAndSendTransaction(txOf([...i[0].transaction])); return [{ signature: new Uint8Array(64) }]; } } } };
+    patchStandardWalletInPlace(wallet, r.guard);
+    await wallet.features["solana:signAndSendTransaction"].signAndSendTransaction({ account, transaction: Uint8Array.of(7, 7) });
+    expect(r.asked).toHaveLength(1);
+    expect(b.calls).toEqual(["sendAndConfirm"]);
+    expect(r.done).toEqual([true]);
   });
 
   it("leaves another wallet's `send` alone: there it may be an older way of making any request", async () => {
@@ -825,9 +862,12 @@ describe("what is read is what there is: forms a request can come in", () => {
     const p = wallet.features["solana:signTransaction"].signTransaction({ account: theirs, transaction: Uint8Array.of(1) });
     theirs.address = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
     await p;
-    await wallet.features["solana:signTransaction"].signTransaction({ account: { address: "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T" }, transaction: Uint8Array.of(2) });
+    // an account the wallet does not list is read as the wallet's own, and handed on as the page gave it: a
+    // wallet that checks refuses it, as it always did
+    const unlisted = { address: "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T" };
+    await wallet.features["solana:signTransaction"].signTransaction({ account: unlisted, transaction: Uint8Array.of(2) });
     expect(got[0]).toBe(mine);
-    expect(got[1]).toBe(mine);
+    expect(got[1]).toBe(unlisted);
     expect(r.asked.map((a) => a.owner)).toEqual([account.address, account.address]);
   });
 });
