@@ -97,7 +97,8 @@ function solflare() {
 
 function backpack() {
   // a frozen container: its own signing calls forward to the provider under .solana
-  const inner: any = { isBackpack: true, publicKey, ...methods("backpack") };
+  // (send and sendAndConfirm are Backpack's own names for signing and sending)
+  const inner: any = { isBackpack: true, publicKey, ...methods("backpack"), send: async (_tx: any) => { called("backpack", "send"); return "hash"; }, sendAndConfirm: async (_tx: any) => { called("backpack", "sendAndConfirm"); return { signature: "hash" }; } };
   const box = Object.freeze({ solana: inner, ethereum: Object.freeze({}) });
   const z = new Proxy(box, { get: (t: any, k) => { if (Reflect.has(t, k)) return Reflect.get(t, k); const v = t.solana[k]; return typeof v === "function" ? v.bind(t.solana) : v; } });
   try { Object.defineProperty(window, "backpack", { value: z }); } catch { /* as Backpack does */ }

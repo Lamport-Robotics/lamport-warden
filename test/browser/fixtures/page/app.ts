@@ -32,7 +32,7 @@ w.__app = {
   accounts: (door: string): string[] => [...(standard(door)?.accounts ?? [])].map((a: any) => String(a.address)),
   count: (name: string) => wallets.get().filter((x) => x.name === name).length,
   /** Starts a signing call and files how it ended under `tag`: "signed", or the error's name. */
-  start(tag: string, door: string, kind: "tx" | "msg" | "send" | "all" | "request" | "signin", payload: any, versioned = false) {
+  start(tag: string, door: string, kind: "tx" | "msg" | "send" | "all" | "request" | "signin" | "backpack-send" | "backpack-sendAndConfirm", payload: any, versioned = false) {
     let p: Promise<unknown>;
     if (door.startsWith("standard:")) {
       // a wallet may register one object per chain under one name: take the one that signs for Solana
@@ -51,6 +51,8 @@ w.__app = {
       else if (kind === "send") p = provider.signAndSendTransaction(txObject(payload as number[], versioned));
       else if (kind === "all") p = provider.signAllTransactions((payload as number[][]).map((t) => txObject(t, versioned)));
       else if (kind === "request") p = provider.request({ method: "signAndSendTransaction", params: { message: payload } });
+      else if (kind === "backpack-send") p = provider.send(txObject(payload as number[], versioned), []);
+      else if (kind === "backpack-sendAndConfirm") p = provider.sendAndConfirm(txObject(payload as number[], versioned), []);
       else p = provider.signTransaction(txObject(payload as number[], versioned));
     }
     results[tag] = "pending";
