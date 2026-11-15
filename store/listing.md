@@ -20,12 +20,15 @@ standing still. It also read a request from the side of an account named at the 
 object said it was Backpack, which a page can make any wallet's object say: **0.7.5 must not be submitted.**
 0.7.6 reads such a request from both sides and asks no wallet what it is; asks once about a Backpack
 payment that goes through three of its doors; and lets a prompt taller than the window scroll. The current
-one is 0.8.0, which adds a decoy first: an experiment, off unless turned on.
+one was 0.7.7: an account named in a call is read once and the wallet is handed what was read; anything
+handed to Backpack's `send` that is not plain text is taken for a transaction; and a transaction is read
+only from the sides that sign it. This branch is 0.8.0, which adds a decoy first: an experiment, off unless
+turned on.
 
 **Before submitting 0.8.0:** `LAMPORT_DECOYS` in `src/defaults.ts` is empty, so a decoy is shown only to
 somebody who names an address themselves. The description below says only that a site "is handed a decoy's
 address". If the list is still empty when this is submitted, add to that paragraph that the address is one
-the user names in the settings. (0.7.6 is the version to submit if the decoy is not ready: package it from
+the user names in the settings. (0.7.7 is the version to submit if the decoy is not ready: package it from
 `main`.)
 
 To submit 0.8.0:
