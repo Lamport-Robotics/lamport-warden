@@ -41,10 +41,15 @@ describe("the terms", () => {
     // the two lines that do not depend on the amount are the same for any amount
     expect(burnTerms("25000", 3).slice(1)).toEqual([...BURN_TERMS]);
     const prepaid = read("sentinel", "service", "src", "prepaid.ts");
-    // final, the same number for everyone, and burns that add up: what the code does
-    expect(text).toContain("A burn counts when the chain has made it final. Burns that name the same amount shown add up, and the plan starts when they come to at least that amount.");
-    expect(prepaid).toContain("(burnedSoFar += here)");
+    // final, the signer's own tokens, the same number for everyone, and looked for by the service: what the code does
+    expect(text).toContain("A burn counts when the chain has made it final, and only tokens that the wallet signing it held itself count. The service looks for it while the Sentinel page is open, and by itself every hour for three days after, so it does not depend on the page staying open.");
+    expect(prepaid).toContain('for (const tx of await this.naming(intent, signatures, "finalized"))');
+    expect(prepaid).toContain("else if (signers.has(was.owner)) fell += was.amount - now;");
     expect(prepaid).toContain("BigInt(this.cfg.burn!.perMonth) * BigInt(months)");
+    expect(prepaid).toContain("SWEEP_SECONDS = 3 * 86_400");
+    expect(read("sentinel", "service", "src", "main.ts")).toContain("await prepaid.sweep()");
+    // short counts toward it, and more than the amount pays for the months again
+    expect(prepaid).toContain("while (BigInt(intent.counted ?? \"0\") >= want)");
     expect(text).toContain("A payment made by burning $LAMPORT is the exception: there is nothing left of it to send back, at any time.");
     expect(text).toContain("not a promise about what it is worth");
   });

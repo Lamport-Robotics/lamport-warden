@@ -1,7 +1,8 @@
 /**
  * The Sentinel page: sign in with a wallet, choose where alerts go, answer them, and link Warden.
  *
- * It holds nothing beyond the session: the session token lives in this tab's sessionStorage and goes out as
+ * It holds nothing beyond the session (and, for a payment this tab sent, its signature, so that a reload
+ * can still look for it): the session token lives in this tab's sessionStorage and goes out as
  * a bearer header, never as a cookie. Every piece of text that came from the server or a wallet is put on
  * the page with textContent, and the page's policy (index.html) lets no script run but this one.
  */
@@ -23,7 +24,7 @@ interface RescueInfo { available: boolean; on: boolean; plan: boolean; auto: boo
 interface TokenView { account: string; mint: string; amount: string; decimals: number }
 interface RescueStanding { armed: boolean; ours: boolean; vault: string | null; rescuers: "lamport" | "own" | null; covered: TokenView[]; uncovered: (TokenView & { why: "not set up" | "frozen" | "cannot be moved"; other?: string })[] }
 type Plan = { enabled: false } | { enabled: true; checkoutOpen: boolean; tier: string; subscribed: boolean; status: string | null; price: "full" | "holder"; cents: number; centsFull: number; centsHolder: number; holder: boolean; holderMin: number; renewsAt: number | null; endsAt: number | null; paidUntil?: number | null; crypto?: { payTo: string; assets: ("USDC" | "SOL" | "LAMPORT")[]; months: number[]; burn?: { perMonth: number } } | null };
-type PayQuote = { reference: string; payTo: string; asset: "USDC" | "SOL" | "LAMPORT"; units: string; decimals: number; months: number; cents: number; expiresAt: number; url: string; burned?: true };
+type PayQuote = { reference: string; payTo: string; asset: "USDC" | "SOL" | "LAMPORT"; units: string; decimals: number; months: number; cents: number; expiresAt: number; url: string; burned?: true; counted?: string };
 type Hello = Extract<PageAnswer, { type: "hello" }>;
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -503,31 +504,75 @@ function payAhead(offer: NonNullable<Extract<Plan, { enabled: true }>["crypto"]>
   return box;
 }
 
+const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+/** Bytes as base58, the way a transaction's signature is written. */
+function base58(bytes: Uint8Array): string {
+  let n = 0n;
+  for (const b of bytes) n = (n << 8n) | BigInt(b);
+  let out = "";
+  for (; n > 0n; n /= 58n) out = B58[Number(n % 58n)] + out;
+  for (const b of bytes) { if (b !== 0) break; out = "1" + out; }
+  return out;
+}
+const SIGNATURE = /^[1-9A-HJ-NP-Za-km-z]{64,88}$/;
+/** The payments this tab sent for a quote, by signature: kept for the tab, so that a reload can still look for them. */
+function sentFor(reference: string): string[] {
+  try { const kept = JSON.parse(sessionStorage.getItem(`sentinel:sent:${reference}`) ?? "[]"); return Array.isArray(kept) ? kept.filter((x) => typeof x === "string" && SIGNATURE.test(x)).slice(-5) : []; } catch { return []; }
+}
+function keepSent(reference: string, sent: string[]): void {
+  try { sessionStorage.setItem(`sentinel:sent:${reference}`, JSON.stringify(sent.slice(-5))); } catch { /* the service looks by itself too */ }
+}
+
 function quoted(out: HTMLElement, q: PayQuote): void {
   const amount = `${(q.burned ? grouped : decimal)(BigInt(q.units), q.decimals)} ${q.asset}`;
-  const line = el("p", q.burned ? `This burns exactly ${amount}. It is not sent to anybody.` : `Send exactly ${amount} to `, "plain");
+  const already = q.burned && q.counted && BigInt(q.counted) > 0n ? ` So far ${grouped(BigInt(q.counted), q.decimals)} of it has been burned: paying burns only the rest.` : "";
+  const line = el("p", q.burned ? `This burns exactly ${amount}. It is not sent to anybody.${already}` : `Send exactly ${amount} to `, "plain");
   if (!q.burned) line.append(el("code", q.payTo, "addr"));
   const terms = el("ul", "", "terms");
   terms.append(...(q.burned ? burnTerms(grouped(BigInt(q.units), q.decimals), q.months) : prepaidTerms(q.cents, q.months)).map((t) => el("li", t)));
   if (q.asset === "SOL") terms.append(el("li", `This price in SOL holds for ten minutes, until ${new Date(q.expiresAt * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}. Paid later than that, it is not counted: ask for the amount again.`));
   const status = el("p", "", "soft");
+  const sent = sentFor(q.reference);
+  // A payment made somewhere else is found by what names this quote on the chain. Its signature finds it whatever else is there.
+  const byHand = el("input");
+  byHand.placeholder = "The transaction's signature, if you have it"; byHand.setAttribute("aria-label", "Transaction signature"); byHand.autocomplete = "off"; byHand.spellcheck = false;
+  const known = () => { const typed = byHand.value.trim(); return SIGNATURE.test(typed) ? [...sent, typed] : sent; };
   const look = el("button", "I have paid: look for it", "small");
-  look.addEventListener("click", () => void watchFor(q, status, 1));
+  look.addEventListener("click", () => void watchFor(q, status, 1, known()));
   // a wallet in this browser can be handed the payment ready-made; any other wallet opens the request below
   const pays = el("div", "", "choices");
+  const hold = (on: boolean) => { for (const x of Array.from(pays.querySelectorAll("button"))) x.disabled = on; };
   for (const w of (registry.get() as unknown as AnyWallet[]).filter((x) => "standard:connect" in x.features && "solana:signAndSendTransaction" in x.features && x.chains.some((c) => c.startsWith("solana:")))) {
     const b = el("button", `Pay with ${w.name}`, "solid");
     b.addEventListener("click", async () => {
-      b.disabled = true;
+      hold(true);
+      /** True from the moment the wallet is handed the payment: after that, nothing here may say that nothing was sent. */
+      let handed = false;
       try {
         const { accounts } = await w.features["standard:connect"].connect();
         const account = accounts[0];
         if (!account) throw new Error("the wallet gave no account");
         const made = await call("POST", "/billing/crypto/transaction", { reference: q.reference, payer: account.address });
         if (made.status !== 200 || typeof made.body?.transaction !== "string") { say(String(made.body?.error ?? "That did not work."), true); return; }
-        await w.features["solana:signAndSendTransaction"].signAndSendTransaction({ account, chain: "solana:mainnet", transaction: Uint8Array.from(atob(made.body.transaction), (c) => c.charCodeAt(0)) });
-        void watchFor(q, status, 36);
-      } catch { say("The wallet did not send it. Nothing was paid.", true); } finally { b.disabled = false; }
+        let answer: unknown;
+        handed = true;
+        try {
+          answer = await w.features["solana:signAndSendTransaction"].signAndSendTransaction({ account, chain: "solana:mainnet", transaction: Uint8Array.from(atob(made.body.transaction), (c) => c.charCodeAt(0)) });
+        } catch {
+          // A wallet that says no has sent nothing. One that failed after it sent has, and nothing here can
+          // tell the two apart: so it is looked for before anybody is asked to pay again.
+          say(q.burned ? "The wallet did not say it sent anything. If you approved it there, do not burn again: it is being looked for." : "The wallet did not say it sent anything. If you approved it there, do not pay again: it is being looked for.", true);
+          await watchFor(q, status, 5, known());
+          return;
+        }
+        const signature = (Array.isArray(answer) ? answer[0] : answer)?.signature;
+        if (signature instanceof Uint8Array && signature.length === 64) { sent.push(base58(signature)); keepSent(q.reference, sent); }
+        // nothing more is handed to a wallet for this quote while the payment just sent is being looked for
+        await watchFor(q, status, 36, known());
+      } catch {
+        if (handed) status.textContent = "That could not be looked up just now. If the wallet sent it, it is not lost: look for it with the button below.";
+        else say("That did not work. The wallet was not asked for anything.", true);
+      } finally { hold(false); }
     });
     pays.append(b);
   }
@@ -535,25 +580,28 @@ function quoted(out: HTMLElement, q: PayQuote): void {
   const request = el("input");
   request.readOnly = true; request.value = q.url; request.setAttribute("aria-label", "Payment request"); request.addEventListener("focus", () => request.select());
   phone.append(request);
+  const found = el("p", "", "soft");
+  found.append(look, document.createTextNode(" "), byHand);
   // (a burn is made from a wallet in this browser: a payment request can only ask a wallet for a transfer)
-  if (q.burned) out.replaceChildren(line, terms, pays, look, status); else out.replaceChildren(line, terms, pays, phone, look, status);
+  if (q.burned) out.replaceChildren(line, terms, pays, found, status); else out.replaceChildren(line, terms, pays, phone, found, status);
   out.hidden = false;
 }
 
-/** Asks the service whether the payment has arrived, every five seconds, so many times. A payment counts when the chain has made it final, which takes about a quarter of a minute. */
-async function watchFor(q: PayQuote, status: HTMLElement, times: number): Promise<void> {
+/** Asks the service whether the payment has arrived, every five seconds, so many times. A payment counts when the chain has made it final, which takes about a quarter of a minute. `signatures`: the payments this page knows were sent for it. */
+async function watchFor(q: PayQuote, status: HTMLElement, times: number, signatures: string[] = []): Promise<void> {
   for (let i = 0; i < times; i++) {
     status.textContent = "Looking for the payment on the chain…";
-    const r = await call("POST", "/billing/crypto/check", { reference: q.reference });
+    const r = await call("POST", "/billing/crypto/check", { reference: q.reference, signatures: signatures.slice(-5) });
     const s = r.status === 200 ? r.body?.status : null;
     if (s === "paid") { status.textContent = ""; say(`Paid. Your plan runs until ${dayOf(Number(r.body.until))}.`); await refresh(); return; }
-    if (s === "short" && q.burned) { status.textContent = `So far ${grouped(BigInt(r.body.arrived), q.decimals)} LAMPORT of ${grouped(BigInt(r.body.wanted), q.decimals)} has been burned for this. Burns that name it add up: when the rest is burned, it counts.`; return; }
+    // a burn that is short is counted, and stays counted: the next one from this page burns only what is still owed
+    if (s === "short" && q.burned) { if (i < times - 1 && times > 1) { await new Promise((res) => setTimeout(res, 5000)); continue; } status.textContent = `So far ${grouped(BigInt(r.body.arrived), q.decimals)} LAMPORT of ${grouped(BigInt(r.body.wanted), q.decimals)} has been burned for this. Pay again and only the rest is burned.`; return; }
     if (s === "short") { status.textContent = `A payment arrived that is short: ${decimal(BigInt(r.body.arrived), q.decimals)} ${q.asset} of ${decimal(BigInt(r.body.wanted), q.decimals)}. Nothing was started. Write to support@lamportrobotics.com from the Terms page to have it sent back, or send the full amount.`; return; }
     if (s === "late") { status.textContent = "A payment arrived after this price in SOL had run out, so it was not counted. Write to support@lamportrobotics.com to have it sent back or counted."; return; }
     if (r.status !== 200) { status.textContent = String(r.body?.error ?? "That could not be looked up just now."); return; }
     if (i < times - 1) await new Promise((res) => setTimeout(res, 5000));
   }
-  status.textContent = "Not there yet. A payment counts once the chain has made it final; look again in a minute.";
+  status.textContent = "Not there yet. A payment counts once the chain has made it final; look again in a minute. The service also looks by itself every hour, and tells your alert channels when it finds it.";
 }
 
 function plans(mine: Me): void {

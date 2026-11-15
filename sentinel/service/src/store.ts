@@ -146,7 +146,13 @@ export interface Payment { signature: string; asset: PayAsset; units: string; mo
  * An amount a profile was quoted, and the address that marks the payment as this one (a "reference": an
  * address nobody holds, named in the paying transaction and in no other).
  */
-export interface PayIntent { reference: string; profile: string; asset: PayAsset; units: string; months: number; cents: number; createdAt: number; expiresAt: number; paidBy?: string }
+export interface PayIntent {
+  reference: string; profile: string; asset: PayAsset; units: string; months: number; cents: number; createdAt: number; expiresAt: number; paidBy?: string;
+  /** For a burn: the token that was quoted, and what has been burned for this quote and not yet used to pay (smallest units). */
+  mint?: string; counted?: string;
+  /** When a payment for it was last built or looked for: such a quote is looked for by the service too (prepaid.ts, sweep). */
+  askedAt?: number;
+}
 /** Which profile a watched wallet belongs to, and the hash of the token its owner's browser reports with. */
 export interface WalletOwner {
   profile: string; addedAt: number; reportTokenHash?: string;

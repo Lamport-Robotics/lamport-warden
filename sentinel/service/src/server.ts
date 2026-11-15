@@ -305,7 +305,7 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
         const made = await deps.prepaid.transaction(session, field(req.body, "reference"), field(req.body, "payer"));
         return made.ok ? ok({ transaction: made.transaction }) : no(made.status, made.why);
       }
-      const r = await deps.prepaid.check(session, field(req.body, "reference"));
+      const r = await deps.prepaid.check(session, field(req.body, "reference"), field(req.body, "signatures"));
       return r.ok ? ok(r.result) : no(r.status, r.why);
     }
     if (route === "POST /billing/checkout" || route === "POST /billing/portal") {

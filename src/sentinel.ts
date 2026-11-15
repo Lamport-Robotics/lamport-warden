@@ -74,7 +74,13 @@ export type SentinelReading =
   /** Nothing of Sentinel's here, or not exactly one of its shapes: the engine's verdict stands. */
   | { kind: "none" }
   /** A Sentinel transaction. `after` is what to remember once it is signed: a state, or null to forget. */
-  | { kind: "verdict"; verdict: WardenVerdict; after?: SentinelState | null };
+  | { kind: "verdict"; verdict: WardenVerdict; after?: SentinelState | null }
+  /**
+   * Something the engine reads rightly and says poorly. The engine's verdict stands: where it comes to no
+   * more than an explanation, this sentence is shown in place of the engine's. It never makes a verdict
+   * milder, so whatever the engine would confirm or block is confirmed or blocked in the engine's words.
+   */
+  | { kind: "wording"; sentence: string };
 
 const short = (a: string) => (a.length > 12 ? `${a.slice(0, 4)}…${a.slice(-4)}` : a);
 const last4 = (a: string) => a.slice(-4);
@@ -151,10 +157,14 @@ export function wholeTokens(units: bigint, decimals: number): string {
  *
  * It says what the transaction does and no more. Whether the Sentinel service then counts it as a payment is
  * the service's business, and nothing here can check it. And it is always asked about: a burn is for good.
+ *
+ * It is wording only (judge.ts). The burn has to be the one instruction in the transaction, with no fee
+ * setting beside it, and the engine still judges the whole: a fee the engine would stop at is stopped at.
  */
-function burnPayment(parsed: ParsedTx, rest: ParsedInstruction[], owner: string): SentinelReading | null {
-  if (rest.length !== 1) return null;
-  const ix = rest[0]!;
+function burnPayment(parsed: ParsedTx, owner: string): SentinelReading | null {
+  // nothing beside it, not even a fee setting: the service's transaction has none, and a fee is money too
+  if (parsed.instructions.length !== 1 || parsed.priorityLamports !== 0n) return null;
+  const ix = parsed.instructions[0]!;
   // BurnChecked: [the account burned from, the token, its owner], then the reference the payment is found by. u64 amount, u8 decimals.
   if (ix.program !== TOKEN_2022 || ix.data[0] !== 15 || ix.data.length !== 10 || ix.accounts.length !== 4) return null;
   const amount = u64(ix.data, 1);
@@ -162,15 +172,7 @@ function burnPayment(parsed: ParsedTx, rest: ParsedInstruction[], owner: string)
   // the owner's own account of the token, and not one that somebody let this wallet spend from
   const own = PublicKey.findProgramAddressSync([new PublicKey(owner).toBytes(), new PublicKey(TOKEN_2022).toBytes(), new PublicKey(LAMPORT_MINT).toBytes()], new PublicKey(ASSOCIATED_TOKEN_PROGRAM))[0].toBase58();
   if (ix.accounts[0] !== own) return null;
-  return {
-    kind: "verdict",
-    verdict: {
-      level: "explain",
-      sentence: `Burns ${wholeTokens(amount, LAMPORT_DECIMALS)} LAMPORT from this wallet. That is how the Sentinel page takes payment in LAMPORT. The tokens are destroyed: nobody receives them, and nobody can bring them back.`,
-      reasons: [],
-      parsed,
-    },
-  };
+  return { kind: "wording", sentence: `Burns ${wholeTokens(amount, LAMPORT_DECIMALS)} LAMPORT from this wallet. That is how the Sentinel page takes payment in LAMPORT. The tokens are destroyed: nobody receives them, and nobody can bring them back.` };
 }
 
 const block = (sentence: string, reason: string, parsed: ParsedTx): SentinelReading => ({ kind: "verdict", verdict: { level: "block", sentence, reasons: [reason], parsed } });
@@ -202,7 +204,7 @@ export function readSentinel(parsed: ParsedTx, owner: string, origin: string, st
 
   // ── no call to the program: arming more token accounts, or one rung of the SOL ladder ──
   if (calls.length === 0) {
-    const burn = burnPayment(parsed, rest, owner);
+    const burn = burnPayment(parsed, owner);
     if (burn) return burn;
     if (!state) return { kind: "none" };
     const delegate = delegateAddress(owner, state.vault);

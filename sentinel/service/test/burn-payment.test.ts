@@ -11,7 +11,7 @@ import { LAMPORT_MINT, configFrom } from "../src/main.js";
 import { Accounts } from "../src/accounts.js";
 import { burnTerms, grouped } from "../src/plans.js";
 import { wholeTokens } from "../../../src/sentinel.js";
-import { Prepaid, USDC_QUOTE_SECONDS, burned, tokenAccountOf } from "../src/prepaid.js";
+import { Prepaid, USDC_QUOTE_SECONDS, burned, signersOf, tokenAccountOf } from "../src/prepaid.js";
 import { fromRpc } from "../src/observed.js";
 import type { Rpc } from "../src/rpc.js";
 import { judge } from "../../../src/judge.js";
@@ -27,50 +27,63 @@ const MINT = new PublicKey(LAMPORT_MINT);
 const TOKENS = (n: number) => BigInt(n) * 1_000_000n; // six decimals, as the token has
 
 class Chain implements Rpc {
-  txs: { signature: string; names: string[]; failed: boolean; result: any }[] = [];
+  txs: { signature: string; names: string[]; failed: boolean; final: boolean; listed: boolean; result: any }[] = [];
   holds: Record<string, bigint> = {};
   asked: string[] = [];
   mintAnswers: any = { value: { owner: TOKEN_2022.toBase58(), data: { parsed: { info: { decimals: 6 } } } } };
+  /** The RPC is not answering about balances. */
+  down = false;
+  /** How long reading one transaction takes, so that looks made at once overlap. */
+  slow = 0;
   private n = 0;
 
-  /** A transaction that names `references` and leaves these balances of a token: [account's owner, before, after] for each account it touched. */
-  did(o: { references: string[]; balances: [string, bigint, bigint][]; mint?: string; failed?: boolean }): string {
+  /**
+   * A transaction signed by `payer` that names `references` and leaves these balances of a token: [account's
+   * owner, before, after] for each account it touched. `final: false`: on the chain, not yet final.
+   * `listed: false`: the chain's list for an address does not show it (it is found by its signature only).
+   */
+  did(o: { references: string[]; balances: [string, bigint, bigint][]; mint?: string; failed?: boolean; final?: boolean; listed?: boolean }): string {
     const accounts = o.balances.map(() => Keypair.generate().publicKey);
     const keys = [{ pubkey: payer, isSigner: true, isWritable: true }, ...accounts.map((pubkey) => ({ pubkey, isSigner: false, isWritable: true })), ...o.references.map((r) => ({ pubkey: new PublicKey(r), isSigner: false, isWritable: false }))];
     const tx = new Transaction({ feePayer: payer, recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" }).add(new TransactionInstruction({ programId: MEMO, keys, data: Buffer.from("x") }));
     const names = tx.compileMessage().accountKeys.map((k) => k.toBase58());
     const lamports = names.map(() => 1_000_000_000);
     const side = (which: 1 | 2) => o.balances.map((b, i) => ({ accountIndex: names.indexOf(accounts[i]!.toBase58()), mint: o.mint ?? LAMPORT_MINT, owner: b[0], uiTokenAmount: { amount: (o.failed ? b[1] : b[which]).toString(), decimals: 6 } }));
-    const signature = `burn${String(++this.n).padStart(4, "0")}`;
-    this.txs.push({ signature, names, failed: !!o.failed, result: { slot: 1000 + this.n, blockTime: T0, transaction: [Buffer.from(tx.serialize({ requireAllSignatures: false, verifySignatures: false })).toString("base64"), "base64"], meta: { err: o.failed ? { InstructionError: [0, "Custom"] } : null, fee: 5000, preBalances: lamports, postBalances: lamports, preTokenBalances: side(1), postTokenBalances: side(2) } } });
+    // a real signature is 64 bytes in base58: the service takes nothing else for one
+    const signature = bs58(Buffer.concat([Buffer.alloc(60, 7), Buffer.from(new Uint32Array([++this.n]).buffer)]));
+    this.txs.push({ signature, names, failed: !!o.failed, final: o.final !== false, listed: o.listed !== false, result: { slot: 1000 + this.n, blockTime: T0, transaction: [Buffer.from(tx.serialize({ requireAllSignatures: false, verifySignatures: false })).toString("base64"), "base64"], meta: { err: o.failed ? {} : null, fee: 5000, preBalances: lamports, postBalances: lamports, preTokenBalances: side(1), postTokenBalances: side(2) } } });
     return signature;
   }
+  /** The chain makes a transaction final. */
+  finalize(signature: string): void { this.txs.find((t) => t.signature === signature)!.final = true; }
 
   async call(method: string, params: any[]): Promise<any> {
     this.asked.push(method);
-    if (method === "getSignaturesForAddress") return this.txs.filter((t) => t.names.includes(params[0])).reverse().map((t) => ({ signature: t.signature, err: t.failed ? {} : null }));
-    if (method === "getTransaction") return this.txs.find((t) => t.signature === params[0])?.result ?? null;
+    const seen = (t: { final: boolean }, commitment: unknown) => commitment !== "finalized" || t.final;
+    if (method === "getSignaturesForAddress") return this.txs.filter((t) => t.listed && t.names.includes(params[0]) && seen(t, params[1]?.commitment)).reverse().slice(0, params[1]?.limit ?? 1000).map((t) => ({ signature: t.signature, err: t.failed ? {} : null }));
+    if (method === "getTransaction") { if (this.slow) await new Promise((r) => setTimeout(r, this.slow)); return this.txs.find((t) => t.signature === params[0] && seen(t, params[1]?.commitment))?.result ?? null; }
     if (method === "getAccountInfo") return this.mintAnswers;
-    if (method === "getTokenAccountBalance") { if (!(params[0] in this.holds)) throw new Error("could not find account"); return { value: { amount: String(this.holds[params[0]]) } }; }
+    if (method === "getTokenAccountBalance") { if (this.down) throw new Error("timed out"); if (!(params[0] in this.holds)) throw new Error("Invalid param: could not find account"); return { value: { amount: String(this.holds[params[0]]) } }; }
     if (method === "getLatestBlockhash") return { value: { blockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" } };
     throw new Error(`unexpected ${method}`);
   }
 }
+const bs58 = (bytes: Uint8Array): string => new PublicKey(bytes.subarray(0, 32)).toBase58().padEnd(44, "1") + new PublicKey(bytes.subarray(32, 64)).toBase58().padEnd(44, "1");
 
 function setup(o: { perMonth?: number | null; holder?: () => Promise<boolean> } = {}) {
   const accounts = new Accounts(new MemoryStore(), Buffer.alloc(32, 9));
   const chain = new Chain();
   const said: string[] = [];
-  const now = T0;
-  const prepaid = new Prepaid({ payTo: PAY_TO, ...(o.perMonth === null ? {} : { burn: { mint: LAMPORT_MINT, perMonth: o.perMonth ?? 25_000 } }) }, accounts, chain,
-    { sells: () => true, holder: o.holder ?? (async () => false), byCard: () => false, centsFull: 1500, centsHolder: 1000 },
-    { now: () => now, notice: async (_p, sentence) => { said.push(sentence); } });
-  const admitted = accounts.admit(A, null, T0);
-  if (!admitted.ok) throw new Error("setup");
-  const profile = admitted.profile;
-  const quoted = async (months = 1) => { const r = await prepaid.quote(profile, "LAMPORT", months); if (!r.ok) throw new Error(r.why); return r.quote; };
-  const check = async (reference: string) => { const r = await prepaid.check(profile, reference); if (!r.ok) throw new Error(r.why); return r.result; };
-  return { accounts, chain, prepaid, said, profile, quoted, check };
+  let now = T0;
+  const selling = { sells: () => true, holder: o.holder ?? (async () => false), byCard: () => false, centsFull: 1500, centsHolder: 1000 };
+  const made = (cfg: { burn?: { mint: string; perMonth: number } }) => new Prepaid({ payTo: PAY_TO, ...cfg }, accounts, chain, selling, { now: () => now, notice: async (_p, sentence) => { said.push(sentence); } });
+  const prepaid = made(o.perMonth === null ? {} : { burn: { mint: LAMPORT_MINT, perMonth: o.perMonth ?? 25_000 } });
+  const admit = (n: number) => { const r = accounts.admit(key(n).toBase58(), null, T0); if (!r.ok) throw new Error("setup"); return r.profile; };
+  const profile = admit(1);
+  const quoted = async (months = 1, of = profile) => { const r = await prepaid.quote(of, "LAMPORT", months); if (!r.ok) throw new Error(r.why); return r.quote; };
+  const check = async (reference: string, signatures?: string[], of = profile) => { const r = await prepaid.check(of, reference, signatures); if (!r.ok) throw new Error(r.why); return r.result; };
+  const months = (of = profile) => (accounts.profile(of)?.prepaid?.payments ?? []).reduce((sum, p) => sum + p.months, 0);
+  return { accounts, chain, prepaid, said, profile, quoted, check, admit, made, months, later: (seconds: number) => { now += seconds; } };
 }
 
 describe("paying by burning, when it is not turned on", () => {
@@ -106,6 +119,26 @@ describe("an amount to burn", () => {
     expect(s.chain.asked.filter((m) => m === "getAccountInfo")).toHaveLength(1);
   });
 
+  it("is the same quote again while it stands and is not paid, so a page opened again has the reference it had", async () => {
+    const s = setup();
+    const first = await s.quoted(1);
+    expect((await s.quoted(1)).reference).toBe(first.reference);
+    // another number of months is another quote
+    expect((await s.quoted(3)).reference).not.toBe(first.reference);
+    // paid, it is finished: the next one is new
+    s.chain.did({ references: [first.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    expect((await s.check(first.reference)).status).toBe("paid");
+    expect((await s.quoted(1)).reference).not.toBe(first.reference);
+  });
+
+  it("is not forgotten for being one of many: twenty-five quotes later it is still there to be looked for", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    for (let i = 0; i < 25; i++) { const r = await s.prepaid.quote(s.profile, "USDC", 1); if (!r.ok) throw new Error(r.why); }
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    expect((await s.check(q.reference)).status).toBe("paid");
+  });
+
   it("is the same for everybody: it is not a price in dollars, so no wallet's balance is read to find a lower one", async () => {
     const s = setup({ holder: async () => { throw new Error("the RPC is down"); } });
     expect((await s.quoted(1)).units).toBe(TOKENS(25_000).toString());
@@ -119,10 +152,13 @@ describe("an amount to burn", () => {
     expect(await s.prepaid.quote(s.profile, "LAMPORT", 1)).toMatchObject({ ok: false, status: 502 });
   });
 
-  it("is not quoted for a token that keeps a fee on transfers: a transfer of one would look like a small burn", async () => {
+  it("is not quoted for a token with more to it than a name and a picture: a fee kept on transfers, or balances kept out of sight, would look like a burn", async () => {
+    for (const extension of ["transferFeeConfig", "confidentialTransferMint", "transferHook", "somethingNew"]) {
+      const s = setup();
+      s.chain.mintAnswers = { value: { owner: TOKEN_2022.toBase58(), data: { parsed: { info: { decimals: 6, extensions: [{ extension: "tokenMetadata", state: {} }, { extension, state: {} }] } } } } };
+      expect(await s.prepaid.quote(s.profile, "LAMPORT", 1), extension).toMatchObject({ ok: false, status: 502 });
+    }
     const s = setup();
-    s.chain.mintAnswers = { value: { owner: TOKEN_2022.toBase58(), data: { parsed: { info: { decimals: 6, extensions: [{ extension: "transferFeeConfig", state: {} }] } } } } };
-    expect(await s.prepaid.quote(s.profile, "LAMPORT", 1)).toMatchObject({ ok: false, status: 502 });
     // and the token as it is, with its name and picture and nothing else, is
     s.chain.mintAnswers = { value: { owner: TOKEN_2022.toBase58(), data: { parsed: { info: { decimals: 6, extensions: [{ extension: "metadataPointer", state: {} }, { extension: "tokenMetadata", state: {} }] } } } } };
     expect((await s.quoted(1)).units).toBe(TOKENS(25_000).toString());
@@ -162,17 +198,46 @@ describe("the burn handed to a wallet", () => {
     expect(verdict.sentence).toBe("Burns 75,000 LAMPORT from this wallet. That is how the Sentinel page takes payment in LAMPORT. The tokens are destroyed: nobody receives them, and nobody can bring them back.");
   });
 
-  it("is not made for a wallet that does not hold the amount", async () => {
+  it("is not made for a wallet that does not hold the amount, and a chain that does not answer is not taken for an empty wallet", async () => {
     const s = setup();
     const q = await s.quoted(1);
-    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 409, why: "that wallet holds 0 LAMPORT, and this burns 25,000." });
+    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 409, why: "that wallet's own LAMPORT account holds 0, and this burns 25,000." });
     s.chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(24_999);
-    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 409, why: "that wallet holds 24,999 LAMPORT, and this burns 25,000." });
+    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 409, why: "that wallet's own LAMPORT account holds 24,999, and this burns 25,000." });
+    s.chain.down = true;
+    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 502, why: "the chain could not be read just now. Try again in a minute." });
+  });
+
+  const amountOf = (transaction: string) => Transaction.from(Buffer.from(transaction, "base64")).instructions[0]!.data.readBigUInt64LE(1);
+
+  it("is only for what is still owed: what was counted toward the quote is not burned again", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    s.chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(300_000);
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(290_000)]] });
+    expect(await s.check(q.reference)).toEqual({ status: "short", arrived: TOKENS(10_000).toString(), wanted: TOKENS(25_000).toString() });
+    const rest = await s.prepaid.transaction(s.profile, q.reference, payer.toBase58());
+    if (!rest.ok) throw new Error(rest.why);
+    expect(amountOf(rest.transaction)).toBe(TOKENS(15_000));
+    // and the quote, asked for again, says how much of it is burned already
+    expect((await s.quoted(1)).counted).toBe(TOKENS(10_000).toString());
+  });
+
+  it("is not made a second time while the first is on the chain and not yet final", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    s.chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(300_000);
+    const sent = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]], final: false });
+    expect(await s.check(q.reference)).toEqual({ status: "waiting" });
+    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 409, why: "the burn for this has been sent already. It counts once the chain has made it final: look for it in a minute." });
+    s.chain.finalize(sent);
+    expect((await s.check(q.reference)).status).toBe("paid");
+    expect(await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 409, why: "that amount has been paid." });
   });
 });
 
 describe("a burn", () => {
-  it("is counted when the chain shows that much less of the token after a transaction that names the quote", async () => {
+  it("is counted when the chain shows that much less of the signer's own tokens after a transaction that names the quote", async () => {
     const s = setup();
     const q = await s.quoted(1);
     expect(await s.check(q.reference)).toEqual({ status: "waiting" });
@@ -202,24 +267,70 @@ describe("a burn", () => {
     expect(s.accounts.profile(s.profile)?.tier).toBe("watch");
   });
 
+  it("has to be of the signer's own tokens: what anyone may burn, or a delegate burned of somebody else's, pays for nothing", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    const INCINERATOR = "1nc1nerator11111111111111111111111111111111", SYSTEM = "11111111111111111111111111111111", victim = key(81).toBase58();
+    // tokens left in an account the token program lets anyone burn from
+    s.chain.did({ references: [q.reference], balances: [[INCINERATOR, TOKENS(25_000), 0n]] });
+    s.chain.did({ references: [q.reference], balances: [[SYSTEM, TOKENS(25_000), 0n]] });
+    // somebody else's tokens, burned by a wallet that was let spend them
+    s.chain.did({ references: [q.reference], balances: [[victim, TOKENS(300_000), TOKENS(275_000)]] });
+    // the signer's own tokens moved to another wallet of theirs, beside a burn of what was nobody's: the signer lost nothing
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)], [key(82).toBase58(), 0n, TOKENS(25_000)], [INCINERATOR, TOKENS(25_000), 0n]] });
+    expect(await s.check(q.reference)).toEqual({ status: "waiting" });
+    expect(s.accounts.profile(s.profile)?.tier).toBe("watch");
+    // counted exactly: the signer's own burn, less what the signer was sent in the same transaction
+    const sig = s.chain.did({ references: [key(5).toBase58()], balances: [[payer.toBase58(), 100n, 40n], [key(6).toBase58(), 7n, 17n], [victim, 50n, 0n]] });
+    const tx = fromRpc(sig, s.chain.txs.at(-1)!.result)!;
+    expect(signersOf(tx)).toEqual([payer.toBase58()]);
+    expect(burned(tx, LAMPORT_MINT)).toBe(50n); // sixty left the signer's account, ten arrived in another; the fifty of somebody else's are not the signer's
+    expect(burned(tx, key(9).toBase58())).toBe(0n);
+  });
+
   it("that is short is said to be short, and is not lost: burns that name the same quote add up, since none of it can be sent back", async () => {
     const s = setup();
     const q = await s.quoted(1);
     const first = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(290_000)]] });
     expect(await s.check(q.reference)).toEqual({ status: "short", arrived: TOKENS(10_000).toString(), wanted: TOKENS(25_000).toString() });
     expect(s.accounts.profile(s.profile)?.tier).toBe("watch");
+    // counted, it is spent: it can count toward nothing else from that moment
+    expect(s.accounts.credited(first)).toBe(true);
     const second = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(290_000), TOKENS(280_000)]] });
     expect(await s.check(q.reference)).toEqual({ status: "short", arrived: TOKENS(20_000).toString(), wanted: TOKENS(25_000).toString() });
     const third = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(280_000), TOKENS(275_000)]] });
     expect((await s.check(q.reference)).status).toBe("paid");
     expect(s.accounts.profile(s.profile)?.prepaid?.payments).toEqual([{ signature: third, asset: "LAMPORT", units: TOKENS(25_000).toString(), months: 1, cents: 0, at: T0 }]);
-    // every one of them is spent: none can pay for anything else
     for (const sig of [first, second, third]) expect(s.accounts.credited(sig)).toBe(true);
+  });
+
+  it("over the amount is not lost either: it stays counted, and a second burn made by mistake pays for the months again", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    // 10,000 and then the whole 25,000 again: one month, and 10,000 still counted
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(290_000)]] });
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(290_000), TOKENS(265_000)]] });
+    expect((await s.check(q.reference)).status).toBe("paid");
+    expect(s.months()).toBe(1);
+    expect(s.accounts.profile(s.profile)?.prepaid?.payments[0]?.units).toBe(TOKENS(25_000).toString());
+    expect(s.accounts.intentOf(s.profile, q.reference)?.counted).toBe(TOKENS(10_000).toString());
+    // 15,000 more for the same quote, found by the service's own look: a second month
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(265_000), TOKENS(250_000)]] });
+    expect(await s.prepaid.sweep()).toEqual({ looked: 1, paid: 1 });
+    expect(s.months()).toBe(2);
+    expect(s.accounts.intentOf(s.profile, q.reference)?.counted).toBe("0");
+    // and two whole burns for one quote, found together, are two months: nothing burned is dropped
+    const t = setup();
+    const twice = await t.quoted(1);
+    t.chain.did({ references: [twice.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    t.chain.did({ references: [twice.reference], balances: [[payer.toBase58(), TOKENS(275_000), TOKENS(250_000)]] });
+    expect((await t.check(twice.reference)).status).toBe("paid");
+    expect(t.months()).toBe(2);
   });
 
   it("that names two quotes is counted toward one of them", async () => {
     const s = setup();
-    const one = await s.quoted(1), two = await s.quoted(1);
+    const one = await s.quoted(1), two = await s.quoted(3);
     s.chain.did({ references: [one.reference, two.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
     expect((await s.check(one.reference)).status).toBe("paid");
     expect(await s.check(two.reference)).toEqual({ status: "waiting" });
@@ -232,6 +343,117 @@ describe("a burn", () => {
     const tx = fromRpc(sig, s.chain.txs[0]!.result)!;
     expect(burned(tx, LAMPORT_MINT)).toBe(50n); // sixty left one account, ten arrived in another
     expect(burned(tx, key(9).toBase58())).toBe(0n);
+  });
+});
+
+describe("looks that overlap", () => {
+  // Each of these paid several times over before there was one look at a time: the same burn found unspent by
+  // two looks, and counted by both.
+  it("pay one quote once, however many ask at once", async () => {
+    const s = setup();
+    const q = await s.quoted(12);
+    s.chain.slow = 5;
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(400_000), TOKENS(100_000)]] });
+    for (let i = 0; i < 3; i++) s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), 10n, 9n]] });
+    const answers = await Promise.all([1, 2, 3, 4].map(() => s.check(q.reference)));
+    expect(answers.map((a) => a.status)).toEqual(["paid", "paid", "paid", "paid"]);
+    expect(s.accounts.profile(s.profile)?.prepaid?.payments).toHaveLength(1);
+    expect(s.months()).toBe(12);
+  });
+
+  it("pay one of two quotes that one burn names", async () => {
+    const s = setup();
+    const a = await s.quoted(12), b = await s.quoted(3);
+    s.chain.slow = 5;
+    s.chain.did({ references: [a.reference, b.reference], balances: [[payer.toBase58(), TOKENS(400_000), TOKENS(100_000)]] });
+    s.chain.did({ references: [a.reference], balances: [[payer.toBase58(), 10n, 9n]] });
+    s.chain.did({ references: [b.reference], balances: [[payer.toBase58(), 9n, 8n]] });
+    await Promise.all([s.check(b.reference), s.check(a.reference), s.check(b.reference), s.check(a.reference)]);
+    // 300,000 burned, once, is twelve months at 25,000 a month whichever quote it was counted toward (the
+    // twelve months once, or the three months four times), and never the two together
+    expect(s.months()).toBe(12);
+    const counted = [a, b].map((q) => BigInt(s.accounts.intentOf(s.profile, q.reference)?.counted ?? "0"));
+    expect(counted[0]! + counted[1]!).toBeLessThan(10n); // only the two dust burns are left over
+  });
+
+  it("pay one of five profiles whose quotes one burn names", async () => {
+    const s = setup();
+    const profiles = [s.profile, s.admit(2), s.admit(3), s.admit(4), s.admit(5)];
+    const quotes = await Promise.all(profiles.map((p) => s.quoted(1, p)));
+    s.chain.slow = 5;
+    s.chain.did({ references: quotes.map((q) => q.reference), balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    for (const q of quotes.slice(1)) s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), 10n, 9n]] });
+    await Promise.all(quotes.map((q, i) => s.check(q.reference, undefined, profiles[i])));
+    expect(profiles.filter((p) => s.accounts.profile(p)?.tier === "pro")).toHaveLength(1);
+  });
+});
+
+describe("a burn that is hard to find", () => {
+  it("is not buried by what is sent to the quote's address after it: the list is read from its old end", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    // sixty transactions by anybody that merely name it, each a few lamports' worth of trouble
+    for (let i = 0; i < 60; i++) s.chain.did({ references: [q.reference], balances: [] });
+    expect((await s.check(q.reference)).status).toBe("paid");
+  });
+
+  it("is found behind them when it came later, a few at a time, and at once by its signature", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(290_000)]] });
+    for (let i = 0; i < 60; i++) s.chain.did({ references: [q.reference], balances: [] });
+    const rest = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(290_000), TOKENS(275_000)]] });
+    expect((await s.check(q.reference)).status).toBe("short");
+    // each look reads the next few of what it has not read, and does not read again what was nothing
+    const before = s.chain.asked.filter((m) => m === "getTransaction").length;
+    expect((await s.check(q.reference)).status).toBe("short");
+    expect(s.chain.asked.filter((m) => m === "getTransaction").length - before).toBe(25);
+    // named by its signature, it is read whatever else is there
+    expect((await s.check(q.reference, [rest])).status).toBe("paid");
+  });
+
+  it("is found by its signature when the chain's list does not show it at all; a signature for some other quote finds nothing and harms nothing", async () => {
+    const s = setup();
+    const q = await s.quoted(1), other = await s.quoted(3);
+    const hidden = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]], listed: false });
+    expect(await s.check(q.reference)).toEqual({ status: "waiting" });
+    // given to the wrong quote: nothing, and it is not marked as read for its own
+    expect(await s.check(other.reference, [hidden])).toEqual({ status: "waiting" });
+    expect(await s.check(q.reference, ["not a signature", hidden])).toMatchObject({ status: "paid" });
+  });
+
+  it("is found by the service itself when nobody is left on the page to ask: within the hour, for a quote a payment was built for", async () => {
+    const s = setup();
+    const q = await s.quoted(1), idle = await s.quoted(3);
+    s.chain.holds[tokenAccountOf(payer, MINT, TOKEN_2022).toBase58()] = TOKENS(300_000);
+    // a quote nobody built a payment for or asked about is not looked for
+    expect(idle.reference).not.toBe(q.reference);
+    expect(await s.prepaid.sweep()).toEqual({ looked: 0, paid: 0 });
+    // the page built the burn, the wallet sent it, and the tab was closed before it was final
+    expect((await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).ok).toBe(true);
+    const sent = s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]], final: false });
+    expect(await s.prepaid.sweep()).toEqual({ looked: 1, paid: 0 });
+    s.chain.finalize(sent);
+    expect(await s.prepaid.sweep()).toEqual({ looked: 1, paid: 1 });
+    expect(s.accounts.profile(s.profile)?.tier).toBe("pro");
+    expect(s.said).toHaveLength(1); // the owner's channels are told
+    // three days after anybody last asked, the service stops looking by itself
+    s.later(3 * 86_400 + 1);
+    expect(await s.prepaid.sweep()).toEqual({ looked: 0, paid: 0 });
+  });
+
+  it("after paying by burning was switched off is not said to be on its way: its owner is told whom to write to", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    s.chain.did({ references: [q.reference], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000)]] });
+    const why = "paying in LAMPORT is switched off here just now. Anything already burned for this is not lost: write to support@lamportrobotics.com.";
+    // switched off, or pointed at another token: the same store, another setting
+    expect(await s.made({}).check(s.profile, q.reference)).toEqual({ ok: false, status: 409, why });
+    expect(await s.made({ burn: { mint: key(90).toBase58(), perMonth: 25_000 } }).check(s.profile, q.reference)).toEqual({ ok: false, status: 409, why });
+    expect(await s.made({ burn: { mint: key(90).toBase58(), perMonth: 25_000 } }).transaction(s.profile, q.reference, payer.toBase58())).toEqual({ ok: false, status: 409, why });
+    // switched on again, it is counted
+    expect((await s.check(q.reference)).status).toBe("paid");
   });
 });
 

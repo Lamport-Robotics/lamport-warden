@@ -236,10 +236,10 @@ describe("paying for the plan by burning LAMPORT", () => {
     const v = await ask(tx([burn()]), ARMING_ORIGIN);
     expect(v.level).toBe("explain");
     expect(v.sentence).toBe(SAID);
-    // the same with a fee setting beside it, and whether or not this browser saw a Sentinel setup
-    const withFee = await ask(tx([ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000 }), burn({ units: 75_000_500_000n })]), ARMING_ORIGIN, { vault: V.vault });
-    expect(withFee.level).toBe("explain");
-    expect(withFee.sentence).toMatch(/^Burns 75,000\.5 LAMPORT from this wallet\./);
+    // the same whether or not this browser saw a Sentinel setup
+    const other = await ask(tx([burn({ units: 75_000_500_000n })]), ARMING_ORIGIN, { vault: V.vault });
+    expect(other.level).toBe("explain");
+    expect(other.sentence).toMatch(/^Burns 75,000\.5 LAMPORT from this wallet\./);
     // paid again, it is asked about again: nothing about a burn is learned and let through
     const s = stores();
     const first = await judge({ kind: "tx", bytes: tx([burn()]), owner: OWNER }, ARMING_ORIGIN, s.store);
@@ -271,6 +271,24 @@ describe("paying for the plan by burning LAMPORT", () => {
     await notRecognised(tx([burn(), burn({ units: 1n })]));                                         // two burns
     await notRecognised(tx([burn(), SystemProgram.transfer({ fromPubkey: owner.publicKey, toPubkey: key(72), lamports: 1 })])); // with a payment beside it
     await notRecognised(tx([burn(), approve(key(73))]));                                            // with a permission beside it
+    await notRecognised(tx([ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }), burn()])); // with a fee setting beside it: the service's has none
+  });
+
+  it("is wording and no more: a fee the engine stops at is stopped at, in the engine's words", async () => {
+    // 1.4 SOL of priority fee beside a burn of one token: the engine blocks it from any site, and so it is here
+    const dear = tx([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000_000_000 }), burn({ units: 1_000_000n })]);
+    const here = await ask(dear, ARMING_ORIGIN), elsewhere = await ask(dear, ELSEWHERE);
+    expect(elsewhere.level).toBe("block");
+    expect(here.level).toBe("block");
+    expect(here.sentence).not.toMatch(/takes payment/);
+    expect(here.sentence).toMatch(/priority fee/i);
+    // and a smaller one the engine wants confirmed is confirmed
+    const steep = tx([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }), ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 10_000_000 }), burn()]);
+    expect((await ask(steep, ARMING_ORIGIN)).level).toBe((await ask(steep, ELSEWHERE)).level);
+    expect((await ask(steep, ARMING_ORIGIN)).level).toBe("confirm");
+    // the plain burn is never milder here than the engine makes it anywhere else
+    const rank = { allow: 0, explain: 1, confirm: 2, block: 3 } as const;
+    expect(rank[(await ask(tx([burn()]), ARMING_ORIGIN)).level]).toBeGreaterThanOrEqual(rank[(await ask(tx([burn()]), ELSEWHERE)).level]);
   });
 
   it("writes amounts as whole tokens", () => {

@@ -81,14 +81,16 @@ What it keeps, on that server:
 - Your plan. If you pay by card: Stripe's ids for the customer and the subscription, the price, its status
   and its dates. Not your card, your name or your email address: those are with Stripe and never reach
   Sentinel. If you pay ahead in USDC or SOL, or by burning LAMPORT: the amounts you were shown in the last
-  week, and for each payment the transaction, what it paid, for how many months, and when.
+  week (an amount to burn, for five weeks, with how much has been burned for it), and for each payment the
+  transaction, what it paid, for how many months, and when.
 - If you set a wallet up for rescue: the address that wallet approved for it, which is on the chain for
   anyone to read, and whether you switched rescue without asking on. Not your vault's key or its 24 words:
   those never leave you, and Sentinel has no use for them.
 
 It does not keep your IP address. The address a request comes from is held in memory for up to a day, to
 limit abuse, and is not written down; the web server in front of Sentinel keeps no access log. The Sentinel
-page sets no cookie and has no analytics: your session is kept in the browser tab and ends with it.
+page sets no cookie and has no analytics: your session is kept in the browser tab and ends with it, and so
+is the signature of a payment that tab sent, so that it can still be looked for after a reload.
 
 Who else receives something:
 

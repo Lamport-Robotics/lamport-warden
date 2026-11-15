@@ -164,12 +164,26 @@ export class Accounts {
   /** Until when the profile has paid ahead; 0 when it has not. */
   prepaidUntil(profile: string): number { return this.profile(profile)?.prepaid?.until ?? 0; }
 
-  /** Notes an amount quoted to a profile. It keeps the newest twenty, for a week. */
+  /**
+   * Notes an amount quoted to a profile. It keeps the newest twenty, for a week. A quote to burn is kept
+   * five weeks and is not dropped for being one of many: a transfer made on a forgotten quote can be sent
+   * back, and a burn cannot.
+   */
   addIntent(intent: PayIntent, now: number): void {
-    const kept = (this.data.intents ?? []).filter((i) => now - i.createdAt < 7 * 86_400);
-    const mine = kept.filter((i) => i.profile === intent.profile);
+    const kept = (this.data.intents ?? []).filter((i) => now - i.createdAt < (i.asset === "LAMPORT" ? 35 : 7) * 86_400);
+    const mine = kept.filter((i) => i.profile === intent.profile && i.asset !== "LAMPORT");
     const drop = new Set(mine.slice(0, Math.max(0, mine.length - 19)).filter((i) => !i.paidBy).map((i) => i.reference));
     this.data.intents = [...kept.filter((i) => !drop.has(i.reference)), intent];
+    this.store.flush();
+  }
+
+  /** Every quote that is kept. */
+  intents(): readonly PayIntent[] { return this.data.intents ?? []; }
+
+  /** Notes that a payment for a quote was built or looked for. */
+  asked(intent: PayIntent, now: number): void {
+    if (intent.askedAt === now) return;
+    intent.askedAt = now;
     this.store.flush();
   }
 
@@ -182,13 +196,42 @@ export class Accounts {
 
   /**
    * Credits a payment: the transaction is marked as spent, the quote as paid by it, and the profile is paid
-   * until `until`. False when the transaction was credited before: it is never credited twice. `also`:
-   * earlier transactions that went into the same payment (burns that add up), spent with it.
+   * until `until`. False when the transaction was credited before or the quote was paid before: neither
+   * happens twice.
    */
-  credit(intent: PayIntent, payment: Payment, until: number, also: readonly string[] = []): boolean {
+  credit(intent: PayIntent, payment: Payment, until: number): boolean {
     const p = this.profile(intent.profile);
-    if (!p || [payment.signature, ...also].some((s) => this.credited(s))) return false;
-    for (const s of [payment.signature, ...also]) (this.data.credited ??= {})[s] = { profile: p.id, at: payment.at };
+    if (!p || intent.paidBy || this.credited(payment.signature)) return false;
+    (this.data.credited ??= {})[payment.signature] = { profile: p.id, at: payment.at };
+    intent.paidBy = payment.signature;
+    p.prepaid = { until, payments: [...(p.prepaid?.payments ?? []), payment].slice(-12) };
+    this.store.flush();
+    return true;
+  }
+
+  /**
+   * Counts a burn toward a quote. The transaction is spent from that moment, whether or not it is enough to
+   * pay: it can count toward nothing else. False when it was spent before.
+   */
+  countBurn(intent: PayIntent, signature: string, units: bigint, at: number): boolean {
+    const p = this.profile(intent.profile);
+    if (!p || units <= 0n || this.credited(signature)) return false;
+    (this.data.credited ??= {})[signature] = { profile: p.id, at };
+    intent.counted = (BigInt(intent.counted ?? "0") + units).toString();
+    this.store.flush();
+    return true;
+  }
+
+  /**
+   * Pays a quote once from what was burned for it: the quote's amount is taken off what was counted, and
+   * the profile is paid until `until`. False when less than the amount is counted. What is over stays
+   * counted, toward the same months again.
+   */
+  payFromBurned(intent: PayIntent, payment: Payment, until: number): boolean {
+    const p = this.profile(intent.profile);
+    const have = BigInt(intent.counted ?? "0"), want = BigInt(intent.units);
+    if (!p || want <= 0n || have < want) return false;
+    intent.counted = (have - want).toString();
     intent.paidBy = payment.signature;
     p.prepaid = { until, payments: [...(p.prepaid?.payments ?? []), payment].slice(-12) };
     this.store.flush();

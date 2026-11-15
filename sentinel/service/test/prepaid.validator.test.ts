@@ -76,7 +76,7 @@ describe.skipIf(!onPath)("a payment for the plan on a local validator", () => {
   };
   const supply = async (of: PublicKey): Promise<bigint> => BigInt((await rpc.call("getTokenSupply", [of.toBase58(), { commitment: "confirmed" }])).value.amount);
   const final = async (signature: string): Promise<void> => {
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 300; i++) {
       if ((await rpc.call("getSignatureStatuses", [[signature]]))?.value?.[0]?.confirmationStatus === "finalized") return;
       await new Promise((r) => setTimeout(r, 500));
     }

@@ -527,7 +527,13 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
       { sells: (p) => billing.sellsTo(p), holder: (p) => billing.holder(p), byCard: (p) => billing.byCard(p), centsFull: billing.cents.full, centsHolder: billing.cents.holder },
       { notice: (profile, sentence) => notifier.notice(profile, sentence), ...(cfg.paySol ? { price: () => solPrice.usd() } : {}) })
     : null;
-  const stopPrepaid = prepaid ? startRounds(async () => { const { ended, reminded } = prepaid.expire(); if (ended || reminded) console.error(`sentinel: ${ended} paid-ahead plan(s) ended, ${reminded} told they are about to`); }, 3600) : () => undefined;
+  const stopPrepaid = prepaid ? startRounds(async () => {
+    // first the payments nobody is waiting on a page for, so that nothing just paid is ended
+    const { looked, paid } = await prepaid.sweep().catch(() => ({ looked: 0, paid: 0 }));
+    if (paid) console.error(`sentinel: found ${paid} payment(s) by itself among ${looked} quote(s) asked about`);
+    const { ended, reminded } = prepaid.expire();
+    if (ended || reminded) console.error(`sentinel: ${ended} paid-ahead plan(s) ended, ${reminded} told they are about to`);
+  }, 3600) : () => undefined;
 
   // Once a day. First, Stripe's side: every profile is made to match what Stripe says, in case a webhook was
   // missed, and a subscription nobody here has is reported. Then whoever stopped holding the token moves to
