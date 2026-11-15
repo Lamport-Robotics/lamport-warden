@@ -689,3 +689,146 @@ describe("what the wallet is handed is what was read", () => {
   });
 });
 
+describe("every door that signs", () => {
+  /** A provider with Backpack's methods and their arguments, read from the shipped 0.10.221: all on its class, the object frozen. */
+  function backpack(guard: Guard) {
+    const calls: string[] = [];
+    class Provider {
+      constructor() { Object.freeze(this); }
+      get isBackpack() { return true; }
+      get publicKey() { return { toBase58: () => account.address }; }
+      async send(tx: any, _signers?: any, _options?: any, _connection?: any, _account?: any) { calls.push("send"); return "hash"; }
+      async sendAndConfirm(tx: any, _signers?: any, _options?: any, _connection?: any, _account?: any) { calls.push("sendAndConfirm"); return { signature: "hash" }; }
+      async sendAll(_list: any[]) { calls.push("sendAll"); return []; }
+      async signAndSendTransaction(tx: any, options?: any) { return this.sendAndConfirm(tx, [], options); }
+      async signTransaction(tx: any, _account?: any) { calls.push("signTransaction"); return tx; }
+      async signMessage(_m: any, _account?: any) { calls.push("signMessage"); return { signature: new Uint8Array(64) }; }
+    }
+    const inner: any = new Provider();
+    const win: Record<string, any> = { backpack: Object.freeze({ solana: inner }) };
+    const hook = installLegacyHook(win, guard);
+    return { calls, door: win.backpack.solana as any, hook };
+  }
+  const txOf = (bytes: number[]) => ({ version: 0, message: { serialize: () => Uint8Array.of(0) }, serialize: () => Uint8Array.from(bytes) });
+
+  it("asks before Backpack's own ways of signing and sending: send, sendAndConfirm and sendAll", async () => {
+    const r = recorder((q) => q.bytes[0] !== 9), b = backpack(r.guard);
+    expect(b.hook.unguarded()).toEqual([]);
+    await b.door.send(txOf([1]), []);
+    await b.door.sendAndConfirm(txOf([2]), []);
+    await b.door.sendAll([{ tx: txOf([3]), signers: [] }, { tx: txOf([4]) }]);
+    expect(r.asked.map((a) => [a.kind, [...a.bytes], a.owner])).toEqual([["tx", [1], account.address], ["tx", [2], account.address], ["tx", [3], account.address], ["tx", [4], account.address]]);
+    expect(b.calls).toEqual(["send", "sendAndConfirm", "sendAll"]);
+    // refused, none of them reaches the wallet
+    for (const ask of [() => b.door.send(txOf([9])), () => b.door.sendAndConfirm(txOf([9])), () => b.door.sendAll([{ tx: txOf([9]) }])]) await expect(ask()).rejects.toBeInstanceOf(WardenRejected);
+    expect(b.calls).toEqual(["send", "sendAndConfirm", "sendAll"]);
+  });
+
+  it("asks once when Backpack's signAndSendTransaction hands the request to its own sendAndConfirm", async () => {
+    const r = recorder(), b = backpack(r.guard);
+    await b.door.signAndSendTransaction(txOf([5]));
+    expect(r.asked).toHaveLength(1);
+    expect(b.calls).toEqual(["sendAndConfirm"]);
+  });
+
+  it("reads a request from the side of the account Backpack is told to sign with", async () => {
+    // Backpack's methods take the account as an argument: a transaction that leaves the active account alone can empty that one
+    const second = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
+    const r = recorder(), b = backpack(r.guard);
+    await b.door.signTransaction(txOf([1]), { toBase58: () => second });
+    await b.door.signTransaction(txOf([2]), second);
+    await b.door.signMessage(Uint8Array.of(3), { toBase58: () => second });
+    await b.door.send(txOf([4]), [], undefined, undefined, { toBase58: () => second });
+    await b.door.signTransaction(txOf([5]));
+    await b.door.signTransaction(txOf([6]), "not an account");
+    expect(r.asked.map((a) => a.owner)).toEqual([second, second, second, second, account.address, account.address]);
+  });
+
+  it("leaves another wallet's `send` alone: there it may be an older way of making any request", async () => {
+    const r = recorder(), calls: any[] = [];
+    const provider: any = { publicKey: { toBase58: () => account.address }, send: async (method: string, params: unknown) => { calls.push([method, params]); return "ok"; }, signMessage: async () => ({ signature: new Uint8Array(64) }) };
+    const win: Record<string, any> = { solana: provider };
+    installLegacyHook(win, r.guard);
+    expect(await win.solana.send("getBalance", ["x"])).toBe("ok");
+    expect(calls).toEqual([["getBalance", ["x"]]]);
+    expect(r.asked).toEqual([]);
+  });
+});
+
+describe("what is read is what there is: forms a request can come in", () => {
+  const read = (b: Uint8Array) => JSON.parse(new TextDecoder().decode(b));
+
+  it("reads a sign-in field that is not text as the text a wallet would make of it, and hands the wallet that text", async () => {
+    const seen: any[] = [], got: any[] = [];
+    const guard: Guard = async (q) => { seen.push(read(q.bytes)); return { done() {} }; };
+    const wallet: any = { name: "W", version: "1.0.0", accounts: [account], features: { "solana:signIn": { version: "1.0.0", signIn: async (...i: any[]) => { got.push(i[0]); return []; } } } };
+    patchStandardWalletInPlace(wallet, guard);
+    // a list, and a String object: neither is text, and either could be taken for a domain by a wallet
+    await wallet.features["solana:signIn"].signIn({ domain: ["other-site.example"], statement: "Sign in" });
+    await wallet.features["solana:signIn"].signIn({ domain: new String("other-site.example"), statement: "Sign in" });
+    expect(seen).toEqual([{ domain: "other-site.example", statement: "Sign in" }, { domain: "other-site.example", statement: "Sign in" }]);
+    expect(got.map((g) => g.domain)).toEqual(["other-site.example", "other-site.example"]);
+    // and the same through a provider's method and its request() call
+    const p: any = { publicKey: { toBase58: () => account.address }, signIn: async (i: any) => { got.push(i); return {}; }, request: async (a: any) => { got.push(a.params); return {}; } };
+    patchProviderInPlace(p, guard);
+    await p.signIn({ domain: ["bank.example"] });
+    await p.request({ method: "signIn", params: { domain: ["bank.example"] } });
+    expect(seen.slice(2)).toEqual([{ domain: "bank.example" }, { domain: "bank.example" }]);
+    expect(got.slice(2).map((g) => g.domain)).toEqual(["bank.example", "bank.example"]);
+  });
+
+  it("reads a message given as a list of numbers, and one given as text, and hands each on as it read it", async () => {
+    const r = recorder(), got: any[] = [];
+    const provider: any = { publicKey: { toBase58: () => account.address }, signMessage: async (m: any) => { got.push(m); return { signature: new Uint8Array(64) }; }, signOffchainMessage: async (m: any) => { got.push(m); return {}; } };
+    const win: Record<string, any> = { solana: provider };
+    installLegacyHook(win, r.guard);
+    await win.solana.signMessage([104, 105]);
+    await win.solana.signMessage("hi");
+    // the off-chain form, as Backpack takes it: an object with the message as text among other fields
+    await win.solana.signOffchainMessage({ messageVersion: 1, account, requiredSigners: [Uint8Array.of(1)], message: "hi" });
+    expect(r.asked.map((a) => [...a.bytes])).toEqual([[104, 105], [104, 105], [104, 105]]);
+    expect([...got[0]]).toEqual([104, 105]);
+    expect(got[1]).toBe("hi");
+    expect(got[2].message).toBe("hi");
+    expect(got[2].messageVersion).toBe(1);
+    // and at the Wallet Standard door, where Backpack's off-chain message is text too
+    const had: any[] = [];
+    const wallet: any = { name: "W", version: "1.0.0", accounts: [account], features: { "solana:signOffchainMessage": { version: "1.0.0", signOffchainMessage: async (...i: any[]) => { had.push(i[0]); return []; } } } };
+    patchStandardWalletInPlace(wallet, r.guard);
+    await wallet.features["solana:signOffchainMessage"].signOffchainMessage({ account, messageVersion: 1, requiredSigners: [], message: "hi" });
+    expect([...r.asked.at(-1)!.bytes]).toEqual([104, 105]);
+    expect(had[0].message).toBe("hi");
+  });
+
+  it("keeps a list a list in a request() call, and reads the method once", async () => {
+    const r = recorder(), got: any[] = [];
+    const provider: any = { publicKey: { toBase58: () => account.address }, request: async (a: any) => { got.push(a); return "ok"; } };
+    patchProviderInPlace(provider, r.guard);
+    await provider.request({ method: "signMessage", params: [Uint8Array.of(1, 2), "utf8"] });
+    expect(Array.isArray(got[0].params)).toBe(true);
+    // a method that says one thing when Warden looks and another when the wallet does
+    let n = 0;
+    const sly = { get method() { return n++ === 0 ? "getAccounts" : "signTransaction"; }, params: {} };
+    await provider.request(sly);
+    expect(got[1].method).toBe("getAccounts");
+    expect(got[1]).not.toBe(sly);
+  });
+
+  it("hands the wallet its own account object for the account the request was read as", async () => {
+    const got: any[] = [];
+    const mine = Object.freeze({ address: account.address, publicKey: new Uint8Array(32) });
+    const wallet: any = { name: "W", version: "1.0.0", accounts: [mine], features: { "solana:signTransaction": { version: "1.0.0", signTransaction: async (...i: any[]) => { got.push(i[0].account); return i.map((x) => ({ signedTransaction: x.transaction })); } } } };
+    const r = recorder();
+    patchStandardWalletInPlace(wallet, r.guard);
+    // an account object of the page's that says the right address now and can say another later
+    const theirs = { address: account.address };
+    const p = wallet.features["solana:signTransaction"].signTransaction({ account: theirs, transaction: Uint8Array.of(1) });
+    theirs.address = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
+    await p;
+    await wallet.features["solana:signTransaction"].signTransaction({ account: { address: "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T" }, transaction: Uint8Array.of(2) });
+    expect(got[0]).toBe(mine);
+    expect(got[1]).toBe(mine);
+    expect(r.asked.map((a) => a.owner)).toEqual([account.address, account.address]);
+  });
+});
+
