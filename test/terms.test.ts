@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BURN_TERMS, HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PRICE_CENTS, RESCUE_TERMS, burnTerms, prepaidTerms, purchaseTerms } from "../sentinel/service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, LAMPORT_TERMS, PRICE_CENTS, RESCUE_TERMS, lamportTerms, prepaidTerms, purchaseTerms } from "../sentinel/service/src/plans.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (...p: string[]) => readFileSync(join(root, ...p), "utf8");
@@ -35,28 +35,23 @@ describe("the terms", () => {
     expect(prepaid).toContain("export const REMIND_BEFORE_SECONDS = 3 * 86_400;");
   });
 
-  it("state paying by burning in the page's own words, with no number of tokens: the page shows that", () => {
-    const list = /<ul id="burn-terms">([\s\S]*?)<\/ul>/.exec(terms)![1]!;
+  it("state paying in LAMPORT in the page's own words, with no number of tokens: the page shows that", () => {
+    const list = /<ul id="lamport-terms">([\s\S]*?)<\/ul>/.exec(terms)![1]!;
     const lines = [...list.matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]!.trim());
-    expect(lines).toEqual([...BURN_TERMS]);
+    expect(lines).toEqual([...LAMPORT_TERMS]);
     // the two lines that do not depend on the amount are the same for any amount
-    expect(burnTerms("25000", 3).slice(1)).toEqual([...BURN_TERMS]);
+    expect(lamportTerms("25,000", 3).slice(1)).toEqual([...LAMPORT_TERMS]);
     const prepaid = read("sentinel", "service", "src", "prepaid.ts");
-    // final, the signer's own tokens, the same number for everyone, and looked for by the service: what the code does
-    expect(text).toContain("A burn counts when the chain has made it final, and only tokens that the wallet signing it held itself count. The service looks for it while the Sentinel page is open and, by itself, about once an hour for three days after it was last asked about, so it does not depend on the page staying open. An amount shown holds for a week: what is burned for it after that counts at the number of tokens then in force, if that is higher.");
-    expect(prepaid).toContain('const tx = await this.readOne(intent, signature, "finalized");');
-    expect(prepaid).toContain("if (at <= intent.expiresAt) return quoted;");
-    expect(prepaid).toContain("return current > quoted ? current : quoted;");
-    expect(prepaid).toContain("export const USDC_QUOTE_SECONDS = 7 * 86_400;");
-    expect(prepaid).toContain("else if (signers.has(was.owner)) fell += was.amount - now;");
-    expect(prepaid).toContain("BigInt(this.cfg.burn!.perMonth) * BigInt(months)");
+    // the same number for everyone, to the treasury wallet, counted like any other payment, and looked for by the service
+    expect(text).toContain("That number is the same for everyone, it is not a price in dollars, and the holder's price does not apply to it.");
+    expect(prepaid).toContain("BigInt(l.perMonth) * BigInt(months)");
+    expect(text).toContain("It counts, like a payment in USDC, when the chain has made it final and the amount that arrived at the treasury wallet is at least the amount shown.");
+    expect(prepaid).toContain("const got = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);");
+    expect(text).toContain("The service looks for a payment while the Sentinel page is open and, by itself, about once an hour for three days after it was last asked about, so it does not depend on the page staying open.");
     expect(prepaid).toContain("SWEEP_SECONDS = 3 * 86_400");
     expect(read("sentinel", "service", "src", "main.ts")).toContain("await prepaid.sweep()");
-    // short counts toward it, more than the amount pays for the months again, and what is left over goes to the next amount asked for
-    expect(prepaid).toContain("if (!this.accounts.payFromBurned(intent, want,");
-    expect(prepaid).toContain("this.accounts.carryBurned(intent, at);");
-    expect(text).toContain("A payment made by burning $LAMPORT is the exception: there is nothing left of it to send back, at any time.");
-    expect(text).toContain("not a promise about what it is worth");
+    // what Lamport does with the tokens is not part of what is bought
+    expect(text).toContain("What Lamport does with the tokens it is paid is not part of what you buy, and nothing here is a promise about what the token is worth.");
   });
 
   it("promise only what the service does", () => {

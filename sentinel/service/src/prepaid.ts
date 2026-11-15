@@ -15,13 +15,10 @@
  * A transaction pays for one thing, once. USDC is a dollar for a dollar and a quote in it is good for a
  * week. A quote in SOL is priced when it is made and is good for ten minutes.
  *
- * And in LAMPORT, where that is turned on: a fixed number of tokens for a month, which are not sent to
- * Lamport or to anybody. The paying transaction burns them, from the wallet that signs it. It is counted the
- * same way, by what the chain did: by how much less of the token there is after the transaction than before.
- * Only the signer's own tokens count: tokens in an account anyone may burn from, or burned by someone who
- * was merely let spend them, are not the payer's to pay with. A burn cannot be sent back as a short payment
- * can, so nothing burned for a quote is dropped: burns that name one quote add up, each is spent the moment
- * it is counted, and whatever is over the amount stays counted toward the same months again.
+ * And in LAMPORT, where that is turned on: a fixed number of tokens for a month, the same for everybody,
+ * sent to Lamport's treasury wallet, which is another wallet than the one USDC and SOL go to. It is a
+ * transfer like the one in USDC and is counted the same way, by what arrived. A quote remembers the wallet
+ * and the token it was made for, so a payment made on it counts whatever the settings are by then.
  *
  * Nothing is counted twice, however many looks overlap: a transaction is marked spent in the same step that
  * counts it (accounts.ts), with nothing awaited in between. Looks at one quote take turns (`inTurn`), so two
@@ -31,7 +28,7 @@
  * depend on the page that made it staying open.
  */
 import { randomBytes } from "node:crypto";
-import { PublicKey, SystemProgram, Transaction, TransactionInstruction, VersionedMessage } from "@solana/web3.js";
+import { PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import type { Accounts } from "./accounts.js";
 import { prepaidEndingNotice, prepaidExtendedNotice, prepaidStartedNotice, planEndedNotice } from "./notices.js";
 import { accountKeys, fromRpc, type ObservedTx } from "./observed.js";
@@ -54,8 +51,8 @@ export interface PrepaidConfig {
   /** Lamport's wallet: where payments go. */
   payTo: string;
   usdcMint?: string;
-  /** Paying by burning a token: which one, and how many whole tokens burn for one month. Absent: not offered. */
-  burn?: { mint: string; perMonth: number };
+  /** Paying in LAMPORT: the token, how many whole tokens pay for one month, and the treasury wallet they are sent to. Absent: not offered. */
+  lamport?: { mint: string; perMonth: number; payTo: string };
 }
 
 /** What the plan's card side says about a profile, so that both ways of paying sell to the same people at the same prices. */
@@ -74,12 +71,10 @@ export type Refusal = { ok: false; status: number; why: string };
 export interface QuoteView {
   reference: string; payTo: string; asset: PayAsset; units: string; decimals: number; mint: string | null;
   months: number; cents: number; expiresAt: number;
-  /** The same as a payment request a wallet can open (Solana Pay). Empty for a burn: a payment request can only ask for a transfer. */
+  /** The same as a payment request a wallet can open (Solana Pay). */
   url: string;
-  /** True when the amount is burned and not sent: `payTo` is then empty. */
-  burned?: true;
-  /** For a burn: how much has been burned for this quote already and counted toward it. */
-  counted?: string;
+  /** For a token: the token account of `payTo` that the payment lands in. A wallet's prompt, and Warden's, name this address and not `payTo`. */
+  account: string | null;
 }
 export type CheckView = { status: "waiting" } | { status: "paid"; until: number } | { status: "short"; arrived: string; wanted: string } | { status: "late" };
 
@@ -87,7 +82,7 @@ const ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const TOKEN_2022_PROGRAM = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const ASSOCIATED_TOKEN_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
-/** What a Token-2022 token may have and still be burned to pay: where its name and picture are kept, and nothing that moves or hides a balance. */
+/** What a Token-2022 token may have and still be taken in payment: where its name and picture are kept, and nothing that keeps part of a transfer back or hides a balance. */
 const PLAIN_EXTENSIONS = new Set(["metadataPointer", "tokenMetadata"]);
 /**
  * How many transactions naming a quote the chain is asked to list (the most it gives at once), and how many
@@ -99,65 +94,21 @@ const PLAIN_EXTENSIONS = new Set(["metadataPointer", "tokenMetadata"]);
 const LISTED = 1000, EACH_END = 12;
 /**
  * The hourly look: how many quotes it goes through, how many of one profile's, and for how long after a
- * payment for a quote was last built or asked about (a paid quote to burn: for a second burn made by
- * mistake, which lands within minutes or not at all).
+ * payment for a quote was last built or asked about.
  */
-const SWEEP_MOST = 60, SWEEP_EACH = 3, SWEEP_SECONDS = 3 * 86_400, SWEEP_PAID_SECONDS = 6 * 3600;
+const SWEEP_MOST = 60, SWEEP_EACH = 3, SWEEP_SECONDS = 3 * 86_400;
+/** And for how long a quote that was only shown is looked for, when there is room: a payment from a phone is made within minutes or not at all. */
+const SWEEP_SHOWN_SECONDS = 86_400;
 type Commitment = "finalized" | "confirmed";
 const CHAIN_DOWN: Refusal = { ok: false, status: 502, why: "the chain could not be read just now. Try again in a minute." };
 /** The token account a wallet keeps a token in unless it says otherwise. `program`: the token program the token is under. */
 export const tokenAccountOf = (owner: PublicKey, mint: PublicKey, program: PublicKey = TOKEN_PROGRAM): PublicKey => PublicKey.findProgramAddressSync([owner.toBytes(), program.toBytes(), mint.toBytes()], ASSOCIATED_TOKEN_PROGRAM)[0];
 
 /**
- * The instruction that burns `units` of a token from `payer`'s own account of it, naming the quote's
- * reference. BurnChecked: the token and its decimals are part of what is signed. The tokens go to nobody.
- */
-export function burnInstruction(o: { payer: PublicKey; mint: PublicKey; program: PublicKey; units: bigint; decimals: number; reference: PublicKey }): TransactionInstruction {
-  const data = Buffer.alloc(10);
-  data[0] = 15; data.writeBigUInt64LE(o.units, 1); data[9] = o.decimals;
-  return new TransactionInstruction({ programId: o.program, data, keys: [
-    { pubkey: tokenAccountOf(o.payer, o.mint, o.program), isSigner: false, isWritable: true }, { pubkey: o.mint, isSigner: false, isWritable: true },
-    { pubkey: o.payer, isSigner: true, isWritable: false }, { pubkey: o.reference, isSigner: false, isWritable: false },
-  ] });
-}
-
-/** The wallets that signed a transaction. None for a message in a form this does not read: nothing of it is then counted. */
-export function signersOf(tx: ObservedTx): string[] {
-  try {
-    const m = VersionedMessage.deserialize(tx.message);
-    return m.staticAccountKeys.slice(0, m.header.numRequiredSignatures).map((k) => k.toBase58());
-  } catch { return []; }
-}
-
-/**
- * How much of a token the signers of a transaction burned of their own: how much their own accounts of it
- * fell by, less everything any account of it rose by. A transfer comes to nothing, since what left one
- * account arrived in another. So does a burn from an account that is not a signer's: the token program lets
- * anyone burn what sits in an account owned by the System Program or the incinerator, and lets a delegate
- * burn what it was let spend, and neither is the signer's to pay with. Read from the balances, so it is
- * what the chain did, whatever the instructions were.
- */
-export function burned(tx: ObservedTx, mint: string): bigint {
-  if (tx.failed) return 0n;
-  const signers = new Set(signersOf(tx));
-  const before = new Map<number, { amount: bigint; owner: string }>(), after = new Map<number, bigint>();
-  for (const b of tx.preTokenBalances) if (b.mint === mint) before.set(b.accountIndex, { amount: BigInt(b.amount), owner: b.owner });
-  for (const b of tx.postTokenBalances) if (b.mint === mint) after.set(b.accountIndex, BigInt(b.amount));
-  let fell = 0n, rose = 0n;
-  for (const [index, was] of before) {
-    const now = after.get(index) ?? 0n;
-    if (now > was.amount) rose += now - was.amount;
-    else if (signers.has(was.owner)) fell += was.amount - now;
-  }
-  for (const [index, now] of after) if (!before.has(index)) rose += now;
-  return fell > rose ? fell - rose : 0n;
-}
-
-/**
  * The transaction that pays a quote from `payer`: one transfer of exactly the quoted amount to Lamport's
  * address, naming the quote's reference. Nothing else is in it. It is unsigned; the payer's wallet signs it.
  */
-export function paymentInstruction(o: { payer: PublicKey; payTo: PublicKey; asset: PayAsset; units: bigint; mint: PublicKey; reference: PublicKey }): TransactionInstruction {
+export function paymentInstruction(o: { payer: PublicKey; payTo: PublicKey; asset: PayAsset; units: bigint; mint: PublicKey; reference: PublicKey; /** The token program the token is under, and its decimals: USDC's unless given. */ program?: PublicKey; decimals?: number }): TransactionInstruction {
   const named = { pubkey: o.reference, isSigner: false, isWritable: false };
   if (o.asset === "SOL") {
     const ix = SystemProgram.transfer({ fromPubkey: o.payer, toPubkey: o.payTo, lamports: o.units });
@@ -165,11 +116,12 @@ export function paymentInstruction(o: { payer: PublicKey; payTo: PublicKey; asse
     return ix;
   }
   // TransferChecked: the token and its decimals are part of what is signed, so the amount cannot mean another token's
+  const program = o.program ?? TOKEN_PROGRAM;
   const data = Buffer.alloc(10);
-  data[0] = 12; data.writeBigUInt64LE(o.units, 1); data[9] = 6;
-  return new TransactionInstruction({ programId: TOKEN_PROGRAM, data, keys: [
-    { pubkey: tokenAccountOf(o.payer, o.mint), isSigner: false, isWritable: true }, { pubkey: o.mint, isSigner: false, isWritable: false },
-    { pubkey: tokenAccountOf(o.payTo, o.mint), isSigner: false, isWritable: true }, { pubkey: o.payer, isSigner: true, isWritable: false }, named,
+  data[0] = 12; data.writeBigUInt64LE(o.units, 1); data[9] = o.decimals ?? 6;
+  return new TransactionInstruction({ programId: program, data, keys: [
+    { pubkey: tokenAccountOf(o.payer, o.mint, program), isSigner: false, isWritable: true }, { pubkey: o.mint, isSigner: false, isWritable: false },
+    { pubkey: tokenAccountOf(o.payTo, o.mint, program), isSigner: false, isWritable: true }, { pubkey: o.payer, isSigner: true, isWritable: false }, named,
   ] });
 }
 
@@ -219,7 +171,7 @@ export class Prepaid {
 
   private now(): number { return this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000); }
   private get mint(): string { return this.cfg.usdcMint ?? USDC_MINT; }
-  private burnFacts: { program: PublicKey; decimals: number } | null = null;
+  private lamportFacts: { program: PublicKey; decimals: number } | null = null;
   /**
    * What a final transaction that names a quote was found to be toward it, where it could not be counted:
    * nothing, short, or late. A final transaction does not change, so it is read once. Keyed
@@ -242,26 +194,27 @@ export class Prepaid {
   }
   /** When the service last looked for a quote by itself, so that every quote gets its turn. */
   private swept = new Map<string, number>();
-  /** Which token program the token to burn is under, and its decimals: read from the chain once. Throws when that could not be read. */
-  private async burnToken(): Promise<{ program: PublicKey; decimals: number }> {
-    if (this.burnFacts) return this.burnFacts;
-    const info = await this.rpc.call("getAccountInfo", [this.cfg.burn!.mint, { encoding: "jsonParsed", commitment: "confirmed" }]);
+  /** Which token program LAMPORT is under, and its decimals: read from the chain once. Throws when that could not be read. */
+  private async lamportToken(): Promise<{ program: PublicKey; decimals: number }> {
+    if (this.lamportFacts) return this.lamportFacts;
+    const info = await this.rpc.call("getAccountInfo", [this.cfg.lamport!.mint, { encoding: "jsonParsed", commitment: "confirmed" }]);
     const owner = String(info?.value?.owner ?? ""), decimals = info?.value?.data?.parsed?.info?.decimals;
     const program = owner === TOKEN_PROGRAM.toBase58() ? TOKEN_PROGRAM : owner === TOKEN_2022_PROGRAM.toBase58() ? TOKEN_2022_PROGRAM : null;
-    if (!program || !Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw new Error("the token to burn could not be read");
-    // A burn is counted by how much less of the token there is in the accounts a transaction touched. A
-    // token that keeps back a fee on transfers, or that has balances kept out of sight, loses some from that
-    // sum without a burn. So it is offered only for a token with no more to it than its name and picture.
+    if (!program || !Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw new Error("the token could not be read");
+    // A payment is counted by what arrived. A token that keeps back a fee on transfers would arrive short of
+    // the amount the page asked a wallet for, every time. So it is taken only for a token with no more to it
+    // than its name and picture.
     const extensions: unknown[] = Array.isArray(info?.value?.data?.parsed?.info?.extensions) ? info.value.data.parsed.info.extensions : [];
-    if (!extensions.every((e: any) => PLAIN_EXTENSIONS.has(e?.extension))) throw new Error("the token to burn has features under which a burn of it cannot be counted");
-    return (this.burnFacts = { program, decimals });
+    if (!extensions.every((e: any) => PLAIN_EXTENSIONS.has(e?.extension))) throw new Error("the token has features under which a payment in it cannot be counted");
+    return (this.lamportFacts = { program, decimals });
   }
   private tell(profile: string, sentence: string): void { void this.opts.notice?.(profile, sentence).catch(() => undefined); }
 
   /** What the page needs to offer it. SOL is offered only where there is a price to quote it at. */
-  offer(): { payTo: string; assets: PayAsset[]; months: readonly number[]; burn?: { perMonth: number } } {
+  offer(): { payTo: string; assets: PayAsset[]; months: readonly number[]; lamport?: { perMonth: number; payTo: string } } {
     const assets: PayAsset[] = this.opts.price ? ["USDC", "SOL"] : ["USDC"];
-    return this.cfg.burn ? { payTo: this.cfg.payTo, assets: [...assets, "LAMPORT"], months: PREPAID_MONTHS, burn: { perMonth: this.cfg.burn.perMonth } } : { payTo: this.cfg.payTo, assets, months: PREPAID_MONTHS };
+    const l = this.cfg.lamport;
+    return l ? { payTo: this.cfg.payTo, assets: [...assets, "LAMPORT"], months: PREPAID_MONTHS, lamport: { perMonth: l.perMonth, payTo: l.payTo } } : { payTo: this.cfg.payTo, assets, months: PREPAID_MONTHS };
   }
 
   /** An amount to pay, and the reference that will mark the payment as this profile's. */
@@ -269,24 +222,20 @@ export class Prepaid {
     if (!this.accounts.profile(profile)) return { ok: false, status: 401, why: "sign in again." };
     if (!this.selling.sells(profile)) return { ok: false, status: 403, why: "the paid plan is not on sale yet." };
     if (this.selling.byCard(profile)) return { ok: false, status: 409, why: "this profile has the plan by card, which renews by itself. Cancel that first if you would rather pay ahead." };
-    if (asset !== "USDC" && asset !== "SOL" && !(asset === "LAMPORT" && this.cfg.burn)) return { ok: false, status: 400, why: this.cfg.burn ? "it can be paid in USDC, SOL or LAMPORT." : "it can be paid in USDC or SOL." };
+    if (asset !== "USDC" && asset !== "SOL" && !(asset === "LAMPORT" && this.cfg.lamport)) return { ok: false, status: 400, why: this.cfg.lamport ? "it can be paid in USDC, SOL or LAMPORT." : "it can be paid in USDC or SOL." };
     if (asset === "SOL" && !this.opts.price) return { ok: false, status: 400, why: "it cannot be paid in SOL here. USDC can." };
     if (typeof months !== "number" || !PREPAID_MONTHS.includes(months)) return { ok: false, status: 400, why: `it is paid for ${PREPAID_MONTHS.slice(0, -1).join(", ")} or ${PREPAID_MONTHS.at(-1)} months at a time.` };
     if (asset === "LAMPORT") {
       // a number of tokens for a month, the same for everybody: there is no price in dollars to it, and so no lower price to work out
       let token: { decimals: number };
-      try { token = await this.burnToken(); } catch { return { ok: false, status: 502, why: "the chain could not be read just now. Try again in a minute." }; }
-      const units = BigInt(this.cfg.burn!.perMonth) * BigInt(months) * 10n ** BigInt(token.decimals);
-      const at = this.now(), mint = this.cfg.burn!.mint;
-      // The same quote again while it stands and is not paid: a page that was closed and opened again is
-      // handed the reference it had, with whatever was already burned for it.
-      const open = this.accounts.intents().find((i) => i.profile === profile && i.asset === "LAMPORT" && !i.paidBy && i.months === months && i.units === units.toString() && i.mint === mint && at <= i.expiresAt);
-      const intent: PayIntent = open ?? { reference: new PublicKey(randomBytes(32)).toBase58(), profile, asset, units: units.toString(), months, cents: 0, createdAt: at, expiresAt: at + USDC_QUOTE_SECONDS, mint };
-      if (!open) this.accounts.addIntent(intent, at);
-      // what was burned for this profile's finished and run-out quotes and not used there counts toward this one
-      this.accounts.carryBurned(intent, at);
-      const counted = BigInt(intent.counted ?? "0");
-      return { ok: true, quote: { reference: intent.reference, payTo: "", asset, units: intent.units, decimals: token.decimals, mint, months, cents: 0, expiresAt: intent.expiresAt, url: "", burned: true, ...(counted > 0n ? { counted: counted.toString() } : {}) } };
+      try { token = await this.lamportToken(); } catch { return CHAIN_DOWN; }
+      const l = this.cfg.lamport!;
+      const units = BigInt(l.perMonth) * BigInt(months) * 10n ** BigInt(token.decimals);
+      const at = this.now();
+      // the quote keeps the wallet, the token and its decimals it was made for: a payment made on it counts whatever the settings are by then
+      const intent: PayIntent = { reference: new PublicKey(randomBytes(32)).toBase58(), profile, asset, units: units.toString(), months, cents: 0, createdAt: at, expiresAt: at + USDC_QUOTE_SECONDS, mint: l.mint, payTo: l.payTo, decimals: token.decimals };
+      this.accounts.addIntent(intent, at);
+      return { ok: true, quote: this.view(intent, this.lamportFacts?.program) };
     }
     let holder: boolean;
     try { holder = await this.selling.holder(profile); } catch { return { ok: false, status: 502, why: "I could not read your wallet's balance just now, so I can't tell which price is yours. Try again in a minute." }; }
@@ -302,10 +251,12 @@ export class Prepaid {
     return { ok: true, quote: this.view(intent) };
   }
 
-  private view(i: PayIntent): QuoteView {
-    const decimals = i.asset === "SOL" ? 9 : 6;
-    const query = new URLSearchParams({ amount: decimal(BigInt(i.units), decimals), ...(i.asset === "USDC" ? { "spl-token": this.mint } : {}), reference: i.reference, label: "Warden Sentinel", message: `Pro, ${i.months} month${i.months === 1 ? "" : "s"}` });
-    return { reference: i.reference, payTo: this.cfg.payTo, asset: i.asset, units: i.units, decimals, mint: i.asset === "USDC" ? this.mint : null, months: i.months, cents: i.cents, expiresAt: i.expiresAt, url: `solana:${this.cfg.payTo}?${query.toString()}` };
+  private view(i: PayIntent, program: PublicKey = TOKEN_PROGRAM): QuoteView {
+    const decimals = i.asset === "SOL" ? 9 : i.decimals ?? 6;
+    const payTo = i.payTo ?? this.cfg.payTo, mint = i.asset === "SOL" ? null : i.mint ?? this.mint;
+    const account = mint ? tokenAccountOf(new PublicKey(payTo), new PublicKey(mint), program).toBase58() : null;
+    const query = new URLSearchParams({ amount: decimal(BigInt(i.units), decimals), ...(mint ? { "spl-token": mint } : {}), reference: i.reference, label: "Warden Sentinel", message: `Pro, ${i.months} month${i.months === 1 ? "" : "s"}` });
+    return { reference: i.reference, payTo, asset: i.asset, units: i.units, decimals, mint, months: i.months, cents: i.cents, expiresAt: i.expiresAt, url: `solana:${payTo}?${query.toString()}`, account };
   }
 
   /**
@@ -323,27 +274,14 @@ export class Prepaid {
     const units = BigInt(intent.units), mint = new PublicKey(this.mint), payTo = new PublicKey(this.cfg.payTo);
     try {
       if (intent.asset === "LAMPORT") {
-        const off = this.burnOff(intent);
-        if (off) return off;
-        const token = await this.burnToken(), burnMint = new PublicKey(this.cfg.burn!.mint);
-        this.accounts.asked(intent, this.now());
-        // Only what is still owed is burned: the amount, less what is counted toward it, less what is on
-        // the chain for it and not yet final. A wallet is not asked to burn the same tokens' worth twice;
-        // and when what is on its way cannot be read, it is not asked at all.
-        const list = await this.listed(intent, "confirmed");
-        if (list === null) return CHAIN_DOWN;
-        let onItsWay = 0n;
-        for (const signature of this.toRead(intent, intent.sent ?? [], list)) {
-          const tx = await this.readOne(intent, signature, "confirmed");
-          if (tx === null && list.includes(signature)) return CHAIN_DOWN;
-          if (tx && tx !== "nothing") onItsWay += burned(tx, this.cfg.burn!.mint);
-        }
-        const counted = BigInt(intent.counted ?? "0");
-        const owed = units - counted - onItsWay;
-        if (owed <= 0n) return { ok: false, status: 409, why: onItsWay > 0n ? "the burn for this has been sent already. It counts once the chain has made it final: look for it in a minute." : "what was burned before covers this. Look for it and it is counted: nothing more needs burning." };
+        if (!this.cfg.lamport || this.cfg.lamport.mint !== intent.mint) return { ok: false, status: 409, why: "it cannot be paid in LAMPORT here just now. Ask for the amount again in USDC or SOL." };
+        const token = await this.lamportToken(), lamport = new PublicKey(intent.mint!), treasury = new PublicKey(intent.payTo!);
+        // the treasury's own token account has to be there to be paid into; and the payer's has to hold the amount
+        const ours = await this.rpc.call("getAccountInfo", [tokenAccountOf(treasury, lamport, token.program).toBase58(), { encoding: "base64", commitment: "confirmed" }]);
+        if (!ours?.value) return { ok: false, status: 503, why: "LAMPORT cannot be taken just now. USDC or SOL can, or try again later." };
         let have: bigint;
         try {
-          const theirs = await this.rpc.call("getTokenAccountBalance", [tokenAccountOf(from, burnMint, token.program).toBase58(), { commitment: "confirmed" }]);
+          const theirs = await this.rpc.call("getTokenAccountBalance", [tokenAccountOf(from, lamport, token.program).toBase58(), { commitment: "confirmed" }]);
           if (!/^\d+$/.test(String(theirs?.value?.amount ?? ""))) throw new Error("no amount");
           have = BigInt(theirs.value.amount);
         } catch (e) {
@@ -351,9 +289,10 @@ export class Prepaid {
           if (!/could not find account/i.test(String((e as Error)?.message ?? ""))) throw e;
           have = 0n;
         }
-        if (have < owed) return { ok: false, status: 409, why: `that wallet's own LAMPORT account holds ${grouped(have, token.decimals)}, and this burns ${grouped(owed, token.decimals)}.` };
+        if (have < units) return { ok: false, status: 409, why: `that wallet holds ${grouped(have, token.decimals)} LAMPORT, and this needs ${grouped(units, token.decimals)}.` };
+        this.accounts.asked(intent, this.now());
         const recent = await this.rpc.call("getLatestBlockhash", [{ commitment: "confirmed" }]);
-        const tx = new Transaction({ feePayer: from, recentBlockhash: String(recent?.value?.blockhash) }).add(burnInstruction({ payer: from, mint: burnMint, program: token.program, units: owed, decimals: token.decimals, reference: new PublicKey(intent.reference) }));
+        const tx = new Transaction({ feePayer: from, recentBlockhash: String(recent?.value?.blockhash) }).add(paymentInstruction({ payer: from, payTo: treasury, asset: "LAMPORT", units, mint: lamport, reference: new PublicKey(intent.reference), program: token.program, decimals: token.decimals }));
         return { ok: true, transaction: Buffer.from(tx.serialize({ requireAllSignatures: false, verifySignatures: false })).toString("base64") };
       }
       if (intent.asset === "USDC") {
@@ -367,18 +306,14 @@ export class Prepaid {
         const have = BigInt((await this.rpc.call("getBalance", [from.toBase58(), { commitment: "confirmed" }]))?.value ?? 0);
         if (have < units + 10_000n) return { ok: false, status: 409, why: `that wallet holds ${decimal(have, 9)} SOL, and this needs ${decimal(units, 9)} and the fee.` };
       }
+      // (a quote a payment was built for is looked for by the service itself from here on: sweep)
+      this.accounts.asked(intent, this.now());
       const recent = await this.rpc.call("getLatestBlockhash", [{ commitment: "confirmed" }]);
       const tx = new Transaction({ feePayer: from, recentBlockhash: String(recent?.value?.blockhash) }).add(paymentInstruction({ payer: from, payTo, asset: intent.asset, units, mint, reference: new PublicKey(intent.reference) }));
       return { ok: true, transaction: Buffer.from(tx.serialize({ requireAllSignatures: false, verifySignatures: false })).toString("base64") };
     } catch {
       return { ok: false, status: 502, why: "the chain could not be read just now. Try again in a minute." };
     }
-  }
-
-  /** Why a quote to burn cannot be acted on now: burning was switched off, or is now of another token. Null when it can. */
-  private burnOff(intent: PayIntent): Refusal | null {
-    if (this.cfg.burn && (intent.mint ?? this.cfg.burn.mint) === this.cfg.burn.mint) return null;
-    return { ok: false, status: 409, why: "paying in LAMPORT is switched off here just now. Anything already burned for this is not lost: write to support@lamportrobotics.com." };
   }
 
   /**
@@ -402,22 +337,25 @@ export class Prepaid {
 
   /**
    * One transaction, when it is on the chain at `commitment`, did not fail and names the quote. "nothing":
-   * it is there and is nothing toward the quote (remembered, once final). Null: it is not there, or could
-   * not be read this time. One that cannot be read does not keep the others from being read.
+   * it was read, and failed or does not name the quote (remembered, once final). "unread": it could not be
+   * read this time, or the answer could not be made sense of; it is asked for again at the next look. Null:
+   * it is not there. One that cannot be read does not keep the others from being read.
    */
-  private async readOne(intent: PayIntent, signature: string, commitment: Commitment): Promise<ObservedTx | "nothing" | null> {
-    const nothing = (): "nothing" => { if (commitment === "finalized") this.note(intent, signature, 0n); return "nothing"; };
+  private async readOne(intent: PayIntent, signature: string, commitment: Commitment): Promise<ObservedTx | "nothing" | "unread" | null> {
+    const ask = (version: number) => this.rpc.call("getTransaction", [signature, { encoding: "base64", maxSupportedTransactionVersion: version, commitment }]);
     let result: any;
-    try { result = await this.rpc.call("getTransaction", [signature, { encoding: "base64", maxSupportedTransactionVersion: 0, commitment }]); }
+    try { result = await ask(0); }
     catch (e) {
-      // a transaction in a form newer than this reads is nothing toward a quote, now and later
+      // a transaction in a newer form than was asked for: asked for again in that form, and read like any other
       const why = String((e as Error)?.message ?? "");
-      return /version/i.test(why) && /not supported/i.test(why) ? nothing() : null;
+      if (!(/version/i.test(why) && /not supported/i.test(why))) return "unread";
+      try { result = await ask(1); } catch { return "unread"; }
     }
     if (result === null || result === undefined) return null;
     const tx = fromRpc(signature, result);
+    if (!tx) return "unread";
     // the list is the RPC's word; that the transaction names the reference is read from the transaction itself
-    if (!tx || tx.failed || !accountKeys(tx).includes(intent.reference)) return nothing();
+    if (tx.failed || !accountKeys(tx).includes(intent.reference)) { if (commitment === "finalized") this.note(intent, signature, 0n); return "nothing"; }
     return tx;
   }
 
@@ -437,20 +375,24 @@ export class Prepaid {
 
   /** `asking`: somebody asked, which keeps the quote in the service's own hourly look for three days more. */
   private async look(intent: PayIntent, asking: boolean): Promise<{ ok: true; result: CheckView } | Refusal> {
-    if (intent.asset === "LAMPORT") return this.lookForBurns(intent, asking);
     const profile = intent.profile;
     const paid = () => ({ ok: true as const, result: { status: "paid" as const, until: this.accounts.prepaidUntil(profile) } });
-    if (intent.paidBy) return paid();
+    if (intent.paidBy) {
+      // credited, and the look was cut short before the plan was started (a write that failed): it is started now
+      const until = this.accounts.prepaidUntil(profile);
+      if (until > this.now() && this.accounts.profile(profile)?.tier !== "pro") this.started(profile, until);
+      return paid();
+    }
     if (asking) this.accounts.asked(intent, this.now());
     // finalized: a payment that could still be undone is not one yet
     const list = await this.listed(intent, "finalized");
-    let read = 0;
+    let unread = 0;
     for (const signature of this.toRead(intent, intent.sent ?? [], list ?? [])) {
       const tx = await this.readOne(intent, signature, "finalized");
-      if (tx === null) continue;
-      read += 1;
-      if (tx === "nothing") continue;
-      const got = arrived(tx, this.cfg.payTo, intent.asset, this.mint);
+      if (tx === "unread") { unread += 1; continue; }
+      if (tx === null || tx === "nothing") continue;
+      // (at the wallet and in the token the quote was made for: for LAMPORT, the treasury's, as they were then)
+      const got = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);
       // nothing, short, or late: read once and remembered, so that what cannot be counted is not read at every look
       if (got < BigInt(intent.units)) { this.note(intent, signature, got > 0n ? got : 0n); continue; }
       // a price in SOL holds for ten minutes: a payment made after that was made at another price
@@ -462,73 +404,18 @@ export class Prepaid {
       return paid();
     }
     if (intent.paidBy) return paid();
-    if (list === null && read === 0) return CHAIN_DOWN;
     // what was read, now or before, and could not be counted: one that came late, or the largest that was short
+    // (not one that has since paid for another quote it also named: that is spent, and there is nothing of it to send back)
     let best: CheckView = { status: "waiting" };
     for (const signature of new Set([...(intent.sent ?? []), ...(list ?? [])])) {
       const was = this.seen.get(`${intent.reference}:${signature}`);
-      if (!was || was.got <= 0n) continue;
+      if (!was || was.got <= 0n || this.accounts.credited(signature)) continue;
       if (was.late) best = { status: "late" };
       else if (best.status === "waiting" || (best.status === "short" && BigInt(best.arrived) < was.got)) best = { status: "short", arrived: was.got.toString(), wanted: intent.units };
     }
+    // "nothing is there yet" is not said of a chain that did not answer, or of a transaction that could not be read
+    if (best.status === "waiting" && (list === null || unread > 0)) return CHAIN_DOWN;
     return { ok: true, result: best };
-  }
-
-  /**
-   * The amount a quote to burn pays at: its own while it stands, and once it has run out never less than
-   * the number then in force. A quote holds a week; it does not go on paying at an old number after that.
-   */
-  private wantOf(intent: PayIntent, decimals: number, at: number): bigint {
-    const quoted = BigInt(intent.units);
-    if (at <= intent.expiresAt) return quoted;
-    const current = BigInt(this.cfg.burn!.perMonth) * BigInt(intent.months) * 10n ** BigInt(decimals);
-    return current > quoted ? current : quoted;
-  }
-
-  /** Pays a quote from what is counted toward it, once for each time that covers the amount. `at`: when what tipped it was burned. */
-  private payCounted(intent: PayIntent, decimals: number, at: number): void {
-    const want = this.wantOf(intent, decimals, at);
-    for (;;) {
-      const now = this.now();
-      const until = addMonths(Math.max(now, this.accounts.prepaidUntil(intent.profile)), intent.months);
-      // (paid for by burns before this quote was made, where no burn names it: there is no one transaction to name)
-      if (!this.accounts.payFromBurned(intent, want, { signature: intent.lastCounted ?? "carried", asset: "LAMPORT", units: want.toString(), months: intent.months, cents: 0, at: now }, until)) return;
-      this.started(intent.profile, until);
-    }
-  }
-
-  /**
-   * The same for a quote to burn. Every burn that names it is counted toward it, and spent, as it is read.
-   * Each time what is counted comes to the amount, the months are paid for once: so a second burn made by
-   * mistake pays for the months again and is not lost, and what is over waits for the rest, or for the
-   * profile's next quote.
-   */
-  private async lookForBurns(intent: PayIntent, asking: boolean): Promise<{ ok: true; result: CheckView } | Refusal> {
-    const profile = intent.profile;
-    const paid = () => ({ ok: true as const, result: { status: "paid" as const, until: this.accounts.prepaidUntil(profile) } });
-    const off = this.burnOff(intent);
-    if (off) return intent.paidBy ? paid() : off;
-    let decimals: number;
-    try { decimals = (await this.burnToken()).decimals; } catch { return intent.paidBy ? paid() : CHAIN_DOWN; }
-    if (asking) this.accounts.asked(intent, this.now());
-    // First what is counted and not yet paid for: carried over from another quote, or counted by a look
-    // that was cut short before it could pay. It is paid for whether or not anything new is found.
-    this.payCounted(intent, decimals, this.now());
-    const list = await this.listed(intent, "finalized");
-    let read = 0;
-    for (const signature of this.toRead(intent, intent.sent ?? [], list ?? [])) {
-      const tx = await this.readOne(intent, signature, "finalized");
-      if (tx === null) continue;
-      read += 1;
-      if (tx === "nothing") continue;
-      const here = burned(tx, this.cfg.burn!.mint);
-      if (here <= 0n) { this.note(intent, signature, 0n); continue; }
-      if (this.accounts.countBurn(intent, signature, here, this.now())) this.payCounted(intent, decimals, tx.blockTime ?? this.now());
-    }
-    if (intent.paidBy) return paid();
-    const counted = BigInt(intent.counted ?? "0");
-    if (counted > 0n) return { ok: true, result: { status: "short", arrived: counted.toString(), wanted: this.wantOf(intent, decimals, this.now()).toString() } };
-    return list === null && read === 0 ? CHAIN_DOWN : { ok: true, result: { status: "waiting" } };
   }
 
   /** A payment was credited: the profile has the plan, and its owner is told. */
@@ -539,36 +426,34 @@ export class Prepaid {
   }
 
   /**
-   * The hourly look for payments nobody is waiting on a page for: the quotes a payment was built for or
-   * asked about in the last three days. A tab that was closed before the chain made a payment final, and a
-   * second burn that landed after the first was counted, are found here.
+   * The hourly look for payments nobody is waiting on a page for. First the unpaid quotes a payment was
+   * built for or asked about in the last three days: a tab that was closed before the chain made a payment
+   * final does not lose it. Then, while there is room, the quotes of the last day that were only shown: a
+   * payment made from a phone, by someone who never came back to press the button, is found too.
    *
-   * So many an hour and no more, and every quote gets its turn: the ones looked for longest ago go first,
-   * and no profile has more than a few of its quotes looked for in one hour. A profile that keeps asking
-   * about its own quotes does not push anybody else's out.
+   * So many an hour and no more, and every quote gets its turn: within each of the two, the ones looked for
+   * longest ago go first, and no profile has more than a few of its quotes looked for in one hour. A profile
+   * that keeps asking about its own quotes does not push anybody else's out.
    */
   async sweep(): Promise<{ looked: number; paid: number }> {
     const now = this.now();
-    const live = new Set<string>();
-    const due = this.accounts.intents().filter((i) => {
-      if (i.askedAt === undefined) return false;
-      const ok = i.paidBy ? i.asset === "LAMPORT" && now - i.askedAt <= SWEEP_PAID_SECONDS : now - i.askedAt <= SWEEP_SECONDS;
-      if (ok) live.add(i.reference);
-      return ok;
-    }).sort((a, b) => (this.swept.get(a.reference) ?? 0) - (this.swept.get(b.reference) ?? 0) || (b.askedAt ?? 0) - (a.askedAt ?? 0));
+    const open = this.accounts.intents().filter((i) => !i.paidBy);
+    const turn = (a: PayIntent, b: PayIntent) => (this.swept.get(a.reference) ?? 0) - (this.swept.get(b.reference) ?? 0) || (b.askedAt ?? b.createdAt) - (a.askedAt ?? a.createdAt);
+    const asked = open.filter((i) => i.askedAt !== undefined && now - i.askedAt <= SWEEP_SECONDS).sort(turn);
+    const shown = open.filter((i) => i.askedAt === undefined && now - i.createdAt <= SWEEP_SHOWN_SECONDS).sort(turn);
+    const live = new Set([...asked, ...shown].map((i) => i.reference));
     for (const reference of this.swept.keys()) if (!live.has(reference)) this.swept.delete(reference);
     const each = new Map<string, number>();
     let looked = 0, paid = 0;
-    for (const intent of due) {
+    for (const intent of [...asked, ...shown]) {
       if (looked >= SWEEP_MOST) break;
       const mine = each.get(intent.profile) ?? 0;
       if (mine >= SWEEP_EACH) continue;
       each.set(intent.profile, mine + 1);
       looked += 1;
       this.swept.set(intent.reference, now);
-      const before = this.accounts.prepaidUntil(intent.profile);
       await this.inTurn(intent.reference, () => this.look(intent, false)).catch(() => undefined);
-      if (this.accounts.prepaidUntil(intent.profile) > before) paid += 1;
+      if (intent.paidBy) paid += 1;
     }
     return { looked, paid };
   }

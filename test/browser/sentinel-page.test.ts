@@ -19,11 +19,11 @@ import { fileURLToPath } from "node:url";
 import { Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import type { Page } from "playwright";
 import { Prompt, WARDEN, launch, type Browser } from "./harness.js";
-import { USDC_MINT, burnInstruction, paymentInstruction } from "../../sentinel/service/src/prepaid.js";
+import { USDC_MINT, paymentInstruction, tokenAccountOf } from "../../sentinel/service/src/prepaid.js";
 import { Accounts } from "../../sentinel/service/src/accounts.js";
 import { Billing, Stripe, type BillingConfig, type StripeFetch } from "../../sentinel/service/src/billing.js";
 import { LAMPORT_MINT, telegramLinking } from "../../sentinel/service/src/main.js";
-import { PRO_FEATURES, PRO_NOT_YET, RESCUE_TERMS, WATCH_FEATURES, burnTerms, prepaidTerms, purchaseTerms, renewalTerms } from "../../sentinel/service/src/plans.js";
+import { PRO_FEATURES, PRO_NOT_YET, RESCUE_TERMS, WATCH_FEATURES, lamportTerms, prepaidTerms, purchaseTerms, renewalTerms } from "../../sentinel/service/src/plans.js";
 import { approveForRescue, closeConfig, delegateAddress, initConfig } from "../../sentinel/service/src/program.js";
 import type { Rpc } from "../../sentinel/service/src/rpc.js";
 import { listen, type ApiDeps } from "../../sentinel/service/src/server.js";
@@ -303,6 +303,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     // It does: the amount is asked of the service, shown with the address and what paying ahead means, and
     // the wallet in this browser is handed the payment the service built.
     const PAY_TO = "74A7zaiS6xyRTKjFFbVwyViQvG2zHTcX1JjmT9EkUp4A", REFERENCE = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM";
+    const USDC_ACCOUNT = tokenAccountOf(new PublicKey(PAY_TO), new PublicKey(USDC_MINT)).toBase58();
     const asked: unknown[][] = [];
     let paidUntil: number | null = null;
     // the payment as the service builds one: 30 USDC from this wallet to Lamport's address, naming the quote
@@ -311,7 +312,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
       .serialize({ requireAllSignatures: false, verifySignatures: false });
     apiDeps.prepaid = {
       offer: () => ({ payTo: PAY_TO, assets: ["USDC", "SOL"], months: [1, 3, 12] }),
-      quote: async (_profile, asset, months) => { asked.push(["quote", asset, months]); return { ok: true, quote: { reference: REFERENCE, payTo: PAY_TO, asset: asset as "USDC", units: "30000000", decimals: 6, mint: null, months: months as number, cents: 3000, expiresAt: Math.floor(Date.now() / 1000) + 600, url: `solana:${PAY_TO}?amount=30&reference=${REFERENCE}` } }; },
+      quote: async (_profile, asset, months) => { asked.push(["quote", asset, months]); return { ok: true, quote: { reference: REFERENCE, payTo: PAY_TO, asset: asset as "USDC", units: "30000000", decimals: 6, mint: null, months: months as number, cents: 3000, expiresAt: Math.floor(Date.now() / 1000) + 600, url: `solana:${PAY_TO}?amount=30&reference=${REFERENCE}`, account: USDC_ACCOUNT } }; },
       transaction: async (_profile, reference, payer) => { asked.push(["transaction", reference, payer]); return { ok: true, transaction: Buffer.from(payment).toString("base64") }; },
       check: async (_profile, reference) => { asked.push(["check", reference]); return { ok: true, result: paidUntil ? { status: "paid", until: paidUntil } : { status: "waiting" } }; },
     };
@@ -323,7 +324,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     await ahead.getByRole("button", { name: "Show the amount" }).click();
     await expect.poll(() => ahead.locator(".quote").innerText().catch(() => ""), { timeout: 8000 }).toContain("Send exactly 30 USDC to");
     expect(asked[0]).toEqual(["quote", "USDC", 3]);
-    expect(await ahead.locator(".quote code.addr").innerText()).toBe(PAY_TO);
+    // the wallet, and the account of it that a wallet's prompt and Warden's will name
+    expect(await ahead.locator(".quote code.addr").allInnerTexts()).toEqual([PAY_TO, USDC_ACCOUNT]);
     expect(await ahead.locator(".quote ul.terms li").allInnerTexts()).toEqual(prepaidTerms(3000, 3));
     expect(await ahead.getByLabel("Payment request").inputValue()).toBe(`solana:${PAY_TO}?amount=30&reference=${REFERENCE}`);
     // the wallet pays: it is given exactly what the service built, for mainnet, and the page then asks the service whether it arrived
@@ -341,40 +343,66 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     expect(asked.find((a) => a[0] === "transaction")).toEqual(["transaction", REFERENCE, W1]);
     await expect.poll(() => page.locator("#notice").innerText(), { timeout: 10_000 }).toBe("Paid. Your plan runs until 13 February 2027.");
     expect(asked.some((a) => a[0] === "check" && a[1] === REFERENCE)).toBe(true);
-    // And by burning LAMPORT, where the service offers that: the choice says "burned" before anything else
-    // does, there is no address to send to and no payment request, and Warden says the burn in whole tokens.
-    const LAMPORT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun", BURN_REFERENCE = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T";
-    const burn = new Transaction({ feePayer: new PublicKey(W1), recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" })
-      .add(burnInstruction({ payer: new PublicKey(W1), mint: new PublicKey(LAMPORT), program: new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"), units: 25_000_000_000n, decimals: 6, reference: new PublicKey(BURN_REFERENCE) }))
+    // And in LAMPORT, where the service offers that: a number of tokens, sent to Lamport's treasury wallet,
+    // which is another wallet than the one USDC goes to. The page names that wallet and the token account of
+    // it that the prompts will show, and no other amount can be shown while the payment is being looked for.
+    const LAMPORT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun", TREASURY = "4Nd1mBQtrMJVYVfKf2PJy9NZUZdTAsp7D4xWLs4gDB4T", LAMPORT_REFERENCE = "7VfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs";
+    const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+    const TREASURY_ACCOUNT = tokenAccountOf(new PublicKey(TREASURY), new PublicKey(LAMPORT), TOKEN_2022).toBase58();
+    const inLamport = new Transaction({ feePayer: new PublicKey(W1), recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" })
+      .add(paymentInstruction({ payer: new PublicKey(W1), payTo: new PublicKey(TREASURY), asset: "LAMPORT", units: 25_000_000_000n, mint: new PublicKey(LAMPORT), reference: new PublicKey(LAMPORT_REFERENCE), program: TOKEN_2022, decimals: 6 }))
       .serialize({ requireAllSignatures: false, verifySignatures: false });
     asked.length = 0;
     paidUntil = null;
+    let release: () => void = () => undefined;
+    const waitingOnChain = new Promise<void>((r) => { release = r; });
     apiDeps.prepaid = {
-      offer: () => ({ payTo: PAY_TO, assets: ["USDC", "SOL", "LAMPORT"], months: [1, 3, 12], burn: { perMonth: 25_000 } }),
-      quote: async (_profile, asset, months) => { asked.push(["quote", asset, months]); return { ok: true, quote: { reference: BURN_REFERENCE, payTo: "", asset: "LAMPORT", units: "25000000000", decimals: 6, mint: LAMPORT, months: months as number, cents: 0, expiresAt: Math.floor(Date.now() / 1000) + 600, url: "", burned: true } }; },
-      transaction: async (_profile, reference, payer) => { asked.push(["transaction", reference, payer]); return { ok: true, transaction: Buffer.from(burn).toString("base64") }; },
-      check: async (_profile, reference) => { asked.push(["check", reference]); return { ok: true, result: paidUntil ? { status: "paid", until: paidUntil } : { status: "waiting" } }; },
+      offer: () => ({ payTo: PAY_TO, assets: ["USDC", "SOL", "LAMPORT"], months: [1, 3, 12], lamport: { perMonth: 25_000, payTo: TREASURY } }),
+      quote: async (_profile, asset, months) => { asked.push(["quote", asset, months]); return { ok: true, quote: { reference: LAMPORT_REFERENCE, payTo: TREASURY, asset: "LAMPORT", units: "25000000000", decimals: 6, mint: LAMPORT, months: months as number, cents: 0, expiresAt: Math.floor(Date.now() / 1000) + 600, url: `solana:${TREASURY}?amount=25000&spl-token=${LAMPORT}&reference=${LAMPORT_REFERENCE}`, account: TREASURY_ACCOUNT } }; },
+      transaction: async (_profile, reference, payer) => { asked.push(["transaction", reference, payer]); return { ok: true, transaction: Buffer.from(inLamport).toString("base64") }; },
+      // the first look is held until the test lets it go: the chain has not made the payment final yet
+      check: async (_profile, reference, signatures) => { asked.push(["check", reference, signatures]); await waitingOnChain; return { ok: true, result: paidUntil ? { status: "paid", until: paidUntil } : { status: "waiting" } }; },
     };
     await page.reload();
     await expect.poll(() => ahead.count(), { timeout: 10_000 }).toBe(1);
-    expect(await ahead.getByLabel("Pay in").locator("option").allInnerTexts()).toEqual(["USDC", "SOL", "LAMPORT, burned"]);
+    expect(await ahead.getByLabel("Pay in").locator("option").allInnerTexts()).toEqual(["USDC", "SOL", "LAMPORT"]);
     await ahead.getByLabel("Pay in").selectOption("LAMPORT");
     await ahead.getByRole("button", { name: "Show the amount" }).click();
-    await expect.poll(() => ahead.locator(".quote").innerText().catch(() => ""), { timeout: 8000 }).toContain("This burns exactly 25,000 LAMPORT. It is not sent to anybody.");
+    await expect.poll(() => ahead.locator(".quote").innerText().catch(() => ""), { timeout: 8000 }).toContain(`Send exactly 25,000 LAMPORT to ${TREASURY}, Lamport's treasury wallet.`);
     expect(asked[0]).toEqual(["quote", "LAMPORT", 1]);
-    expect(await ahead.locator(".quote code.addr").count()).toBe(0);
-    expect(await ahead.getByLabel("Payment request").count()).toBe(0);
-    expect(await ahead.locator(".quote ul.terms li").allInnerTexts()).toEqual(burnTerms("25,000", 1));
+    expect(await ahead.locator(".quote code.addr").allInnerTexts()).toEqual([TREASURY, TREASURY_ACCOUNT]);
+    expect(await ahead.locator(".quote").innerText()).toContain("Warden gives the amount in the token's smallest units, a million to a token: 25000000000.");
+    expect(await ahead.locator(".quote ul.terms li").allInnerTexts()).toEqual(lamportTerms("25,000", 1));
+    expect(await ahead.getByLabel("Payment request").inputValue()).toBe(`solana:${TREASURY}?amount=25000&spl-token=${LAMPORT}&reference=${LAMPORT_REFERENCE}`);
     paidUntil = Math.floor(Date.UTC(2027, 1, 13, 12) / 1000);
     await ahead.getByRole("button", { name: "Pay with TestWallet" }).click();
-    const beforeBurn = await Prompt.on(page);
-    const burnHeld = await beforeBurn.text(10_000);
-    expect(burnHeld?.tag).toBe("Lamport Warden · Before you sign");
-    expect(burnHeld?.sentence).toBe("Burns 25,000 LAMPORT from this wallet. That is how the Sentinel page takes payment in LAMPORT. The tokens are destroyed: nobody receives them, and nobody can bring them back.");
+    // Warden reads it like any first payment to an address, and names the token account the page named
+    const beforeLamport = await Prompt.on(page);
+    const lamportHeld = await beforeLamport.text(10_000);
+    expect(lamportHeld?.tag).toBe("Lamport Warden · Before you sign");
+    expect(lamportHeld?.sentence).toContain(`Sends 25000000000 units of token ${LAMPORT.slice(0, 4)}…${LAMPORT.slice(-4)} to ${TREASURY_ACCOUNT.slice(0, 4)}…${TREASURY_ACCOUNT.slice(-4)}.`);
     expect(await page.evaluate(() => (window as any).__sent ?? null)).toBeNull(); // the wallet has not been asked yet
-    await beforeBurn.click("Continue to wallet");
-    await expect.poll(async () => (await page.evaluate(() => (window as any).__sent ?? null)) ?? `not sent; the page says: ${await page.locator("#notice").innerText().catch(() => "")}`, { timeout: 8000 }).toEqual({ bytes: Array.from(burn), chain: "solana:mainnet" });
-    expect(asked.find((a) => a[0] === "transaction")).toEqual(["transaction", BURN_REFERENCE, W1]);
+    await beforeLamport.click("Continue to wallet");
+    await expect.poll(async () => (await page.evaluate(() => (window as any).__sent ?? null)) ?? `not sent; the page says: ${await page.locator("#notice").innerText().catch(() => "")}`, { timeout: 8000 }).toEqual({ bytes: Array.from(inLamport), chain: "solana:mainnet" });
+    expect(asked.find((a) => a[0] === "transaction")).toEqual(["transaction", LAMPORT_REFERENCE, W1]);
+    // While the payment is being looked for, nothing more is handed to a wallet and no other amount can be shown;
+    // and the service was given the signature the wallet returned, to look for it by.
+    await expect.poll(() => asked.some((a) => a[0] === "check"), { timeout: 8000 }).toBe(true);
+    expect((asked.find((a) => a[0] === "check") as unknown[])[2]).toEqual(["1".repeat(64)]);
+    expect(await ahead.getByRole("button", { name: "Pay with TestWallet" }).isDisabled()).toBe(true);
+    expect(await ahead.getByRole("button", { name: "Show the amount" }).isDisabled()).toBe(true);
+    expect(await ahead.getByLabel("Pay in").isDisabled()).toBe(true);
+    // The page draws itself again every twenty seconds. The amount that was shown, the payment request and the
+    // hold are all still there after it has: a box made anew would have put live pay buttons back.
+    const drawn = await page.evaluate(() => { const b = document.querySelector("#plans .ahead"); (b as any).__mark = "kept"; return !!b; });
+    expect(drawn).toBe(true);
+    await page.waitForTimeout(21_000);
+    expect(await page.evaluate(() => (document.querySelector("#plans .ahead") as any)?.__mark ?? null)).toBe("kept");
+    expect(await ahead.locator(".quote").innerText()).toContain(`Send exactly 25,000 LAMPORT to ${TREASURY}, Lamport's treasury wallet.`);
+    expect(await ahead.getByLabel("Payment request").inputValue()).toContain(LAMPORT_REFERENCE);
+    expect(await ahead.getByRole("button", { name: "Pay with TestWallet" }).isDisabled()).toBe(true);
+    expect(await ahead.getByRole("button", { name: "Show the amount" }).isDisabled()).toBe(true);
+    release();
     await expect.poll(() => page.locator("#notice").innerText(), { timeout: 10_000 }).toBe("Paid. Your plan runs until 13 February 2027.");
     // (the stand-in changed nothing: the story goes on with the card)
     delete apiDeps.prepaid;
@@ -474,7 +502,7 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     // a webhook nobody signed changes nothing
     const forged = await fetch(`http://127.0.0.1:${apiPort}/v1/stripe/webhook`, { method: "POST", headers: { "stripe-signature": "t=1,v1=00" }, body: "{}" });
     expect(forged.status).toBe(400);
-  });
+  }, 150_000); // (it waits out one of the page's own twenty-second redrawings)
 
   it("sets a wallet up for rescue only after rescue's own terms are agreed to, rescues when asked, and takes the setup away", async () => {
     const profile = accounts.profileOf(W1)!;

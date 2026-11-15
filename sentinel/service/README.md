@@ -19,7 +19,7 @@ and answer them. It holds no signing key and moves nothing. There is no rescuer 
 | `src/server.ts` | The HTTP API. |
 | `src/main.ts`, `src/cli.ts` | The process: the watcher on a timer and the API beside it. |
 | `src/billing.ts` | The paid plan: a monthly Stripe subscription at one of two prices, the webhook that moves a profile between tiers, and the daily look at who holds the token. |
-| `src/prepaid.ts`, `src/solprice.ts` | The same plan paid ahead in USDC or SOL: the quote and its reference, the payment read from the chain, and the price of SOL from sources that have to agree. And, where it is turned on, paid by burning LAMPORT. |
+| `src/prepaid.ts`, `src/solprice.ts` | The same plan paid ahead in USDC or SOL: the quote and its reference, the payment read from the chain, and the price of SOL from sources that have to agree. And, where it is turned on, paid in LAMPORT to the treasury wallet. |
 | `src/program.ts` | The rescue program's instructions, for arming (the owner signs) and for a rescue, and the plan of a rescue: which accounts, in what order, in how many transactions. |
 | `src/crypto.ts` | Random tokens and their hashes, the sealed box for channel addresses, and the check of a wallet's signature. All from Node itself. |
 
@@ -577,8 +577,34 @@ of the customer and the subscription.
     transaction names it. Any wallet can pay, from the page or from a phone; the reference is what ties the
     payment to the profile.
   - A payment is read from the chain at `finalized` and counted by what arrived at Lamport's address in it,
-    from the balances before and after: not by what the page says and not by what an instruction says. That
-    the transaction names the reference is read from the transaction, not taken from the RPC's list.
+    from the balances before and after: not by what the page says and not by what an instruction says.
+    That the transaction names the reference is read from the transaction, not taken from the RPC's list.
+  - How a payment is found.
+    - By its signature, for certain. The page gives the service the signature its wallet returned, and one
+      can be typed in for a payment made somewhere else. The service keeps the newest five with the quote
+      and reads those transactions at every look, whatever else names the quote.
+    - By the chain's list for the quote's address, as a convenience: the newest thousand that name it,
+      read twelve at a time from each end. From the old end, because a payment is older than what is sent
+      after it to bury it; from the new end, because the latest payment may be the one that is enough.
+      Anyone can add to that list once a payment has shown the address, and for a few thousandths of a SOL
+      can push a payment out of the thousand, or keep the middle of it unread for a while. Such a payment
+      is not lost: it is found by its signature.
+    - A final transaction is read once (`seen`): what was nothing, short or late is remembered, so a pile
+      of small payments costs one read each and cannot fill every look. One transaction that cannot be
+      read does not lose the others.
+  - Nothing is credited twice, however many looks overlap: a transaction is marked spent and its quote
+    paid in one step, with nothing awaited in between (`credit`). Looks at one quote take turns (`inTurn`);
+    looks at different quotes do not wait for each other, so one profile's cannot hold up another's.
+  - The service looks by itself, about once an hour (`sweep`), for every unpaid quote a payment was built
+    for or asked about in the last three days; and then, while there is room, for the quotes of the last
+    day that were only shown, so that a payment made from a phone by someone who never came back to the
+    page is found too. Sixty quotes an hour, three of any one profile, the ones looked for longest ago
+    first, so every quote gets its turn and nobody's asking pushes another's out. A tab closed before the
+    chain made a payment final does not lose it, and the owner's channels are told when it is found.
+  - While a payment the page handed to a wallet is being looked for, the page hands a wallet nothing more
+    and shows no other amount. The box is kept when the page draws itself again every twenty seconds, with
+    the amount, the payment request and that hold. The page does not say that nothing was paid when it
+    cannot know.
   - A transaction pays for one thing, once: its signature is kept, and one that names two quotes is
     credited to one. A short payment starts nothing and is said to be short. USDC is a dollar for a dollar
     and a quote holds a week. SOL is priced when quoted, at a price two of three public sources agree on to
@@ -591,80 +617,34 @@ of the customer and the subscription.
     subscription, and a card plan is not started over months already paid for.
   - `prepaid.test.ts` runs it against a list of transactions; `prepaid.validator.test.ts` runs a real token
     payment and a real SOL payment on a local validator, and is part of `pnpm test:rescue`.
-- **Paid by burning LAMPORT** (`src/prepaid.ts`), where `SENTINEL_BURN_PER_MONTH` says how many whole
-  tokens burn for a month. It is off until that is set, and it needs `SENTINEL_PAY_TO` beside it, since it
-  is one more way of paying ahead: the same months, the same profiles, nothing renews.
-  - Nothing is sent to Lamport or to anybody. The paying transaction is one `BurnChecked` from the payer's
-    own token account, naming the quote's reference. The tokens stop existing and the token's supply is
-    that much smaller. No key of Lamport's is involved, and Lamport holds nothing afterwards that it could
-    sell.
+- **Paid in LAMPORT** (`src/prepaid.ts`), where `SENTINEL_LAMPORT_PER_MONTH` says how many whole tokens
+  pay for a month and `SENTINEL_LAMPORT_PAY_TO` names Lamport's treasury wallet. It is off until both are
+  set, neither has a default, and it needs `SENTINEL_PAY_TO` beside it, since it is one more way of paying
+  ahead: the same months, the same profiles, nothing renews.
+  - It is a transfer, like the one in USDC, to another wallet: the tokens go to the treasury wallet and
+    not to the wallet USDC and SOL go to. What Lamport then does with them is done by hand, from that
+    wallet, and is no part of the service or of what is sold.
   - The number is the same for everybody. It is not a price in dollars, so there is no holder's price to
-    work out and no wallet's balance is read for the quote. Asked for again while it stands and is not
-    paid, a quote is the same quote: a page that was closed and opened again has the reference it had.
-  - A quote holds its number for a week. A burn made for it after that still counts, at the number then in
-    force if that is higher (`wantOf`): a quote does not go on paying at an old number once it has run out.
-  - It is counted by what the chain did, at `finalized`: by how much the signers' own accounts of the token
-    fell, less everything any account of it rose by (`burned`). A transfer comes to nothing. So does a burn
-    of tokens that were not the signer's: the token program lets anyone burn what sits in an account owned
-    by the System Program or the incinerator, and lets a delegate burn what it was let spend.
-  - It is offered only for a token with no more to it than a name and a picture (`PLAIN_EXTENSIONS`). A
-    token that keeps a fee on transfers, or keeps balances out of sight, would lose some from that sum
-    without a burn. LAMPORT has neither and can never be given either.
-  - What is burned for a quote stays counted, because none of it can be sent back. Each burn is spent the
-    moment it is counted (`countBurn`), toward that one quote. A burn that is short stays counted; each
-    time what is counted comes to the amount, the months are paid for once (`payFromBurned`); what is over
-    stays counted. When the profile next asks for an amount, what was left on its paid and run-out quotes
-    moves onto the new one (`carryBurned`), and a quote that still has something counted is never dropped.
-    So 10,000 and then 25,000 for a quote of 25,000 is a month with 10,000 toward the next, and two whole
-    burns are two months.
-  - A wallet is asked for no more than is owed: the transaction the service builds burns the amount less
-    what is counted and less what is already on the chain for the quote and not yet final. It is refused
-    when that is nothing, and when what is on the chain for the quote could not be read. While a payment
-    the page handed to a wallet is being looked for, the page hands a wallet nothing more and shows no
-    other amount.
-  - Nothing is counted twice, however many looks overlap: a transaction is marked spent in the same step
-    that counts it, with nothing awaited in between. Looks at one quote take turns (`inTurn`); looks at
-    different quotes do not wait for each other, so one profile's cannot hold up another's.
-  - How a payment is found.
-    - By its signature, for certain. The page gives the service the signature its wallet returned, and one
-      can be typed in for a payment made somewhere else. The service keeps the newest five with the quote
-      and reads those transactions at every look, whatever else names the quote.
-    - By the chain's list for the quote's address, as a convenience: the newest thousand that name it,
-      read twelve at a time from each end. From the old end, because a payment is older than what is sent
-      after it to bury it; from the new end, because the latest payment may be what completes an earlier
-      one. Anyone can add to that list once a payment has shown the address, and for a few thousandths of
-      a SOL can push a payment out of the thousand, or keep the middle of it unread for a while. Such a
-      payment is not lost: it is found by its signature.
-    - A final transaction is read once (`seen`): what was nothing, short or late is remembered, so a pile
-      of small payments costs one read each and cannot fill every look. One transaction that cannot be
-      read does not lose the others.
-  - The service looks by itself, about once an hour (`sweep`), for every quote a payment was built for or
-    asked about in the last three days (a paid quote to burn: six hours, for a second burn made by
-    mistake). Sixty quotes an hour, three of any one profile, the ones looked for longest ago first, so
-    every quote gets its turn and nobody's asking pushes another's out. A tab closed before the chain made
-    a payment final does not lose it, and the owner's channels are told when it is found. This goes for
-    USDC and SOL as well.
-  - A quote to burn is kept five weeks, or longer while something is counted on it, and is not dropped
-    for being one of many (other quotes: the newest twenty, for a week).
-  - With burning switched off, or pointed at another token, a quote to burn is answered with whom to write
-    to. It is not said to be on its way.
-  - What this does not do. A burn that names no quote of any profile, or the quote of a profile that has
-    since been deleted, pays for nothing. So does one that is neither found on the list nor ever named by
-    its signature, until it is named.
-  - There is nothing to refund: what was burned cannot be brought back by anybody. The page says so before
-    the wallet is asked (`burnTerms` in `src/plans.ts`), and so do the terms.
-  - Warden, in front of the wallet, says that transaction on the Sentinel page as "Burns 25,000 LAMPORT
-    from this wallet…", in whole tokens and by name (`burnPayment` in the extension's `src/sentinel.ts`).
-    That is wording only: the engine still judges the whole transaction, the sentence is used only where
-    the engine comes to no more than an explanation, and it is always asked about. A fee setting beside
-    the burn, or anything else, and the engine's own words stand. From any other site they always do.
-  - A payment request for a phone wallet (Solana Pay) can only ask for a transfer, so a burn is made from a
-    wallet in the browser.
-  - `burn-payment.test.ts` runs it against a list of transactions, including looks that overlap, burns of
-    tokens that were not the signer's, and payments buried or hidden from the chain's list.
-    `prepaid.validator.test.ts` burns a token under Token-2022 for real on a local validator, and checks
-    that the supply is then smaller by exactly the amount and that a transfer naming the quote counts for
-    nothing. It has not been run with LAMPORT itself, on mainnet.
+    work out and no wallet's balance is read for the quote. A quote holds a week.
+  - A quote keeps the wallet, the token and the decimals it was made for. A payment made on it is counted
+    against those, whatever the settings are by then: moving the treasury, changing the number or switching
+    LAMPORT off does not strand a payment that was already asked for.
+  - It is counted like USDC: by what arrived in the treasury's accounts of the token, at `finalized`. A
+    short payment starts nothing and is said to be short; sending it back is done by hand from the treasury.
+  - It is taken only for a token with no more to it than a name and a picture (`PLAIN_EXTENSIONS`). A token
+    that keeps back a fee on transfers would arrive short of what the page asked a wallet for, every time.
+    LAMPORT has no such fee and can never be given one.
+  - The treasury wallet needs its own account for the token before anything can be paid into it. Until it
+    has one, a payment from the page is refused with "LAMPORT cannot be taken just now".
+  - The page shows the treasury wallet and, beside it, the token account of that wallet that the payment
+    lands in. A wallet's prompt and Warden's name the token account, and Warden gives the amount in the
+    token's smallest units (its engine has no name for LAMPORT): the page says both, so that the payer
+    does not meet an address or a number nobody mentioned. Naming the token in Warden's own sentence is
+    not done here.
+  - `lamport-payment.test.ts` runs it against a list of transactions, including looks that overlap and
+    payments buried or hidden from the chain's list. `prepaid.validator.test.ts` sends a token under
+    Token-2022 to a treasury wallet for real on a local validator, and checks that tokens burned beside
+    a quote count for nothing. It has not been run with LAMPORT itself, on mainnet.
 - **A real payment before it is on sale.** `SENTINEL_CHECKOUT_TESTERS` names up to twenty wallet addresses,
   separated by commas. A profile that one of them is in sees the button and can buy while checkout is closed
   to everyone else, so the whole path (the page, Stripe's checkout with a real card, the webhook, the tier,

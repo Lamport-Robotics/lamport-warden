@@ -80,10 +80,9 @@ What it keeps, on that server:
   wallet you linked to the extension, the hash of the token it reports with.
 - Your plan. If you pay by card: Stripe's ids for the customer and the subscription, the price, its status
   and its dates. Not your card, your name or your email address: those are with Stripe and never reach
-  Sentinel. If you pay ahead in USDC or SOL, or by burning LAMPORT: the amounts you were shown in the last
-  week (an amount to burn, for five weeks or until what was burned for it is used, with how much that is),
-  when a payment for one was last asked about, the transactions your browser said paid them, and for each
-  payment the transaction, what it paid, for how many months, and when.
+  Sentinel. If you pay ahead in USDC, SOL or LAMPORT: the amounts you were shown in the last week, when a
+  payment for one was last asked about, the transactions your browser said paid them, and for each payment
+  the transaction, what it paid, for how many months, and when.
 - If you set a wallet up for rescue: the address that wallet approved for it, which is on the chain for
   anyone to read, and whether you switched rescue without asking on. Not your vault's key or its 24 words:
   those never leave you, and Sentinel has no use for them.
@@ -104,13 +103,9 @@ Who else receives something:
 - Telegram, if you connect a chat. Telegram learns that your account spoke to Sentinel's bot, and sends the
   bot your Telegram name with the message. Sentinel keeps the chat's number, encrypted like any channel's
   address, and nothing else about the account.
-- Everyone, if you pay in USDC or SOL. A transfer on the chain is public: anyone can see that the wallet
-  you paid from paid Lamport's address, how much and when. It can be paid from a wallet that is not one you
-  have Sentinel watch.
-- Everyone, if you pay by burning LAMPORT. A burn on the chain is public the same way: anyone can see that
-  the wallet burned them, how many and when. Lamport's address is not in it, but its shape and its amount
-  can tell someone who looks that it paid for Sentinel. It too can be made from a wallet that is not one
-  you have Sentinel watch.
+- Everyone, if you pay in USDC, SOL or LAMPORT. A transfer on the chain is public: anyone can see that the
+  wallet you paid from paid Lamport's address, how much and when. It can be paid from a wallet that is not
+  one you have Sentinel watch.
 - Everyone, if you set a wallet up for rescue. The setup is on the chain: anyone can see which Lamport Vault
   a wallet's rescue would go to, and so that the wallet and the vault have one owner.
 - Stripe, if you pay by card. It takes the payment under its own privacy policy. Sentinel gives Stripe a random id

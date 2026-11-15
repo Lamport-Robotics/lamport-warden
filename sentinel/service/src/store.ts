@@ -138,7 +138,7 @@ export interface Profile {
    */
   prepaid?: { until: number; remindedFor?: number; payments: Payment[] };
 }
-/** USDC and SOL are paid to Lamport. LAMPORT is not paid to anybody: it is burned (prepaid.ts). */
+/** USDC and SOL are paid to Lamport's payments wallet; LAMPORT, to its treasury wallet (prepaid.ts). */
 export type PayAsset = "USDC" | "SOL" | "LAMPORT";
 /** One payment that was credited: the transaction, what it paid in its asset's smallest units, and for how many months. */
 export interface Payment { signature: string; asset: PayAsset; units: string; months: number; cents: number; at: number }
@@ -149,10 +149,10 @@ export interface Payment { signature: string; asset: PayAsset; units: string; mo
 export interface PayIntent {
   reference: string; profile: string; asset: PayAsset; units: string; months: number; cents: number; createdAt: number; expiresAt: number; paidBy?: string;
   /**
-   * For a burn: the token that was quoted; what has been burned for this quote and not yet used to pay
-   * (smallest units); and the last transaction counted for it.
+   * For a quote in LAMPORT: the token, its decimals and the treasury wallet it was made for, as they were
+   * then. A payment made on the quote is counted against these, whatever the settings are by then.
    */
-  mint?: string; counted?: string; lastCounted?: string;
+  mint?: string; payTo?: string; decimals?: number;
   /** When a payment for it was last built or looked for: such a quote is looked for by the service too (prepaid.ts, sweep). */
   askedAt?: number;
   /** The transactions the payer's page said paid it, the newest five: read by signature, whatever else names the quote. */

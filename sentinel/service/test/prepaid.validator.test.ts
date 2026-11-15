@@ -8,9 +8,9 @@
  * its author believes the chain reports them. This asks the chain: is a transaction found by an address it
  * merely names, once it is final, and does it say what arrived where.
  *
- * And paying by burning: a token under Token-2022, as LAMPORT is, burned by the transaction the service
- * builds. The chain is asked whether there is then less of the token, and whether a transfer that names a
- * quote is rightly counted for nothing.
+ * And paying in LAMPORT: a token under Token-2022, as LAMPORT is, sent to a treasury wallet that is not the
+ * one USDC and SOL go to, by the transaction the service builds. The chain is asked whether it arrived
+ * there, and whether tokens that were burned and went to nobody are rightly counted for nothing.
  *
  * Skipped unless `solana-test-validator` is on PATH:
  *
@@ -36,15 +36,15 @@ const TOKEN = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const ASSOCIATED = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 const seeded = (n: number) => Keypair.fromSeed(new Uint8Array(32).fill(n));
-const authority = seeded(71), lamport = seeded(72), customer = seeded(73), watched = seeded(74);
+const authority = seeded(71), lamport = seeded(72), customer = seeded(73), watched = seeded(74), treasury = seeded(75);
 const u64 = (n: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(n); return b; };
 
 describe.skipIf(!onPath)("a payment for the plan on a local validator", () => {
   let validator: ChildProcess;
   let rpc: HttpRpc;
   let mint: PublicKey;
-  /** The token that is burned to pay: under Token-2022, six decimals, as LAMPORT is. */
-  let burnMint: PublicKey;
+  /** The token that stands for LAMPORT: under Token-2022, six decimals, as LAMPORT is. */
+  let lamportMint: PublicKey;
   let accounts: Accounts, prepaid: Prepaid, profile = "";
   const said: string[] = [];
 
@@ -125,21 +125,21 @@ describe.skipIf(!onPath)("a payment for the plan on a local validator", () => {
     await tokenAccount(lamport.publicKey);
     await send([authority], new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: mint, isSigner: false, isWritable: true }, { pubkey: customers, isSigner: false, isWritable: true }, { pubkey: authority.publicKey, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([7]), u64(100_000_000n)]) }));
 
-    // and a token under Token-2022 to burn: 100 of it with the customer, and an account of it for Lamport that a transfer can go to
+    // and a token under Token-2022 to stand for LAMPORT: 100 of it with the customer, and the treasury's own account for it
     const b = Keypair.generate();
-    burnMint = b.publicKey;
+    lamportMint = b.publicKey;
     await send([authority, b],
-      SystemProgram.createAccount({ fromPubkey: authority.publicKey, newAccountPubkey: burnMint, lamports: await rent(82), space: 82, programId: TOKEN_2022 }),
-      new TransactionInstruction({ programId: TOKEN_2022, keys: [{ pubkey: burnMint, isSigner: false, isWritable: true }], data: Buffer.concat([Buffer.from([20, 6]), authority.publicKey.toBuffer(), Buffer.from([0])]) }));
-    const toBurn = await tokenAccount(customer.publicKey, burnMint, TOKEN_2022);
-    await tokenAccount(lamport.publicKey, burnMint, TOKEN_2022);
-    await send([authority], new TransactionInstruction({ programId: TOKEN_2022, keys: [{ pubkey: burnMint, isSigner: false, isWritable: true }, { pubkey: toBurn, isSigner: false, isWritable: true }, { pubkey: authority.publicKey, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([7]), u64(100_000_000n)]) }));
+      SystemProgram.createAccount({ fromPubkey: authority.publicKey, newAccountPubkey: lamportMint, lamports: await rent(82), space: 82, programId: TOKEN_2022 }),
+      new TransactionInstruction({ programId: TOKEN_2022, keys: [{ pubkey: lamportMint, isSigner: false, isWritable: true }], data: Buffer.concat([Buffer.from([20, 6]), authority.publicKey.toBuffer(), Buffer.from([0])]) }));
+    const theirs = await tokenAccount(customer.publicKey, lamportMint, TOKEN_2022);
+    await tokenAccount(treasury.publicKey, lamportMint, TOKEN_2022);
+    await send([authority], new TransactionInstruction({ programId: TOKEN_2022, keys: [{ pubkey: lamportMint, isSigner: false, isWritable: true }, { pubkey: theirs, isSigner: false, isWritable: true }, { pubkey: authority.publicKey, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([7]), u64(100_000_000n)]) }));
 
     accounts = new Accounts(new MemoryStore(), Buffer.alloc(32, 9));
     const admitted = accounts.admit(watched.publicKey.toBase58(), null, Math.floor(Date.now() / 1000));
     if (!admitted.ok) throw new Error("setup");
     profile = admitted.profile;
-    prepaid = new Prepaid({ payTo: lamport.publicKey.toBase58(), usdcMint: mint.toBase58(), burn: { mint: burnMint.toBase58(), perMonth: 25 } }, accounts, rpc,
+    prepaid = new Prepaid({ payTo: lamport.publicKey.toBase58(), usdcMint: mint.toBase58(), lamport: { mint: lamportMint.toBase58(), perMonth: 25, payTo: treasury.publicKey.toBase58() } }, accounts, rpc,
       { sells: () => true, holder: async () => false, byCard: () => false, centsFull: 1500, centsHolder: 1000 },
       { price: async () => 75, notice: async (_p, sentence) => { said.push(sentence); } });
   }, 120_000);
@@ -205,32 +205,31 @@ describe.skipIf(!onPath)("a payment for the plan on a local validator", () => {
     expect(accounts.profile(profile)!.prepaid!.payments).toHaveLength(2);
   }, 180_000);
 
-  it("by burning: the service builds the burn, the customer's wallet signs it, there is that much less of the token, and it is counted once it is final", async () => {
+  it("in LAMPORT: the service builds the transfer to the treasury, the customer's wallet signs it, and it is counted once it is final", async () => {
     // (whatever the cases above left: this one stands by itself)
     const before = accounts.prepaidUntil(profile), paidBefore = accounts.profile(profile)!.prepaid?.payments.length ?? 0;
-    const theirs = tokenAccountOf(customer.publicKey, burnMint, TOKEN_2022);
-    expect(await supply(burnMint)).toBe(100_000_000n);
+    const theirs = tokenAccountOf(customer.publicKey, lamportMint, TOKEN_2022), ours = tokenAccountOf(treasury.publicKey, lamportMint, TOKEN_2022);
     const quoted = await prepaid.quote(profile, "LAMPORT", 1);
     if (!quoted.ok) throw new Error(quoted.why);
     const q = quoted.quote;
-    // 25 whole tokens for a month, in the units the chain says the token has; nobody to send it to
-    expect(q).toMatchObject({ units: "25000000", decimals: 6, mint: burnMint.toBase58(), payTo: "", burned: true });
+    // 25 whole tokens for a month, in the units the chain says the token has, to the treasury and its own token account
+    expect(q).toMatchObject({ units: "25000000", decimals: 6, mint: lamportMint.toBase58(), payTo: treasury.publicKey.toBase58(), account: ours.toBase58() });
 
-    // a transfer of that amount that names the quote is not a burn: once final, it is still counted for nothing
-    const transfer = Buffer.concat([Buffer.from([12]), u64(25_000_000n), Buffer.from([6])]);
-    const sent = await send([customer], new TransactionInstruction({ programId: TOKEN_2022, data: transfer, keys: [
-      { pubkey: theirs, isSigner: false, isWritable: true }, { pubkey: burnMint, isSigner: false, isWritable: false }, { pubkey: tokenAccountOf(lamport.publicKey, burnMint, TOKEN_2022), isSigner: false, isWritable: true },
+    // tokens burned in a transaction that names the quote went to nobody: once final, they are counted for nothing
+    const burnt = await send([customer], new TransactionInstruction({ programId: TOKEN_2022, data: Buffer.concat([Buffer.from([15]), u64(25_000_000n), Buffer.from([6])]), keys: [
+      { pubkey: theirs, isSigner: false, isWritable: true }, { pubkey: lamportMint, isSigner: false, isWritable: true },
       { pubkey: customer.publicKey, isSigner: true, isWritable: false }, { pubkey: new PublicKey(q.reference), isSigner: false, isWritable: false },
     ] }));
-    await final(sent);
+    await final(burnt);
     expect(await prepaid.check(profile, q.reference)).toEqual({ ok: true, result: { status: "waiting" } });
-    expect(await supply(burnMint)).toBe(100_000_000n);
+    expect(await supply(lamportMint)).toBe(75_000_000n);
 
     // what the page would hand the wallet
     const built = await prepaid.transaction(profile, q.reference, customer.publicKey.toBase58());
     if (!built.ok) throw new Error(built.why);
     const tx = Transaction.from(Buffer.from(built.transaction, "base64"));
     expect(tx.instructions).toHaveLength(1);
+    // the wallet USDC and SOL go to has no part in it
     expect(tx.compileMessage().accountKeys.map((k) => k.toBase58())).not.toContain(lamport.publicKey.toBase58());
     tx.sign(customer);
     const signature = await sendRaw(tx.serialize());
@@ -238,10 +237,10 @@ describe.skipIf(!onPath)("a payment for the plan on a local validator", () => {
     const result = await settled(q.reference);
     expect(result.status).toBe("paid");
     expect(Math.abs((result as { until: number }).until - addMonths(Math.max(before, Math.floor(Date.now() / 1000)), 1))).toBeLessThan(120);
-    // the tokens are gone: from the customer, and from the world
+    // it is in the treasury, all of it, and there is as much of the token as before the payment
+    expect(await balance(ours)).toBe(25_000_000n);
     expect(await balance(theirs)).toBe(50_000_000n);
-    expect(await supply(burnMint)).toBe(75_000_000n);
-    expect(await balance(tokenAccountOf(lamport.publicKey, burnMint, TOKEN_2022))).toBe(25_000_000n); // only what the transfer above sent
+    expect(await supply(lamportMint)).toBe(75_000_000n);
     expect(accounts.profile(profile)!.prepaid!.payments.at(-1)).toMatchObject({ signature, asset: "LAMPORT", units: "25000000", months: 1, cents: 0 });
     expect(accounts.profile(profile)!.prepaid!.payments).toHaveLength(paidBefore + 1);
   }, 240_000);

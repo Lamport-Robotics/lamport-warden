@@ -9,10 +9,3 @@ export const PRACTICE_PAGE = `${ARMING_ORIGIN}/try/`;
 export const SENTINEL_PAGE = `${ARMING_ORIGIN}/sentinel/`;
 /** Where "this signature was mine" is sent, when the owner turned that on. Fixed here: never taken from a page. */
 export const SENTINEL_API = `${ARMING_ORIGIN}/sentinel/api`;
-/**
- * $LAMPORT, and how many decimal places it has. Both are fixed for good: the token has no authority that could
- * mint it or change it. Warden names this one token, so that burning it to pay for Sentinel can be said in
- * whole tokens (sentinel.ts).
- */
-export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
-export const LAMPORT_DECIMALS = 6;

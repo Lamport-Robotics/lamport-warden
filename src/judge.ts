@@ -70,8 +70,6 @@ export async function judge(req: JudgeRequest, origin: string, store: Store, sou
   // Sentinel's own transactions are the two things the engine exists to block, so they are read first, by
   // their exact shape, and only then is anything else left to the engine (sentinel.ts).
   let decoded: ParsedTx | null = null;
-  /** A better sentence for what the engine reads rightly, used only where the engine comes to no more than an explanation. */
-  let wording: string | null = null;
   try { decoded = parseAnyMessage(messageBytes, { owner: req.owner, lookupTables }); } catch { decoded = null; }
   if (decoded && decoded.signers.includes(req.owner)) {
     let state = sentinelStateFrom(await store.sentinel?.(req.owner));
@@ -84,7 +82,6 @@ export async function judge(req: JudgeRequest, origin: string, store: Store, sou
     }
     const sentinel = readSentinel(decoded, req.owner, origin, state, { unseen });
     if (sentinel.kind === "verdict") return { verdict: sentinel.verdict, owner: req.owner, kind: "tx", sentinelAfter: sentinel.after };
-    if (sentinel.kind === "wording") wording = sentinel.sentence;
   }
   let verdict = checkTransaction({ bytes: messageBytes, owner: req.owner, memory, origin, privacyRings: "explain", lookupTables });
   // A program the decoder does not read in full is where the rest of the story is: ask what the whole thing would do.
@@ -110,9 +107,6 @@ export async function judge(req: JudgeRequest, origin: string, store: Store, sou
     const why = "it names some of its accounts through a lookup table I could not read, so part of it is hidden from me.";
     return { verdict: { ...verdict, level: verdict.level === "allow" ? "explain" : verdict.level, sentence: `${verdict.sentence} I could not read all of the accounts it uses.`, reasons: [...verdict.reasons.filter((r) => r !== "nothing unusual."), why] }, owner: req.owner, kind: "tx" };
   }
-  // The engine judged it. Where that is an explanation or less, it is said in the better words, and asked
-  // about: never let through unasked, and never made milder than the engine made it.
-  if (wording !== null && (verdict.level === "allow" || verdict.level === "explain")) verdict = { ...verdict, level: "explain", sentence: wording, reasons: [] };
   return { verdict, owner: req.owner, kind: "tx" };
 }
 
