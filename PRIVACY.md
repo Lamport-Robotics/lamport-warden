@@ -69,7 +69,8 @@ nothing is used for advertising or to decide creditworthiness or lending.
 ## What it can see on a page
 
 Warden runs on every https page because any page can ask a wallet to sign. There it does two things: it puts
-itself in front of the wallet's signing calls, and it draws its prompt. It does not read the page's content,
+itself in front of the wallet's connect and signing calls, and it draws its prompt and, while a decoy is
+showing, its notice. It does not read the page's content,
 your passwords or your keys. It never has your private keys: those stay in your wallet.
 
 ## Sentinel, the service

@@ -142,7 +142,7 @@
   <p>Requests are sent without cookies and without a referrer. Nothing is sent to anyone else, nothing is sold, and nothing is used for advertising or to decide creditworthiness or lending.</p>
 
   <h2>What it can see on a page</h2>
-  <p>Warden runs on every https page because any page can ask a wallet to sign. There it does two things: it puts itself in front of the wallet's signing calls, and it draws its prompt. It does not read the page's content, your passwords or your keys. It never has your private keys: those stay in your wallet.</p>
+  <p>Warden runs on every https page because any page can ask a wallet to sign. There it does two things: it puts itself in front of the wallet's connect and signing calls, and it draws its prompt and, while a decoy is showing, its notice. It does not read the page's content, your passwords or your keys. It never has your private keys: those stay in your wallet.</p>
 
   <h2>Sentinel, the service</h2>
   <p>Sentinel is separate from the extension. It is a service on Lamport's server that you sign in to at <code>warden.lamportrobotics.com/sentinel/</code> with a wallet signature, and you use it only if you choose to. It has no name, email address or password for you: you are whoever can sign with one of your wallets.</p>

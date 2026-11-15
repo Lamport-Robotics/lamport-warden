@@ -58,7 +58,7 @@ const askDecoy = (what: "first" | "asked", reqs: GuardRequest[]): Promise<ReplyM
   return new Promise<ReplyMessage>((resolve) => {
     waiting.set(id, resolve);
     // the first few of a long list are sent; the other half is told how many there were, and says so to the owner
-    dispatch(new CE(ch.request, { detail: JSON.stringify({ id, kind: one?.kind ?? "opaque", bytes: toBase64(one?.bytes ?? new Uint8Array(0)), owner: one?.owner ?? "", decoy: what, more: rest.slice(0, MOST_AT_ONCE).map((r) => ({ kind: r.kind, bytes: toBase64(r.bytes) })) }) }));
+    dispatch(new CE(ch.request, { detail: JSON.stringify({ id, kind: one?.kind ?? "opaque", bytes: toBase64(one?.bytes ?? new Uint8Array(0)), owner: one?.owner ?? "", decoy: what, total: reqs.length, more: rest.slice(0, MOST_AT_ONCE).map((r) => ({ kind: r.kind, bytes: toBase64(r.bytes) })) }) }));
   });
 };
 const tellDecoy = (what: "showing" | "gone", address = ""): void => {

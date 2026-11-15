@@ -286,6 +286,52 @@ describe.each([["Warden's script first", [WARDEN, WALLETS]], ["the wallet's scri
     await again.page.close();
   });
 
+  it("does not go on at a press with a site that was caught in another tab since this one was opened", async () => {
+    await forget();
+    const door = "standard:FixturePhantom";
+    const a = await open("phantom"), b = await open("phantom");
+    expect(await connect(a.page, door, "c")).toBe(DECOY.toBase58());
+    expect(await connect(b.page, door, "c")).toBe(DECOY.toBase58());
+    const note = await Notice.on(b.page);
+    expect((await note.text(6000))?.warn).toBe(false); // drawn before anything was known against the site
+    // the site is caught in the first tab
+    await a.page.bringToFront();
+    await start(a.page, "rob", door, "tx", everything);
+    expect((await a.prompt.text(10_000))?.tag).toBe("Lamport Warden · Blocked");
+    await a.prompt.click("Close");
+    // the notice in the second tab is pressed: that is not enough any more
+    await b.page.bringToFront();
+    await note.press();
+    const asked = await b.prompt.text(8000);
+    expect(asked?.tag).toBe("Lamport Warden · Check this carefully");
+    expect(asked?.sentence).toMatch(/^This site tried to rob a decoy wallet on \d{4}-\d{2}-\d{2}\. Go on only if you are sure of this site: your own wallet is then connected to it\.$/);
+    expect(await b.prompt.canContinue()).toBe(false);
+    await b.prompt.click("Cancel");
+    await b.page.waitForTimeout(400);
+    // nothing was connected, and the decoy is still what the site sees
+    expect(await calls(b.page)).toEqual([]);
+    expect(await accounts(b.page, door)).toEqual([DECOY.toBase58()]);
+    expect(await note.shown()).toBe(true);
+    await a.page.close();
+    await b.page.close();
+  });
+
+  it("puts its notice back when the page takes it out: the way to end the decoy is the owner's, not the page's", async () => {
+    await forget();
+    const door = "standard:FixturePhantom";
+    const { page } = await open("phantom");
+    expect(await connect(page, door, "c")).toBe(DECOY.toBase58());
+    const note = await Notice.on(page);
+    expect(await note.text(6000)).not.toBeNull();
+    await page.evaluate(() => { for (const e of [...document.documentElement.children]) if (e.tagName === "DIV") e.remove(); });
+    await expect.poll(() => note.shown(), { timeout: 5000 }).toBe(true);
+    // and it still does what it says
+    await page.waitForTimeout(600);
+    await note.press();
+    await expect.poll(() => accounts(page, door), { timeout: 8000 }).toEqual([OWNER.toBase58()]);
+    await page.close();
+  });
+
   it.each(["FixturePhantom", "FixtureSolflare", "FixtureBackpack"])("shows no decoy to a site %s already trusts: that site has its address already", async (name) => {
     await forget();
     const door = `standard:${name}`;

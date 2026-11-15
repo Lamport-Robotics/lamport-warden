@@ -13,7 +13,7 @@ import { reportOwnSignature } from "./report.js";
 import { LINK_PREFIX, fromSentinelPage, linkFrom, linkKey, readPageAsk, type PageAnswer } from "./sentinel-link.js";
 import { TableReader, readAccount } from "./rpc.js";
 import { configAddress, vaultOfConfig } from "./sentinel.js";
-import { LAMPORT_DECOYS, PASSED_ON_WORDS, PASSED_UNREAD, decoyVerdict, judgeDecoy, pickDecoy, readHoldings, together, type Decoy } from "./decoy.js";
+import { LAMPORT_DECOYS, decoyVerdict, judgeCall, pickDecoy, readHoldings, type AskedOf, type Decoy } from "./decoy.js";
 import type { DecoyAskedReply, DecoyFirstReply, Noted } from "./messages.js";
 import { KEYS, settingsFrom } from "./settings.js";
 import { Simulator } from "./simulate.js";
@@ -157,32 +157,43 @@ const MOST_READ = 16;
  * site that passes here: that waits for the owner to choose to go on ("decoy-passed"). A catch is recorded at
  * once, because it does not depend on anybody's choice.
  */
-async function decoyAsked(reqs: WireRequest[], origin: string, frameId: number | undefined): Promise<DecoyAskedReply> {
+async function decoyAsked(reqs: WireRequest[], total: number, origin: string, frameId: number | undefined): Promise<DecoyAskedReply> {
   const at = await standing(origin, frameId);
   if (at.kind === "none") return { ok: false };
   // the owner has gone on with this site already (in another tab, say): this door follows, with nothing more to ask
   if (at.kind === "passed") return { ok: true, caught: false, verdict: null };
   if (reqs.length === 0 || reqs.some((r) => r.owner !== at.address)) return { ok: false };
   const decoy: Decoy = { address: at.address, ...((await heldBy(at.address, at.rpcUrl)) ?? {}) };
-  const findings = [];
+  const asks: AskedOf[] = [];
   for (const req of reqs.slice(0, MOST_READ)) {
     if (req.kind === "tx") {
       const bytes = fromBase64(req.bytes);
       let tables = {};
       try { tables = await reader.forMessage(splitTransaction(bytes).messageBytes, at.rpcUrl); } catch { /* read without them */ }
-      findings.push(judgeDecoy(bytes, decoy, tables));
-    } else findings.push(req.kind === "opaque" ? PASSED_UNREAD : PASSED_ON_WORDS);
+      asks.push({ kind: "tx", bytes, tables });
+    } else asks.push({ kind: req.kind === "opaque" ? "unread" : "words" });
   }
-  const finding = together(findings, reqs.length > MOST_READ);
+  const beyond = Math.max(total, reqs.length) - asks.length;
+  const found = judgeCall(asks, decoy);
+  const finding = { ...found, unread: found.unread || beyond > 0 };
   if (finding.caught) await keep(CAUGHT_SITES, at.mark);
-  const v = decoyVerdict(finding, decoy, at.caughtOn);
+  const v = decoyVerdict(finding, decoy, { caughtOn: at.caughtOn, read: asks.length, beyond });
   return { ok: true, caught: finding.caught, verdict: { level: v.level, sentence: v.sentence, reasons: v.reasons, confirm: v.confirm } };
 }
 
-/** The owner chose to go on with their own wallet on this site: it is not shown a decoy again. */
-async function decoyPassed(origin: string, frameId: number | undefined): Promise<void> {
+/**
+ * The owner chose to go on with their own wallet on this site: it is not shown a decoy again. A site that
+ * was caught is gone on with only by an owner who typed that they understood (`sure`); otherwise nothing is
+ * written, and the answer says why. This is asked afresh each time: a tab that was open before the site was
+ * caught in another does not know it was.
+ */
+async function decoyPassed(sure: boolean, origin: string, frameId: number | undefined): Promise<Noted> {
   const at = await standing(origin, frameId);
-  if (at.kind === "decoy") await keep(PASSED, at.mark);
+  if (at.kind === "passed") return { noted: true };
+  if (at.kind !== "decoy") return { noted: false };
+  if (at.caughtOn && !sure) return { noted: false, caughtOn: at.caughtOn };
+  await keep(PASSED, at.mark);
+  return { noted: true };
 }
 
 /** The Sentinel page asked something. Only that page's top frame is answered. */
@@ -210,13 +221,13 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, sendRespons
     return true;
   }
   if (message?.type === "decoy-passed") {
-    decoyPassed(origin, sender.frameId).then(() => sendResponse({ noted: true }), () => sendResponse({ noted: false }));
+    decoyPassed(message.sure === true, origin, sender.frameId).then(sendResponse, () => sendResponse({ noted: false }));
     return true;
   }
   if (message?.type === "decoy-asked") {
     const reqs = Array.isArray(message.reqs) ? message.reqs.filter(valid).slice(0, 32) : [];
     if (!Array.isArray(message.reqs) || reqs.length !== Math.min(message.reqs.length, 32)) { sendResponse({ ok: false }); return false; }
-    decoyAsked(reqs, origin, sender.frameId).then(sendResponse, () => sendResponse({ ok: false }));
+    decoyAsked(reqs, typeof message.total === "number" && message.total > 0 ? Math.floor(message.total) : reqs.length, origin, sender.frameId).then(sendResponse, () => sendResponse({ ok: false }));
     return true;
   }
   if (!message || !valid(message.req)) return false;

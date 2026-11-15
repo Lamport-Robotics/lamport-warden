@@ -139,7 +139,7 @@ a site already in use is not shown a decoy again; removed when the experiment is
 **Host permission justification** (content scripts on https://*/*):
 Any web page can ask a Solana wallet to sign, and a page built to steal is not on any list. Warden's scripts
 run on every https page to do two things: put Warden in front of the wallet's connect and signing calls, and
-draw its prompt. They do not read the page's content.
+draw its prompt and, while a decoy is showing, its notice. They do not read the page's content.
 
 **Remote code:** No. Everything the extension runs is in the package.
 

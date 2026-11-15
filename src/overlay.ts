@@ -185,24 +185,57 @@ export function notice(o: { text: string; button: string; warn?: boolean; onPres
     }, { threshold: 1, trackVisibility: true, delay: 100 } as IntersectionObserverInit);
     io.observe(button);
   }
+  /** When the page last moved the notice, or took it out. */
+  let stirred = -Infinity;
   button.addEventListener("click", (e) => {
     if (!e.isTrusted) return;
     if (tracked && (seenSince === null || performance.now() - seenSince < 400)) return; // covered, altered, or only just shown
+    if (performance.now() - stirred < 400) return; // moved a moment ago: a button slid under a pointer is not a button somebody chose to press
     o.onPress();
   });
   root.append(style, card);
-  (document.documentElement ?? document).append(host);
+  const parent = document.documentElement ?? document;
+  parent.append(host);
+  const laidOut = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;left:auto !important;bottom:auto !important;width:auto !important;height:auto !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;overflow:visible !important;";
   let raising: ReturnType<typeof setInterval> | undefined;
+  let asSet = "";
+  let taken = false;
+  const watching: { disconnect(): void }[] = [];
   try {
     host.setAttribute("popover", "manual");
-    host.style.cssText = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;left:auto !important;bottom:auto !important;width:auto !important;height:auto !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;overflow:visible !important;";
+    host.style.cssText = laidOut;
+    asSet = host.style.cssText;
     const raise = () => { try { if (!host.matches(":popover-open")) host.showPopover(); } catch { /* no top layer here: it stays where it is */ } };
     raise();
     raising = setInterval(raise, 1000);
     (raising as { unref?: () => void }).unref?.();
   } catch {
     host.style.cssText = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;z-index:2147483647 !important;";
+    asSet = host.style.cssText;
   }
-  return { remove() { io?.disconnect(); if (raising !== undefined) clearInterval(raising); host.remove(); } };
+  // The element is the page's to reach, though not what is in it. A page that moves it has its changes put
+  // back, and one that takes it out has it put in again: it is the owner's way of ending the decoy, and is
+  // not the page's to take away. (A page can tell from it that a decoy is showing. It can tell that anyway.)
+  if (typeof MutationObserver === "function") {
+    const still = new MutationObserver(() => {
+      stirred = performance.now();
+      for (const a of Array.from(host.attributes)) if (a.name !== "popover" && a.name !== "style") host.removeAttribute(a.name);
+      if (host.style.cssText !== asSet) { host.style.cssText = laidOut; asSet = host.style.cssText; }
+      still.takeRecords();
+    });
+    still.observe(host, { attributes: true });
+    let putBack = 0;
+    const there = new MutationObserver(() => {
+      if (taken || host.isConnected) return;
+      stirred = performance.now();
+      // (not in a loop with a page that keeps taking it out: a few times a second is enough to be seen)
+      if (performance.now() - putBack < 250) { setTimeout(() => { if (!taken && !host.isConnected) { putBack = performance.now(); parent.append(host); } }, 250); return; }
+      putBack = performance.now();
+      parent.append(host);
+    });
+    there.observe(parent, { childList: true });
+    watching.push(still, there);
+  }
+  return { remove() { taken = true; io?.disconnect(); for (const w of watching) w.disconnect(); if (raising !== undefined) clearInterval(raising); host.remove(); } };
 }
 

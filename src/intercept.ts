@@ -90,7 +90,7 @@ function pageOf(gate: DecoyGate): DecoyPage {
   return page;
 }
 /** How long a connect waits to hear whether this page has a decoy. Past it, the page has none: a connect must not hang on Warden. */
-const FIRST_WAIT_MS = 1500;
+const FIRST_WAIT_MS = 3000;
 /** The page's decoy, asked for once. Nobody to ask, or no answer in time, is no decoy. */
 const firstOf = (page: DecoyPage): Promise<string | null> => (page.first ??= new Promise<string | null>((resolve) => {
   const timer = setTimeout(() => resolve(null), FIRST_WAIT_MS);

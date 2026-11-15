@@ -44,7 +44,7 @@ async function load() {
   $("decoySites").hidden = passed + caught === 0;
   $("decoyCount").textContent = `Kept now: a mark for ${passed} ${passed === 1 ? "site" : "sites"} you went on to use, and for ${caught} that ${caught === 1 ? "was" : "were"} caught.`;
   if (s.decoyFirst && !s.decoyAddress && LAMPORT_DECOYS.length === 0) note("decoyNote", "On, and there is no decoy to show: give its address above. Until then every site is connected as always.", true);
-  else if (s.decoyFirst && s.rpcUrl === "") note("decoyNote", "On. The RPC is turned off above, so Warden cannot ask what the decoy holds: a thief is then caught by what it asks for, and not by how much.", true);
+  else if (s.decoyFirst && s.rpcUrl === "") note("decoyNote", "On. The RPC is turned off above, so Warden cannot ask what the decoy holds: a thief is then caught only when it asks for control of an account or for a permission to spend, and not by how much it asks to be sent.", true);
 
   // simulation
   $<HTMLInputElement>("simulate").checked = s.simulate;

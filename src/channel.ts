@@ -58,10 +58,11 @@ export const fromBase64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c
  * `decoy`: a question about the decoy instead of a request to sign (intercept.ts, DecoyGate). "first": may
  * this page be shown a decoy, and which (kind, bytes and owner are empty). "asked": the site asked the decoy
  * to sign this (owner is the decoy's address), and `more` are the other requests of the same call.
- * "showing": a decoy has begun to show on this page (owner is its address). "gone": none shows any more.
- * The last two are told, not asked: no reply comes.
+ * `total` is how many the call held, which may be more than are sent. "showing": a decoy has begun to show
+ * on this page (owner is its address). "gone": none shows any more. The last two are told, not asked: no
+ * reply comes.
  */
-export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string; decoy?: "first" | "asked" | "showing" | "gone"; more?: { kind: string; bytes: string }[] }
+export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string; decoy?: "first" | "asked" | "showing" | "gone"; more?: { kind: string; bytes: string }[]; total?: number }
 export interface DoorsMessage { unguarded: string[] }
 /**
  * For a signing request: `ok` lets it through. For "first": `address` is the decoy to show, when there is

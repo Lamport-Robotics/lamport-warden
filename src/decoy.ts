@@ -86,23 +86,36 @@ export interface DecoyFinding {
 const tokenOf = (decoy: Decoy, mint: string | null, source: string) => decoy.tokens?.find((t) => t.account === source || (mint !== null && t.mint === mint));
 const name = (mint: string | null, amount: bigint, decimals?: number) => fmtToken(amount, mint, { ...(mint && KNOWN_MINTS[mint] ? KNOWN_MINTS[mint] : {}), ...(decimals !== undefined ? { decimals } : {}) });
 
-/** Reads what a site asked a decoy to sign. `parsed` is the transaction read with the decoy as its owner. */
-export function findDrain(parsed: ParsedTx, decoy: Decoy): DecoyFinding {
-  const asked: string[] = [];
-  const to = new Set<string>();
+/** Something one transaction would send out of the decoy. `held`: what the decoy holds of it, when that is known. */
+interface Out { kind: string; mint: string | null; amount: bigint; held: bigint | null; decimals?: number; wrapped?: boolean; dest: string }
+/** What one transaction asks of the decoy, before anything is decided about it. */
+interface Reading {
   /** Calls only programs whose every instruction is read here, with every account known. */
+  plainOnly: boolean;
+  /** Powers it would hand over, each as the end of "It asked the decoy to …", and to whom. */
+  hands: string[];
+  handsTo: string[];
+  outs: Out[];
+}
+
+/** Reads what a transaction asks of a decoy. `parsed` is the transaction read with the decoy as its owner. */
+function reading(parsed: ParsedTx, decoy: Decoy): Reading {
+  const hands: string[] = [], handsTo: string[] = [];
   const plainOnly = parsed.programs.every((p) => PLAIN.has(p)) && !parsed.unresolvedLookups;
+  /** The decoy's own wrapped-SOL accounts: the one worked out from its address, and any it is known to hold. */
+  const wrappedOwn = new Set<string>([...ownerAtaSet(decoy.address, WSOL), ...(decoy.tokens ?? []).filter((t) => t.mint === WSOL).map((t) => t.account)]);
   /** The decoy's own accounts: what moves into one of them has not left the decoy. */
-  const own = new Set<string>([decoy.address, ...(decoy.tokens ?? []).map((t) => t.account), ...ownerAtaSet(decoy.address, WSOL)]);
+  const own = new Set<string>([decoy.address, ...(decoy.tokens ?? []).map((t) => t.account), ...wrappedOwn]);
 
   // powers handed over
   for (const d of parsed.dangers) {
-    if (d.kind === "set_authority") { asked.push(`hand ${d.to ? short(d.to) : "someone"} control of one of its token accounts`); if (d.to) to.add(d.to); }
-    else if (d.kind === "assign") { asked.push("hand its whole account to another program"); if (d.to) to.add(d.to); }
+    if (d.kind === "set_authority") { hands.push(`hand ${d.to ? short(d.to) : "someone"} control of one of its token accounts`); if (d.to) handsTo.push(d.to); }
+    else if (d.kind === "assign") { hands.push("hand its whole account to another program"); if (d.to) handsTo.push(d.to); }
   }
   // A permission to spend. An older exchange or a bridge asks for one, of the amount it is about to use, and
-  // uses it in the same transaction. A thief asks for one without limit, or for all there is, or for one that
-  // nothing in the transaction uses: that one is for later.
+  // uses it in the same transaction; a bridge may ask for it on an account it has only just made. A thief
+  // asks for one without limit, or for all there is, or for one that nothing in the transaction uses: that
+  // one is for later.
   for (const ix of parsed.instructions) {
     const checked = ix.label === "Token.approveChecked";
     if (!checked && ix.label !== "Token.approve") continue;
@@ -112,68 +125,118 @@ export function findDrain(parsed: ParsedTx, decoy: Decoy): DecoyFinding {
     const held = tokenOf(decoy, checked ? ix.accounts[1] ?? null : null, source);
     const unlimited = amount === U64_MAX;
     const nearlyAll = !!held && held.amount > 0n && amount * 10n >= held.amount * NEARLY_ALL;
-    if (unlimited || nearlyAll || !held || plainOnly) {
-      asked.push(`let ${delegate ? short(delegate) : "someone"} spend its tokens${unlimited ? ", without limit" : nearlyAll ? ", all it holds" : ""}`);
-      if (delegate) to.add(delegate);
+    // on an account the decoy is known not to hold anything in, a limited permission gives nothing away
+    const nothingThere = decoy.tokens !== undefined && !held;
+    if (unlimited || nearlyAll || (plainOnly && !nothingThere)) {
+      hands.push(`let ${delegate ? short(delegate) : "someone"} spend its tokens${unlimited ? ", without limit" : nearlyAll ? ", all it holds" : ""}`);
+      if (delegate) handsTo.push(delegate);
     }
   }
-  const handsOver = asked.length > 0;
 
-  const outs: { what: string; nearlyAll: boolean; most: boolean; kind: string }[] = [];
-  // SOL: what goes into the decoy's own wrapped-SOL account stays the decoy's
-  let kept = 0n;
-  for (const ix of parsed.instructions) if (ix.label === "System.transfer" && ix.accounts[0] === decoy.address && own.has(ix.accounts[1] ?? "")) kept += u64(ix.data, 4);
-  const solOut = parsed.lamportsOut > kept ? parsed.lamportsOut - kept : 0n;
-  if (solOut > 0n) {
-    const known = decoy.lamports !== undefined && decoy.lamports > 0n;
-    const nearlyAll = known && solOut * 10n >= decoy.lamports! * NEARLY_ALL;
-    outs.push({ what: `${fmtSol(solOut)}${nearlyAll ? `, of the ${fmtSol(decoy.lamports!)} it holds` : ""}`, nearlyAll, most: !known || solOut * 10n >= decoy.lamports! * MOST, kind: "SOL" });
-    if (parsed.dest && !own.has(parsed.dest)) to.add(parsed.dest);
+  const outs: Out[] = [];
+  // Closing one of the decoy's wrapped-SOL accounts to somebody else pays out everything in it: what it held,
+  // and whatever this same transaction put into it first.
+  const closedTo = new Map<string, string>();
+  for (const ix of parsed.instructions) {
+    if (ix.label !== "Token.closeAccount" || ix.accounts[2] !== decoy.address) continue;
+    const account = ix.accounts[0] ?? "", dest = ix.accounts[1] ?? "";
+    if (wrappedOwn.has(account) && !own.has(dest)) closedTo.set(account, dest);
   }
+  // SOL: what goes into the decoy's own wrapped-SOL account stays the decoy's, unless that account is closed away
+  let kept = 0n, solDest = parsed.dest && !own.has(parsed.dest) ? parsed.dest : "";
+  for (const ix of parsed.instructions) {
+    if (ix.label !== "System.transfer" || ix.accounts[0] !== decoy.address) continue;
+    const into = ix.accounts[1] ?? "";
+    if (!own.has(into)) continue;
+    if (closedTo.has(into)) solDest ||= closedTo.get(into)!;
+    else kept += u64(ix.data, 4);
+  }
+  const solOut = parsed.lamportsOut > kept ? parsed.lamportsOut - kept : 0n;
+  if (solOut > 0n) outs.push({ kind: "SOL", mint: null, amount: solOut, held: decoy.lamports ?? null, dest: solDest });
   for (const m of parsed.tokenOut) {
     if (m.amount <= 0n || own.has(m.dest)) continue;
     const held = tokenOf(decoy, m.mint, m.source);
     const mint = m.mint ?? held?.mint ?? null;
-    const known = !!held && held.amount > 0n;
-    const nearlyAll = known && m.amount * 10n >= held!.amount * NEARLY_ALL;
-    outs.push({ what: `${name(mint, m.amount, held?.decimals)}${nearlyAll ? ", all it holds" : ""}`, nearlyAll, most: !known || m.amount * 10n >= held!.amount * MOST, kind: mint ?? m.source });
-    if (m.dest) to.add(m.dest);
+    outs.push({ kind: mint ?? m.source, mint, amount: m.amount, held: held ? held.amount : decoy.tokens !== undefined ? 0n : null, decimals: held?.decimals, dest: m.dest });
   }
-  // closing the decoy's wrapped-SOL account pays out everything in it, to wherever the close says
-  for (const ix of parsed.instructions) {
-    if (ix.label !== "Token.closeAccount" || ix.accounts[2] !== decoy.address) continue;
-    const held = decoy.tokens?.find((t) => t.account === ix.accounts[0] && t.mint === WSOL && t.amount > 0n);
-    const dest = ix.accounts[1] ?? "";
-    if (!held || own.has(dest)) continue;
-    outs.push({ what: `${fmtSol(held.amount)} of wrapped SOL, all it holds`, nearlyAll: true, most: true, kind: WSOL });
-    if (dest) to.add(dest);
+  for (const [account, dest] of closedTo) {
+    const held = decoy.tokens?.find((t) => t.account === account && t.amount > 0n);
+    if (held) outs.push({ kind: WSOL, mint: WSOL, amount: held.amount, held: held.amount, wrapped: true, dest });
   }
-  // In a transaction that does nothing else. What comes back is not weighed: with only plain programs in it,
-  // anything "coming back" is something the other side chose to put there, and one token in is not a trade.
-  const sweep = plainOnly && new Set(outs.filter((o) => o.most).map((o) => o.kind)).size >= 2;
-  const empties = plainOnly && outs.some((o) => o.nearlyAll);
-  if (sweep || empties) asked.push(`send out ${outs.map((o) => o.what).join(" and ")}`);
+  return { plainOnly, hands, handsTo, outs };
+}
 
-  const caught = handsOver || sweep || empties;
+/**
+ * Decides on everything a site asked the decoy for in one call. What is sent out is added up over the
+ * transactions that do nothing else: a balance taken in two halves is taken.
+ */
+function decide(readings: Reading[]): DecoyFinding {
+  const asked = [...new Set(readings.flatMap((r) => r.hands))];
+  const to = new Set(readings.flatMap((r) => r.handsTo));
+  const totals = new Map<string, Out>();
+  for (const r of readings) {
+    if (!r.plainOnly) continue;
+    for (const o of r.outs) {
+      // more than the decoy holds was not worked out from what it holds: that is a price, not a balance
+      if (o.held !== null && o.amount > o.held) continue;
+      const sum = totals.get(o.kind);
+      if (sum) { sum.amount += o.amount; if (sum.dest !== o.dest) sum.dest = ""; } else totals.set(o.kind, { ...o });
+    }
+  }
+  // With nothing known of what the decoy holds, how much is asked says nothing: only the powers above do.
+  const nearlyAll = (o: Out) => o.held !== null && o.held > 0n && o.amount * 10n >= o.held * NEARLY_ALL;
+  const most = (o: Out) => o.held !== null && o.held > 0n && o.amount * 10n >= o.held * MOST;
+  const all = [...totals.values()];
+  const sweep = all.filter(most).length >= 2;
+  const empties = all.some(nearlyAll);
+  if (sweep || empties) {
+    const said = (o: Out) => (o.wrapped ? `${fmtSol(o.amount)} of wrapped SOL, all it holds`
+      : o.kind === "SOL" ? `${fmtSol(o.amount)}${nearlyAll(o) ? `, of the ${fmtSol(o.held!)} it holds` : ""}`
+      : `${name(o.mint, o.amount, o.decimals)}${nearlyAll(o) ? ", all it holds" : ""}`);
+    asked.push(`send out ${all.map(said).join(" and ")}`);
+    for (const o of all) to.add(o.dest);
+  }
+  const caught = asked.length > 0;
   // who it was for is said only of a robbery: where an ordinary payment goes is the owner's business with the site
-  return { caught, asked: caught ? asked : [], to: caught && to.size === 1 ? [...to][0]! : null, unread: !plainOnly };
+  return { caught, asked, to: caught && to.size === 1 && !to.has("") ? [...to][0]! : null, unread: readings.some((r) => !r.plainOnly) };
 }
 
-/** One finding for everything a site asked the decoy for in one call. `more`: there was more than was read. */
-export function together(findings: DecoyFinding[], more = false): DecoyFinding {
-  const caught = findings.some((f) => f.caught);
-  const asked = [...new Set(findings.flatMap((f) => f.asked))];
-  const to = new Set(findings.filter((f) => f.caught && f.to).map((f) => f.to!));
-  return { caught, asked: caught ? asked : [], to: caught && to.size === 1 && findings.filter((f) => f.caught).every((f) => f.to) ? [...to][0]! : null, unread: more || findings.some((f) => f.unread) };
+/** One thing a site asked a decoy to sign, in a call that may ask for several. */
+export type AskedOf = { kind: "tx"; bytes: Uint8Array; tables?: Tables } | { kind: "words" } | { kind: "unread" };
+
+/**
+ * Judges everything a site asked a decoy to sign in one call. A message or a sign-in ("words") can move
+ * nothing; a request in a form that is not read here ("unread"), and bytes that are no transaction, catch
+ * nobody and leave the answer worded as what could be read.
+ */
+export function judgeCall(asks: AskedOf[], decoy: Decoy): DecoyFinding {
+  const readings: Reading[] = [];
+  let unread = false;
+  for (const a of asks) {
+    if (a.kind === "words") continue;
+    if (a.kind === "unread") { unread = true; continue; }
+    let parsed: ParsedTx;
+    try {
+      parsed = parseAnyMessage(splitTransaction(a.bytes).messageBytes, { owner: decoy.address, ownerTokenAccounts: new Set((decoy.tokens ?? []).map((t) => t.account)), lookupTables: a.tables ?? {} });
+    } catch { unread = true; continue; }
+    // a transaction the decoy is not even a signer of asks nothing of the decoy
+    if (parsed.signers.includes(decoy.address)) readings.push(reading(parsed, decoy));
+  }
+  const found = decide(readings);
+  return { ...found, unread: found.unread || unread };
 }
+
+/** Judges one transaction a site asked a decoy to sign. */
+export const judgeDecoy = (txBytes: Uint8Array, decoy: Decoy, lookupTables: Tables = {}): DecoyFinding => judgeCall([{ kind: "tx", bytes: txBytes, tables: lookupTables }], decoy);
 
 const ACK = { kind: "acknowledge", expect: "I understand" } as const;
 
 /**
  * What the owner is told, either way. On a pass they are about to connect their own wallet. `caughtOn`: the
- * day this same site was caught before, when it was; going on then takes typing, not a press.
+ * day this same site was caught before, when it was. `beyond`: how many more things the call asked for than
+ * the `read` that were read. Going on in either case takes typing, not a press.
  */
-export function decoyVerdict(finding: DecoyFinding, decoy: Decoy, caughtOn: string | null = null): Pick<WardenVerdict, "level" | "sentence" | "reasons" | "confirm"> {
+export function decoyVerdict(finding: DecoyFinding, decoy: Decoy, o: { caughtOn?: string | null; read?: number; beyond?: number } = {}): Pick<WardenVerdict, "level" | "sentence" | "reasons" | "confirm"> {
   if (finding.caught) {
     const what = finding.asked.length === 1 ? finding.asked[0]! : `${finding.asked.slice(0, -1).join(", ")}, and ${finding.asked.at(-1)}`;
     return {
@@ -187,11 +250,20 @@ export function decoyVerdict(finding: DecoyFinding, decoy: Decoy, caughtOn: stri
     };
   }
   const read = finding.unread ? "nothing I could read in what it asked the decoy to sign is a robbery" : "what it asked the decoy to sign is not a robbery";
-  if (caughtOn) {
+  if (o.caughtOn) {
     return {
       level: "confirm",
-      sentence: `This site tried to rob a decoy wallet on ${caughtOn}. This time ${read}. Go on only if you are sure of this site: your own wallet is then connected to it.`,
+      sentence: `This site tried to rob a decoy wallet on ${o.caughtOn}. This time ${read}. Go on only if you are sure of this site: your own wallet is then connected to it.`,
       reasons: ["it was caught asking a decoy for what only a thief asks.", "a thief that was caught once can behave the next time."],
+      confirm: ACK,
+    };
+  }
+  if (o.beyond && o.beyond > 0) {
+    const seen = o.read ?? 0;
+    return {
+      level: "confirm",
+      sentence: `This site asked the decoy to sign ${seen + o.beyond} things at once, and I read the first ${seen}. Nothing I could read in those is a robbery. Go on only if you are sure of this site: your own wallet is then connected to it.`,
+      reasons: ["a robbery can be put after more requests than anybody reads.", "an ordinary site does not ask a wallet it has just met for this many signatures."],
       confirm: ACK,
     };
   }
@@ -204,19 +276,6 @@ export function decoyVerdict(finding: DecoyFinding, decoy: Decoy, caughtOn: stri
 
 /** A message or a sign-in asked of the decoy: nothing in it can move anything, so the site passes on it. */
 export const PASSED_ON_WORDS: DecoyFinding = { caught: false, asked: [], to: null, unread: false };
-/** Something asked of the decoy that could not be read at all. Nothing in it catches anybody, and nothing in it was read. */
-export const PASSED_UNREAD: DecoyFinding = { caught: false, asked: [], to: null, unread: true };
-
-/** Judges the transaction a site asked a decoy to sign. Bytes that are not a transaction catch nobody. */
-export function judgeDecoy(txBytes: Uint8Array, decoy: Decoy, lookupTables: Tables = {}): DecoyFinding {
-  let parsed: ParsedTx;
-  try {
-    parsed = parseAnyMessage(splitTransaction(txBytes).messageBytes, { owner: decoy.address, ownerTokenAccounts: new Set((decoy.tokens ?? []).map((t) => t.account)), lookupTables });
-  } catch { return PASSED_UNREAD; }
-  // a transaction the decoy is not even a signer of asks nothing of the decoy
-  if (!parsed.signers.includes(decoy.address)) return PASSED_ON_WORDS;
-  return findDrain(parsed, decoy);
-}
 
 /**
  * What a decoy holds, asked of the RPC: its SOL, and its token accounts under both token programs. The RPC

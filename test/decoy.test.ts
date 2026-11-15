@@ -8,7 +8,7 @@ import "../src/polyfill.js";
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { LAMPORT_DECOYS, PASSED_ON_WORDS, decoyVerdict, judgeDecoy, pickDecoy, readHoldings, together, type Decoy } from "../src/decoy.js";
+import { LAMPORT_DECOYS, PASSED_ON_WORDS, decoyVerdict, judgeCall, judgeDecoy, pickDecoy, readHoldings, type Decoy } from "../src/decoy.js";
 import { WardenRejected, installLegacyHook, installStandardHook, keyLike, patchStandardWalletInPlace, useOwnWallet, wrapStandardWallet, type DecoyGate, type Guard, type GuardRequest } from "../src/intercept.js";
 import { cleanAddress, settingsFrom } from "../src/settings.js";
 import type { FetchLike } from "../src/rpc.js";
@@ -59,9 +59,10 @@ describe("what a site asks a decoy for says what the site is", () => {
     expect(caught(tx(DECOY, usdc(DECOY, THIEF, 40_000_000_000n)))).toMatchObject({ caught: true, asked: ["send out 40,000 USDC, all it holds"] });
     // Most of two different things at once and nothing else is a sweep, though neither is nearly all
     expect(caught(tx(DECOY, sol(DECOY, THIEF, 200_000_000_000n), usdc(DECOY, THIEF, 25_000_000_000n)))).toEqual({ caught: true, asked: ["send out 200 SOL and 25,000 USDC"], to: null, unread: false });
-    // and with nothing known of what the decoy holds, two different things at once and nothing else is one too
+    // With nothing known of what the decoy holds, how much is asked says nothing: a payment with a fee beside
+    // it looks the same as a sweep. Only a power handed over catches anybody then.
     const bare: Decoy = { address: BAIT.address };
-    expect(caught(tx(DECOY, sol(DECOY, THIEF, 1_000_000_000n), usdc(DECOY, THIEF, 5_000_000n)), bare)).toEqual({ caught: true, asked: ["send out 1 SOL and 5 USDC"], to: null, unread: false });
+    expect(caught(tx(DECOY, sol(DECOY, THIEF, 1_000_000_000n), usdc(DECOY, THIEF, 5_000_000n)), bare)).toEqual({ caught: false, asked: [], to: null, unread: false });
     // letting somebody spend, and handing an account over: caught with nothing sent at all
     expect(caught(tx(DECOY, approve(DECOY, THIEF, 0xffff_ffff_ffff_ffffn)), bare)).toEqual({ caught: true, asked: [`let ${short(THIEF.toBase58())} spend its tokens, without limit`], to: THIEF.toBase58(), unread: false });
     expect(caught(tx(DECOY, approve(DECOY, THIEF, 5n)), bare).asked).toEqual([`let ${short(THIEF.toBase58())} spend its tokens`]);
@@ -733,22 +734,69 @@ describe("the rule, where it was too quick and where it was too slow", () => {
     expect(decoyVerdict(PASSED_ON_WORDS, small).sentence).toContain("and what it asked the decoy to sign is not a robbery.");
   });
 
-  it("judges everything asked in one call as one thing: a robbery anywhere in it is a robbery", () => {
-    const pay = judgeDecoy(tx(DECOY, usdc(DECOY, SHOP, 10_000_000n)), small), rob = judgeDecoy(tx(DECOY, usdc(DECOY, THIEF, 50_000_000n)), small);
-    expect(together([pay, rob])).toEqual({ caught: true, asked: ["send out 50 USDC, all it holds"], to: ata(THIEF).toBase58(), unread: false });
-    expect(together([pay, pay])).toEqual({ caught: false, asked: [], to: null, unread: false });
-    // more was asked than was read: a pass says so
-    expect(together([pay], true)).toEqual({ caught: false, asked: [], to: null, unread: true });
-    expect(together([])).toEqual({ caught: false, asked: [], to: null, unread: false });
+  it("judges everything asked in one call as one thing: a balance taken in pieces is taken", () => {
+    const one = (bytes: Uint8Array) => ({ kind: "tx" as const, bytes });
+    const pay = tx(DECOY, usdc(DECOY, SHOP, 10_000_000n)), rob = tx(DECOY, usdc(DECOY, THIEF, 50_000_000n));
+    expect(judgeCall([one(pay), one(rob)], small)).toMatchObject({ caught: true });
+    expect(judgeCall([one(pay), one(pay)], small)).toEqual({ caught: false, asked: [], to: null, unread: false });
+    // most of the SOL in one transaction and most of the USDC in the next: neither is a sweep alone, the call is
+    const sweep = judgeCall([one(tx(DECOY, sol(DECOY, THIEF, 170_000_000n))), one(tx(DECOY, usdc(DECOY, THIEF, 44_000_000n)))], small);
+    expect(sweep).toEqual({ caught: true, asked: ["send out 0.17 SOL and 44 USDC"], to: null, unread: false });
+    // the same token in two halves
+    expect(judgeCall([one(tx(DECOY, usdc(DECOY, THIEF, 25_000_000n))), one(tx(DECOY, usdc(DECOY, THIEF, 24_000_000n)))], small)).toEqual({ caught: true, asked: ["send out 49 USDC, all it holds"], to: ata(THIEF).toBase58(), unread: false });
+    // words move nothing; something in a form that is not read is said to be unread
+    expect(judgeCall([{ kind: "words" }, one(pay)], small)).toEqual({ caught: false, asked: [], to: null, unread: false });
+    expect(judgeCall([{ kind: "unread" }, one(pay)], small)).toEqual({ caught: false, asked: [], to: null, unread: true });
+    expect(judgeCall([], small)).toEqual({ caught: false, asked: [], to: null, unread: false });
+  });
+
+  it("does not take a price for a balance: more than the decoy holds was not worked out from what it holds", () => {
+    // 1 SOL for a mint, asked of a decoy that holds 0.2; a 60 USDC invoice, of one that holds 50
+    expect(judgeDecoy(tx(DECOY, sol(DECOY, SHOP, 1_000_000_000n)), small).caught).toBe(false);
+    expect(judgeDecoy(tx(DECOY, usdc(DECOY, SHOP, 60_000_000n)), small).caught).toBe(false);
+    // a token it holds none of
+    const other = new PublicKey("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
+    const sends = new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: ata(DECOY, other), isSigner: false, isWritable: true }, { pubkey: other, isSigner: false, isWritable: false }, { pubkey: ata(SHOP, other), isSigner: false, isWritable: true }, { pubkey: DECOY, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([12]), u64(5_000_000n), Buffer.from([6])]) });
+    expect(judgeDecoy(tx(DECOY, sends), small).caught).toBe(false);
+    // (a price that happens to be nearly all it holds is still caught: the decoy cannot tell)
+    expect(judgeDecoy(tx(DECOY, sol(DECOY, SHOP, 190_000_000n)), small).caught).toBe(true);
+  });
+
+  it("is not put off by SOL wrapped first and the wrapped account closed to the thief", () => {
+    const wsol = ata(DECOY, WSOL);
+    const found = judgeDecoy(tx(DECOY, sol(DECOY, wsol, 195_000_000n), closes(wsol, THIEF)), small);
+    expect(found).toEqual({ caught: true, asked: ["send out 0.195 SOL, of the 0.2 SOL it holds"], to: THIEF.toBase58(), unread: false });
+    // wrapped and left in its own account, or unwrapped back to itself, it has gone nowhere
+    expect(judgeDecoy(tx(DECOY, sol(DECOY, wsol, 195_000_000n), closes(wsol, DECOY)), small).caught).toBe(false);
+  });
+
+  it("does not call a permission a robbery when it is on an account the decoy holds nothing in, or when nothing is known of what it holds and a program uses it", () => {
+    // a bridge sending SOL: a wrapped account made for the purpose, a permission on it for the amount, and the bridge's call
+    const temp = key(63);
+    const onTemp = new TransactionInstruction({ programId: TOKEN, keys: [{ pubkey: temp, isSigner: false, isWritable: true }, { pubkey: key(60), isSigner: false, isWritable: false }, { pubkey: DECOY, isSigner: true, isWritable: false }], data: Buffer.concat([Buffer.from([4]), u64(100_000_000n)]) });
+    expect(judgeDecoy(tx(DECOY, onTemp, program(61)), small).caught).toBe(false);
+    expect(judgeDecoy(tx(DECOY, onTemp), small).caught).toBe(false);
+    const bare: Decoy = { address: BAIT.address };
+    expect(judgeDecoy(tx(DECOY, approve(DECOY, key(60), 10_000_000n), program(61)), bare).caught).toBe(false);
+    // without limit it is caught wherever it is, and with nothing in the transaction that uses it, it is caught when nothing is known
+    expect(judgeDecoy(tx(DECOY, approve(DECOY, THIEF, 0xffff_ffff_ffff_ffffn), program(61)), bare).caught).toBe(true);
+    expect(judgeDecoy(tx(DECOY, approve(DECOY, THIEF, 10_000_000n)), bare).caught).toBe(true);
+  });
+
+  it("does not pass, at a press, a call that asked for more than was read", () => {
+    const v = decoyVerdict({ caught: false, asked: [], to: null, unread: true }, small, { read: 16, beyond: 4 });
+    expect(v.level).toBe("confirm");
+    expect(v.confirm).toEqual({ kind: "acknowledge", expect: "I understand" });
+    expect(v.sentence).toBe("This site asked the decoy to sign 20 things at once, and I read the first 16. Nothing I could read in those is a robbery. Go on only if you are sure of this site: your own wallet is then connected to it.");
   });
 
   it("does not let a site that was caught before be gone on with at a press", () => {
-    const again = decoyVerdict(PASSED_ON_WORDS, small, "2026-11-14");
+    const again = decoyVerdict(PASSED_ON_WORDS, small, { caughtOn: "2026-11-14" });
     expect(again.level).toBe("confirm");
     expect(again.confirm).toEqual({ kind: "acknowledge", expect: "I understand" });
     expect(again.sentence).toBe("This site tried to rob a decoy wallet on 2026-11-14. This time what it asked the decoy to sign is not a robbery. Go on only if you are sure of this site: your own wallet is then connected to it.");
     // caught again, it is simply caught
-    expect(decoyVerdict(judgeDecoy(tx(DECOY, usdc(DECOY, THIEF, 50_000_000n)), small), small, "2026-11-14").level).toBe("block");
+    expect(decoyVerdict(judgeDecoy(tx(DECOY, usdc(DECOY, THIEF, 50_000_000n)), small), small, { caughtOn: "2026-11-14" }).level).toBe("block");
   });
 });
 
