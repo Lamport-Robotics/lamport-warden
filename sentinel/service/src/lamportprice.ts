@@ -6,76 +6,148 @@
  * alone. They may be a little further apart than for SOL: a small token's price reaches each of them at a
  * different moment.
  *
- * And one thing more, because LAMPORT trades in one small pool. Somebody who pushes its price up for a
- * minute and asks for an amount in that minute would be asked for fewer tokens than the plan costs. So the
- * price used is the lower of the price now and the price an hour ago. A price that is held up for an hour in
- * a pool anyone can sell into is a price; one that is not, buys nothing. The hour-ago price comes from the
- * one source that reports the change over the last hour, and when that source does not answer, or is not
- * among the ones that agree, there is no price and nothing is quoted in LAMPORT (USDC needs no price and is
- * always there). Taking the lower can only ask for more tokens, never fewer, so it is nothing a source can
- * be made to lie in a payer's favour about.
+ * LAMPORT trades in one small pool, and that changes two things.
  *
- * The answer is kept for half a minute.
+ * Which pool. Asked about a token, a source answers with the price in whichever pool it takes for the
+ * token's, and anybody can make a pool. One that holds only LAMPORT, priced at ten times what it trades for,
+ * costs nothing to keep (nobody can sell into it) and looks deep, because what is in it is counted at its
+ * own price. So two of the three sources are not asked about the token at all: they are asked about the one
+ * pool, by its address (`pool`), and an answer about another pool, or one where LAMPORT is not the token
+ * being priced, is no answer. The third (Jupiter) is asked about the token and can only agree with them:
+ * with two needed, a price always has one of the pool's own sources behind it.
+ *
+ * How long. Somebody who pushes the price up in that pool and asks for an amount while it is up would be
+ * asked for fewer tokens than the plan costs. So the price used is the lowest of the price now, the price
+ * an hour ago and the price six hours ago. A price that is held up for six hours in a pool anyone can sell
+ * into is a price; one that is not, buys nothing. What it was before comes from the pool's own sources, each
+ * of which reports the change over those periods; at least one that agrees about the price now has to give
+ * both, and every one that gives any is counted. A change that cannot be read is not taken for no change.
+ * Taking the lowest can only ask for more tokens, never fewer, so a source that lies about the past cannot
+ * lie in a payer's favour further than the price now, on which two have to agree.
+ *
+ * What this does not do: a rise older than six hours is the price, and after any rise inside six hours a
+ * payer is asked for more tokens than the price of the moment would give. Both are said in the terms.
+ *
+ * When there is no price, nothing is quoted in LAMPORT (USDC needs no price and is always there). A price,
+ * and the lack of one, is kept for half a minute, and whoever asks while the sources are being asked waits
+ * for that one answer: a crowd of pages cannot make the service ask a public source a crowd of times.
  */
 import { agreed, type PriceFetch } from "./solprice.js";
 
 /** How far apart two sources may be and still count as agreeing about LAMPORT. */
 export const LAMPORT_AGREE_WITHIN = 0.05;
-/** The least and the most a LAMPORT is taken to cost: outside these a number is not a price. */
-const LEAST = 1e-9, MOST = 1_000;
+/** The least and the most a LAMPORT is taken to cost: outside these a number is not a price. A dollar a token would be a billion dollars for all of them. */
+const LEAST = 1e-9, MOST = 1;
+/** How long a price, or the lack of one, stands before the sources are asked again. */
+export const LAMPORT_KEEP_SECONDS = 30;
+/** How old a price may be and still be shown as "about this many" (never used for an amount to pay). */
+export const LAMPORT_SHOW_SECONDS = 180;
 
-/** DexScreener lists every pool a token trades in: the one with the most in it is the one whose price is the token's. */
-function deepest(j: any): any {
-  const pools: any[] = Array.isArray(j) ? j : Array.isArray(j?.pairs) ? j.pairs : [];
-  return [...pools].filter((p) => Number(p?.liquidity?.usd) > 0).sort((a, b) => Number(b.liquidity.usd) - Number(a.liquidity.usd))[0];
-}
+/** What one source said: the price now, and for a source that reads the pool, the price one hour and six hours before (null where it could not be read). */
+export interface LamportAnswer { price: number; before: readonly (number | null)[] }
+const NOTHING: LamportAnswer = { price: NaN, before: [] };
 
-export const lamportSources = (mint: string): readonly { name: string; url: string; read: (j: any) => unknown }[] => [
-  { name: "jupiter", url: `https://lite-api.jup.ag/price/v3?ids=${mint}`, read: (j) => j?.[mint]?.usdPrice },
-  { name: "geckoterminal", url: `https://api.geckoterminal.com/api/v2/networks/solana/tokens/${mint}`, read: (j) => j?.data?.attributes?.price_usd },
-  { name: "dexscreener", url: `https://api.dexscreener.com/tokens/v1/solana/${mint}`, read: (j) => deepest(j)?.priceUsd },
-];
-/** The source that also says how the price moved over the last hour. */
-const WITH_HISTORY = "dexscreener";
-
-/**
- * The price an hour ago, from the price now and the change over the hour in percent. With no trade in the
- * hour there is no change to report and the price then was the price now. Null when what was reported is
- * not a change at all.
- */
-export function hourAgo(now: number, j: any): number | null {
-  const pool = deepest(j);
-  if (!pool || typeof pool.priceChange !== "object" || pool.priceChange === null) return null;
-  if (pool.priceChange.h1 === undefined) return now;
-  const change = Number(pool.priceChange.h1);
+/** The price before, from the price now and the change since, in percent. Null when what was reported is not a change. */
+export function before(now: number, percent: unknown): number | null {
+  if (percent === null || percent === undefined || percent === "" || typeof percent === "boolean") return null;
+  const change = Number(percent);
   if (!Number.isFinite(change) || change <= -100) return null;
   return now / (1 + change / 100);
 }
 
+export interface LamportSource { name: string; /** It is asked about the pool, not about the token. */ pool: boolean; url: string; read: (j: any) => LamportAnswer }
+
+export const lamportSources = (mint: string, pool: string): readonly LamportSource[] => [
+  { name: "jupiter", pool: false, url: `https://lite-api.jup.ag/price/v3?ids=${mint}`, read: (j) => ({ price: Number(j?.[mint]?.usdPrice), before: [] }) },
+  {
+    name: "geckoterminal", pool: true, url: `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool}`,
+    read: (j) => {
+      const d = j?.data, a = d?.attributes;
+      // the pool that was asked about, with LAMPORT as the token it prices
+      if (!a || a.address !== pool || d?.relationships?.base_token?.data?.id !== `solana_${mint}`) return NOTHING;
+      if (typeof a.base_token_price_usd !== "string" && typeof a.base_token_price_usd !== "number") return NOTHING;
+      const price = Number(a.base_token_price_usd);
+      const change = a.price_change_percentage;
+      return { price, before: [before(price, change?.h1), before(price, change?.h6)] };
+    },
+  },
+  {
+    name: "dexscreener", pool: true, url: `https://api.dexscreener.com/latest/dex/pairs/solana/${pool}`,
+    read: (j) => {
+      const pairs: any[] = Array.isArray(j?.pairs) ? j.pairs : j?.pair ? [j.pair] : [];
+      const p = pairs.find((x) => x?.pairAddress === pool);
+      if (!p || p.baseToken?.address !== mint) return NOTHING;
+      if (typeof p.priceUsd !== "string" && typeof p.priceUsd !== "number") return NOTHING;
+      const price = Number(p.priceUsd);
+      // DexScreener leaves a period's change out when it has none to give. With no trade in the period the
+      // price then was the price now; left out with trades in it, it is not known, and is not guessed.
+      const over = (k: "h1" | "h6"): number | null => {
+        const c = p.priceChange?.[k];
+        if (c !== undefined && c !== null) return before(price, c);
+        const t = p.txns?.[k];
+        return t && Number(t.buys) === 0 && Number(t.sells) === 0 ? price : null;
+      };
+      return { price, before: [over("h1"), over("h6")] };
+    },
+  },
+];
+
+/**
+ * The price to use, from what the sources said (in the order of `sources`): the lowest of the price now, on
+ * which two agree, and the prices before that the agreeing pool sources give. Throws when there is none.
+ */
+export function lamportPriceFrom(sources: readonly LamportSource[], answers: readonly LamportAnswer[]): number {
+  const now = agreed(answers.map((a) => a.price), LAMPORT_AGREE_WITHIN, LEAST, MOST);
+  if (now === null) throw new Error("the price of LAMPORT could not be established: fewer than two sources agree");
+  const agrees = (p: number) => p >= now / (1 + LAMPORT_AGREE_WITHIN) && p <= now * (1 + LAMPORT_AGREE_WITHIN);
+  const pools = answers.filter((a, i) => sources[i]!.pool && agrees(a.price));
+  if (!pools.length) throw new Error("the price of LAMPORT could not be established: no source that reads its pool is among those that agree");
+  const sane = (p: number | null): p is number => p !== null && p >= LEAST && p <= MOST;
+  // one of them has to say what it was both an hour and six hours ago; whatever any of them says is counted
+  if (!pools.some((a) => a.before.length === 2 && a.before.every(sane))) throw new Error("the price of LAMPORT could not be established: what it was one hour and six hours ago could not be read");
+  return Math.min(now, ...pools.flatMap((a) => a.before.filter(sane)));
+}
+
 export class LamportPrice {
   private last: { at: number; price: number } | null = null;
-  constructor(private mint: string, private fetchImpl: PriceFetch = (u, i) => fetch(u, i), private opts: { now?: () => number; timeoutMs?: number; keepSeconds?: number } = {}) {}
+  private failed: { at: number; why: string } | null = null;
+  private asking: Promise<number> | null = null;
+  constructor(private mint: string, private pool: string, private fetchImpl: PriceFetch = (u, i) => fetch(u, i), private opts: { now?: () => number; timeoutMs?: number; keepSeconds?: number } = {}) {}
   private now(): number { return this.opts.now ? this.opts.now() : Math.floor(Date.now() / 1000); }
+  private get keep(): number { return this.opts.keepSeconds ?? LAMPORT_KEEP_SECONDS; }
 
-  /** Dollars for one LAMPORT: the lower of the price now and the price an hour ago. Throws when there is no such price. */
-  async usd(): Promise<number> {
-    if (this.last && this.now() - this.last.at < (this.opts.keepSeconds ?? 30)) return this.last.price;
-    const sources = lamportSources(this.mint);
-    const answers = await Promise.all(sources.map(async (s) => {
+  /** Dollars for one LAMPORT: the lowest of the price now, an hour ago and six hours ago. Throws when there is no such price. */
+  usd(): Promise<number> {
+    const now = this.now();
+    if (this.last && now - this.last.at < this.keep) return Promise.resolve(this.last.price);
+    if (this.failed && now - this.failed.at < this.keep) return Promise.reject(new Error(this.failed.why));
+    // one asking at a time: whoever comes while it is out waits for the same answer
+    this.asking ??= this.ask().then(
+      (price) => { this.last = { at: this.now(), price }; this.failed = null; this.asking = null; return price; },
+      (e: unknown) => { this.failed = { at: this.now(), why: e instanceof Error ? e.message : "the price of LAMPORT could not be established" }; this.asking = null; throw e; },
+    );
+    return this.asking;
+  }
+
+  /**
+   * The last price established, when it is no more than three minutes old, without waiting for anything;
+   * null otherwise. When it is getting old the sources are asked again behind the caller's back. This is for
+   * showing about how many tokens something comes to, and never for an amount to pay.
+   */
+  shown(): number | null {
+    const now = this.now();
+    if (!this.last || now - this.last.at >= this.keep) void this.usd().catch(() => { /* remembered as failed; asked again in half a minute */ });
+    return this.last && now - this.last.at < LAMPORT_SHOW_SECONDS ? this.last.price : null;
+  }
+
+  private async ask(): Promise<number> {
+    const sources = lamportSources(this.mint, this.pool);
+    const answers = await Promise.all(sources.map(async (s): Promise<LamportAnswer> => {
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), this.opts.timeoutMs ?? 5000);
-      try { const r = await this.fetchImpl(s.url, { signal: ctl.signal }); if (!r.ok) return { price: NaN, body: null }; const body = await r.json(); return { price: Number(s.read(body)), body }; } catch { return { price: NaN, body: null }; } finally { clearTimeout(timer); }
+      try { const r = await this.fetchImpl(s.url, { signal: ctl.signal }); if (!r.ok) return NOTHING; return s.read(await r.json()); } catch { return NOTHING; } finally { clearTimeout(timer); }
     }));
-    const now = agreed(answers.map((a) => a.price), LAMPORT_AGREE_WITHIN, LEAST, MOST);
-    if (now === null) throw new Error("the price of LAMPORT could not be established: fewer than two sources agree");
-    // the hour-ago price is taken only from a source whose own price now is one of those that agree
-    const history = answers[sources.findIndex((s) => s.name === WITH_HISTORY)]!;
-    if (!(history.price >= now / (1 + LAMPORT_AGREE_WITHIN) && history.price <= now * (1 + LAMPORT_AGREE_WITHIN))) throw new Error("the price of LAMPORT could not be established: no agreeing source says what it was an hour ago");
-    const before = hourAgo(history.price, history.body);
-    if (before === null || !(before >= LEAST && before <= MOST)) throw new Error("the price of LAMPORT could not be established: what it was an hour ago could not be read");
-    const price = Math.min(now, before);
-    this.last = { at: this.now(), price };
-    return price;
+    return lamportPriceFrom(sources, answers);
   }
 }
 

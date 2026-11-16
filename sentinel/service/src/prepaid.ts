@@ -32,7 +32,7 @@ import { randomBytes } from "node:crypto";
 import { PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
 import type { Accounts } from "./accounts.js";
 import { prepaidEndingNotice, prepaidExtendedNotice, prepaidStartedNotice, planEndedNotice } from "./notices.js";
-import { accountKeys, fromRpc, type ObservedTx } from "./observed.js";
+import { accountKeys, decode, fromRpc, type ObservedTx } from "./observed.js";
 import { looksLikeSignature } from "./crypto.js";
 import { lamportFor } from "./lamportprice.js";
 import { PLANS, PREPAID_MONTHS, decimal, grouped } from "./plans.js";
@@ -73,6 +73,8 @@ export type Refusal = { ok: false; status: number; why: string };
 export interface QuoteView {
   reference: string; payTo: string; asset: PayAsset; units: string; decimals: number; mint: string | null;
   months: number; cents: number; expiresAt: number;
+  /** Seconds from this answer until `expiresAt`, by the service's clock: a page counts down from this, and not from a clock of its own that may be wrong. */
+  left: number;
   /** The same as a payment request a wallet can open (Solana Pay). */
   url: string;
   /** For a token: the token account of `payTo` that the payment lands in. A wallet's prompt, and Warden's, name this address and not `payTo`. */
@@ -163,10 +165,43 @@ export function arrived(tx: ObservedTx, payTo: string, asset: PayAsset, usdcMint
   return sum;
 }
 
+/**
+ * What was sent to `payTo`'s accounts of a token by plain transfers that their sender signed, at the top of
+ * the transaction: units of the token.
+ *
+ * `arrived` says what the chain did, and for a wallet that does nothing but take payments that is the whole
+ * of it. The treasury is a wallet with other business. A program can pay tokens into it on a stranger's
+ * instruction: an order of the treasury's own being filled, a claim, a stream paying out. Somebody who made
+ * such a transaction and named a quote in it would have a rise at the treasury to show that the treasury
+ * itself paid for. A program moves tokens inside its own instruction, though, and never as a transfer at the
+ * top of the transaction signed by the one who holds them. So a payment to the treasury is what arrived,
+ * and no more than what was sent to it plainly. A payment made through a program (a multisig, say) is not
+ * counted by itself for the same reason, and is counted by hand.
+ */
+export function sentPlainly(tx: ObservedTx, payTo: string, mint: string): bigint {
+  if (tx.failed) return 0n;
+  const read = decode(tx, "");
+  if (!read) return 0n;
+  const keys = accountKeys(tx);
+  const theirs = new Set(tx.postTokenBalances.filter((b) => b.owner === payTo && b.mint === mint).map((b) => keys[b.accountIndex]));
+  let sum = 0n;
+  for (const ix of read.instructions) {
+    if (ix.program !== TOKEN_PROGRAM.toBase58() && ix.program !== TOKEN_2022_PROGRAM.toBase58()) continue;
+    const d = ix.data, a = ix.accounts;
+    // Transfer (3): from, to, the one who signs. TransferChecked (12): from, the token, to, the one who signs.
+    const checked = d[0] === 12 && d.length >= 10 && a.length >= 4, plain = d[0] === 3 && d.length >= 9 && a.length >= 3;
+    if (!checked && !plain) continue;
+    const to = a[checked ? 2 : 1], by = a[checked ? 3 : 2];
+    if (!to || !by || !theirs.has(to) || !read.signers.includes(by)) continue;
+    sum += Buffer.from(d.buffer, d.byteOffset, d.byteLength).readBigUInt64LE(1);
+  }
+  return sum;
+}
+
 export class Prepaid {
   constructor(
     private cfg: PrepaidConfig, private accounts: Accounts, private rpc: Rpc, private selling: Selling,
-    private opts: { now?: () => number; /** Dollars for one SOL. */ price?: () => Promise<number>; /** Dollars for one LAMPORT. Without it LAMPORT is not offered. */ lamportPrice?: () => Promise<number>; notice?: (profile: string, sentence: string) => Promise<void> } = {},
+    private opts: { now?: () => number; /** Dollars for one SOL. */ price?: () => Promise<number>; /** Dollars for one LAMPORT. Without it LAMPORT is not offered. */ lamportPrice?: () => Promise<number>; /** The last such price, when recent, without waiting: for showing, never for an amount to pay. */ lamportShown?: () => number | null; notice?: (profile: string, sentence: string) => Promise<void> } = {},
   ) {
     if (!ADDRESS.test(cfg.payTo)) throw new Error("the address payments go to is not an address");
   }
@@ -219,13 +254,16 @@ export class Prepaid {
     return l ? { payTo: this.cfg.payTo, assets: [...assets, "LAMPORT"], months: PREPAID_MONTHS, lamport: { payTo: l.payTo } } : { payTo: this.cfg.payTo, assets, months: PREPAID_MONTHS };
   }
   /**
-   * Dollars for one LAMPORT now, at the price a quote made this moment would use; null where LAMPORT is not
-   * taken or cannot be priced just now. For the page to show, before anybody asks for an amount, about how
-   * many tokens the plan comes to: it is an estimate and binds nobody. The amount that binds is a quote's.
+   * Dollars for one LAMPORT at the last price established, when that is recent; null where LAMPORT is not
+   * taken, or there is no recent price. It waits for nothing: the page asks for this with everything else it
+   * shows, and a slow price source must not hold the rest of the page up. For the page to show, before
+   * anybody asks for an amount, about how many tokens the plan comes to: it is an estimate and binds nobody.
+   * The amount that binds is a quote's, which is priced when it is made.
    */
-  async lamportNow(): Promise<number | null> {
+  lamportNow(): number | null {
     if (!this.lamport) return null;
-    try { const usd = await this.opts.lamportPrice!(); return Number.isFinite(usd) && usd > 0 ? usd : null; } catch { return null; }
+    const usd = this.opts.lamportShown ? this.opts.lamportShown() : null;
+    return usd !== null && Number.isFinite(usd) && usd > 0 ? usd : null;
   }
   /** Where LAMPORT is taken: only with a treasury wallet to send it to and a price to turn dollars into it. */
   private get lamport(): { mint: string; payTo: string } | null { return this.cfg.lamport && this.opts.lamportPrice ? this.cfg.lamport : null; }
@@ -269,7 +307,7 @@ export class Prepaid {
     const payTo = i.payTo ?? this.cfg.payTo, mint = i.asset === "SOL" ? null : i.mint ?? this.mint;
     const account = mint ? tokenAccountOf(new PublicKey(payTo), new PublicKey(mint), program).toBase58() : null;
     const query = new URLSearchParams({ amount: decimal(BigInt(i.units), decimals), ...(mint ? { "spl-token": mint } : {}), reference: i.reference, label: "Warden Sentinel", message: `Pro, ${i.months} month${i.months === 1 ? "" : "s"}` });
-    return { reference: i.reference, payTo, asset: i.asset, units: i.units, decimals, mint, months: i.months, cents: i.cents, expiresAt: i.expiresAt, url: `solana:${payTo}?${query.toString()}`, account };
+    return { reference: i.reference, payTo, asset: i.asset, units: i.units, decimals, mint, months: i.months, cents: i.cents, expiresAt: i.expiresAt, left: Math.max(0, i.expiresAt - this.now()), url: `solana:${payTo}?${query.toString()}`, account };
   }
 
   /**
@@ -405,7 +443,9 @@ export class Prepaid {
       if (tx === "unread") { unread += 1; continue; }
       if (tx === null || tx === "nothing") continue;
       // (at the wallet and in the token the quote was made for: for LAMPORT, the treasury's, as they were then)
-      const got = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);
+      let got = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);
+      // (the treasury has other business than taking payments: there, no more than what was sent to it plainly)
+      if (intent.asset === "LAMPORT" && got > 0n) { const plainly = sentPlainly(tx, intent.payTo ?? this.cfg.payTo, intent.mint ?? this.mint); if (plainly < got) got = plainly; }
       // nothing, short, or late: read once and remembered, so that what cannot be counted is not read at every look
       if (got < BigInt(intent.units)) { this.note(intent, signature, got > 0n ? got : 0n); continue; }
       // a price in SOL or in LAMPORT holds for ten minutes: a payment made after that was made at another price
@@ -445,13 +485,15 @@ export class Prepaid {
    * payment made from a phone, by someone who never came back to press the button, is found too.
    *
    * So many an hour and no more, and every quote gets its turn: within each of the two, the ones looked for
-   * longest ago go first, and no profile has more than a few of its quotes looked for in one hour. A profile
-   * that keeps asking about its own quotes does not push anybody else's out.
+   * longest ago go first, and among those never looked for, the oldest (a page that brings an amount up to
+   * date leaves a row of quotes, and a payment made on the first of them must not wait behind the rest). No
+   * profile has more than a few of its quotes looked for in one hour, so one that keeps asking about its
+   * own quotes does not push anybody else's out.
    */
   async sweep(): Promise<{ looked: number; paid: number }> {
     const now = this.now();
     const open = this.accounts.intents().filter((i) => !i.paidBy);
-    const turn = (a: PayIntent, b: PayIntent) => (this.swept.get(a.reference) ?? 0) - (this.swept.get(b.reference) ?? 0) || (b.askedAt ?? b.createdAt) - (a.askedAt ?? a.createdAt);
+    const turn = (a: PayIntent, b: PayIntent) => (this.swept.get(a.reference) ?? 0) - (this.swept.get(b.reference) ?? 0) || (a.askedAt ?? a.createdAt) - (b.askedAt ?? b.createdAt);
     const asked = open.filter((i) => i.askedAt !== undefined && now - i.askedAt <= SWEEP_SECONDS).sort(turn);
     const shown = open.filter((i) => i.askedAt === undefined && now - i.createdAt <= SWEEP_SHOWN_SECONDS).sort(turn);
     const live = new Set([...asked, ...shown].map((i) => i.reference));

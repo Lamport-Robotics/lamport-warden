@@ -15,8 +15,8 @@ import { Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana
 import { LAMPORT_MINT, configFrom } from "../src/main.js";
 import { Accounts } from "../src/accounts.js";
 import { LAMPORT_TERMS, grouped, lamportTerms, prepaidTerms } from "../src/plans.js";
-import { LamportPrice, hourAgo, lamportFor } from "../src/lamportprice.js";
-import { Prepaid, SOL_QUOTE_GRACE_SECONDS, SOL_QUOTE_SECONDS, arrived, tokenAccountOf } from "../src/prepaid.js";
+import { LamportPrice, before, lamportFor } from "../src/lamportprice.js";
+import { Prepaid, SOL_QUOTE_GRACE_SECONDS, SOL_QUOTE_SECONDS, arrived, paymentInstruction, sentPlainly, tokenAccountOf } from "../src/prepaid.js";
 import type { PriceFetch } from "../src/solprice.js";
 import { fromRpc } from "../src/observed.js";
 import type { Rpc } from "../src/rpc.js";
@@ -38,6 +38,17 @@ const TOKENS = (n: number) => BigInt(n) * 1_000_000n; // six decimals, as the to
 const PRICE = 0.0006;
 const TREASURY_ACCOUNT = tokenAccountOf(new PublicKey(TREASURY), MINT, TOKEN_2022).toBase58();
 
+const PAYER_ACCOUNT = tokenAccountOf(payer, MINT, TOKEN_2022).toBase58();
+/** The payer's own transfer of so many LAMPORT to a token account, signed by the payer: what a wallet's send is. */
+function transfer(units: bigint, to: string, by: PublicKey = payer, signs = true): TransactionInstruction {
+  const data = Buffer.alloc(10);
+  data[0] = 12; data.writeBigUInt64LE(units, 1); data[9] = 6;
+  return new TransactionInstruction({ programId: TOKEN_2022, data, keys: [
+    { pubkey: tokenAccountOf(by, MINT, TOKEN_2022), isSigner: false, isWritable: true }, { pubkey: MINT, isSigner: false, isWritable: false },
+    { pubkey: new PublicKey(to), isSigner: false, isWritable: true }, { pubkey: by, isSigner: signs, isWritable: false },
+  ] });
+}
+
 class Chain implements Rpc {
   txs: { signature: string; names: string[]; failed: boolean; final: boolean; listed: boolean; result: any }[] = [];
   holds: Record<string, bigint> = {};
@@ -57,13 +68,14 @@ class Chain implements Rpc {
 
   /**
    * A transaction signed by `payer` that names `references` and leaves these balances of a token: [account's
-   * owner, before, after] for each account it touched. `final: false`: on the chain, not yet final.
-   * `listed: false`: the chain's list for an address does not show it (it is found by its signature only).
+   * owner, before, after, and the account's address where it matters] for each account it touched. `final:
+   * false`: on the chain, not yet final. `listed: false`: the chain's list for an address does not show it (it
+   * is found by its signature only). `first`: instructions it carries before the one that names everything.
    */
-  did(o: { references: string[]; balances: [string, bigint, bigint][]; mint?: string; failed?: boolean; final?: boolean; listed?: boolean }): string {
-    const accounts = o.balances.map(() => Keypair.generate().publicKey);
+  did(o: { references: string[]; balances: [string, bigint, bigint, string?][]; mint?: string; failed?: boolean; final?: boolean; listed?: boolean; first?: TransactionInstruction[] }): string {
+    const accounts = o.balances.map((b) => (b[3] ? new PublicKey(b[3]) : Keypair.generate().publicKey));
     const keys = [{ pubkey: payer, isSigner: true, isWritable: true }, ...accounts.map((pubkey) => ({ pubkey, isSigner: false, isWritable: true })), ...o.references.map((r) => ({ pubkey: new PublicKey(r), isSigner: false, isWritable: false }))];
-    const tx = new Transaction({ feePayer: payer, recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" }).add(new TransactionInstruction({ programId: MEMO, keys, data: Buffer.from("x") }));
+    const tx = new Transaction({ feePayer: payer, recentBlockhash: "9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x" }).add(...(o.first ?? []), new TransactionInstruction({ programId: MEMO, keys, data: Buffer.from("x") }));
     const names = tx.compileMessage().accountKeys.map((k) => k.toBase58());
     const lamports = names.map(() => 1_000_000_000);
     const side = (which: 1 | 2) => o.balances.map((b, i) => ({ accountIndex: names.indexOf(accounts[i]!.toBase58()), mint: o.mint ?? LAMPORT_MINT, owner: b[0], uiTokenAmount: { amount: (o.failed ? b[1] : b[which]).toString(), decimals: 6 } }));
@@ -72,9 +84,9 @@ class Chain implements Rpc {
     this.txs.push({ signature, names, failed: !!o.failed, final: o.final !== false, listed: o.listed !== false, result: { slot: 1000 + this.n, blockTime: T0, transaction: [Buffer.from(tx.serialize({ requireAllSignatures: false, verifySignatures: false })).toString("base64"), "base64"], meta: { err: o.failed ? {} : null, fee: 5000, preBalances: lamports, postBalances: lamports, preTokenBalances: side(1), postTokenBalances: side(2) } } });
     return signature;
   }
-  /** A payment of so many LAMPORT that arrives at the treasury, naming these quotes. */
+  /** A payment of so many LAMPORT that arrives at the treasury, naming these quotes: a transfer the payer signed, as a wallet makes it. */
   paid(references: string[], units: bigint, o: { final?: boolean; listed?: boolean } = {}): string {
-    return this.did({ references, balances: [[payer.toBase58(), TOKENS(1_000_000), TOKENS(1_000_000) - units], [TREASURY, 0n, units]], ...o });
+    return this.did({ references, first: [transfer(units, TREASURY_ACCOUNT)], balances: [[payer.toBase58(), TOKENS(1_000_000), TOKENS(1_000_000) - units, PAYER_ACCOUNT], [TREASURY, 0n, units, TREASURY_ACCOUNT]], ...o });
   }
   /** A transaction that merely names a quote and moves nothing. */
   dust(reference: string): string { return this.did({ references: [reference], balances: [] }); }
@@ -106,7 +118,7 @@ function setup(o: { off?: true; holder?: () => Promise<boolean> } = {}) {
   const market = { price: PRICE as number | null };
   const selling = { sells: () => true, holder: o.holder ?? (async () => false), byCard: () => false, centsFull: 1500, centsHolder: 1000 };
   const made = (cfg: { lamport?: { mint: string; payTo: string } }, priced = true) => new Prepaid({ payTo: PAY_TO, ...cfg }, accounts, chain, selling,
-    { now: () => now, notice: async (_p, sentence) => { said.push(sentence); }, ...(priced ? { lamportPrice: async () => { if (market.price === null) throw new Error("no two sources agree"); return market.price; } } : {}) });
+    { now: () => now, notice: async (_p, sentence) => { said.push(sentence); }, ...(priced ? { lamportPrice: async () => { if (market.price === null) throw new Error("no two sources agree"); return market.price; }, lamportShown: () => market.price } : {}) });
   const prepaid = made(o.off ? {} : { lamport: { mint: LAMPORT_MINT, payTo: TREASURY } });
   const admit = (n: number) => { const r = accounts.admit(key(n).toBase58(), null, T0); if (!r.ok) throw new Error("setup"); return r.profile; };
   const profile = admit(1);
@@ -185,9 +197,9 @@ describe("an amount in LAMPORT", () => {
     for (const bad of [0, -1, NaN, 1e-15]) { s.market.price = bad; expect(await s.prepaid.quote(s.profile, "LAMPORT", 1), String(bad)).toMatchObject({ ok: false, status: 503 }); }
   });
 
-  it("follows the price by itself: the page is given LAMPORT's price with what is offered each time it asks, and no price is not an error", async () => {
+  it("follows the price by itself: the page is given LAMPORT's last price with what is offered each time it asks, without waiting for one, and no price is not an error", async () => {
     const s = setup();
-    expect(await s.prepaid.lamportNow()).toBe(PRICE);
+    expect(s.prepaid.lamportNow()).toBe(PRICE);
     // what the page asks for every twenty seconds
     const quote = { enabled: true as const, checkoutOpen: true, tier: "watch" as const, subscribed: false, status: null, price: "full" as const, cents: 1500, centsFull: 1500, centsHolder: 1000, holder: false, holderMin: 250_000, renewsAt: null, endsAt: null, paidUntil: null };
     const handle = api({ accounts: s.accounts, store: s.store, watcher: { ownerSigned: async () => undefined, confirmOwn: async () => true }, nonces: new NonceBook(), origin: "https://warden.lamportrobotics.com", now: () => T0, billing: { api: { quote: async () => quote } as any, webhookSecret: "whsec_x" }, prepaid: s.prepaid });
@@ -200,10 +212,10 @@ describe("an amount in LAMPORT", () => {
     // with no price just now LAMPORT is still offered, with nothing to estimate by; asking for an amount says why not
     s.market.price = null;
     expect(await offered()).toEqual({ payTo: PAY_TO, assets: ["USDC", "LAMPORT"], months: [1, 3, 12], lamport: { payTo: TREASURY, usd: null } });
-    expect(await s.prepaid.lamportNow()).toBeNull();
-    for (const bad of [0, -1, NaN]) { s.market.price = bad; expect(await s.prepaid.lamportNow(), String(bad)).toBeNull(); }
+    expect(s.prepaid.lamportNow()).toBeNull();
+    for (const bad of [0, -1, NaN]) { s.market.price = bad; expect(s.prepaid.lamportNow(), String(bad)).toBeNull(); }
     // and where LAMPORT is not taken there is nothing to say about its price
-    expect(await setup({ off: true }).prepaid.lamportNow()).toBeNull();
+    expect(setup({ off: true }).prepaid.lamportNow()).toBeNull();
   });
 
   it("is not quoted when the token cannot be read from the chain, or is not a token", async () => {
@@ -228,58 +240,153 @@ describe("an amount in LAMPORT", () => {
 });
 
 describe("the price of LAMPORT", () => {
-  // the three sources' answers, in the shapes they gave on the day this was written
-  const jupiter = (p: number | null) => (p === null ? {} : { [LAMPORT_MINT]: { usdPrice: p, liquidity: 9764.24, decimals: 6, priceChange24h: -20.6 } });
-  const gecko = (p: number | null) => ({ data: { attributes: { symbol: "LAMPORT", price_usd: p === null ? null : String(p) } } });
-  const dex = (p: number | null, change: unknown = { h1: -1.61, h6: -0.77, h24: -20.59 }, more: any[] = []) => (p === null ? [] : [{ dexId: "raydium", priceUsd: String(p), liquidity: { usd: 19441.28 }, priceChange: change }, ...more]);
+  const POOL = "2ZJpQEnyTugE237Cs9X5FHPrXhPauC6DBx5jLV5FqyV7";
+  const OTHER_POOL = "9wFFyRfZBsuAha4YcuxcXLKwMxJR43S7fPfQLusDBzvT";
+  const SOL = "So11111111111111111111111111111111111111112";
+  // the three sources' answers, in the shapes they gave on 2026-11-16: Jupiter about the token, the other two about the pool
+  const jupiter = (p: number | null) => (p === null ? {} : { [LAMPORT_MINT]: { usdPrice: p, liquidity: 9451.88, decimals: 6, priceChange24h: -17.04 } });
+  const gecko = (p: number | null, change: unknown = { m5: "0", h1: "-3.118", h6: "-20.752", h24: "-16.082" }, o: { pool?: string; base?: string } = {}) => (p === null ? { errors: [{ status: "404", title: "Not Found" }] } : {
+    data: {
+      id: `solana_${o.pool ?? POOL}`,
+      attributes: { address: o.pool ?? POOL, base_token_price_usd: String(p), quote_token_price_usd: "71.17", price_change_percentage: change, reserve_in_usd: "18730.1295" },
+      relationships: { base_token: { data: { id: `solana_${o.base ?? LAMPORT_MINT}` } }, quote_token: { data: { id: `solana_${SOL}` } }, dex: { data: { id: "raydium" } } },
+    },
+  });
+  const pair = (p: number, change: unknown, o: { pool?: string; base?: string; txns?: unknown; usd?: number } = {}) => ({ chainId: "solana", dexId: "raydium", pairAddress: o.pool ?? POOL, baseToken: { address: o.base ?? LAMPORT_MINT }, quoteToken: { address: SOL }, priceUsd: String(p), priceChange: change, txns: o.txns ?? { h1: { buys: 2, sells: 3 }, h6: { buys: 8, sells: 13 } }, liquidity: { usd: o.usd ?? 18880.38 } });
+  const dex = (p: number | null, change: unknown = { h1: -2.14, h6: -23.98, h24: -17.07 }, o: Parameters<typeof pair>[2] = {}, first: unknown[] = []) => (p === null ? { schemaVersion: "1.0.0", pairs: null, pair: null } : { schemaVersion: "1.0.0", pairs: [...first, pair(p, change, o)] });
+  const QUIET = { h1: { buys: 0, sells: 0 }, h6: { buys: 0, sells: 0 } };
   function priced(answers: { jupiter?: unknown; gecko?: unknown; dex?: unknown; down?: string[] }) {
     let now = T0, asked = 0;
+    const urls: string[] = [];
     const fetchImpl: PriceFetch = async (url) => {
-      asked += 1;
+      asked += 1; urls.push(url);
       const which = url.includes("jup.ag") ? "jupiter" : url.includes("geckoterminal") ? "gecko" : "dex";
       if (answers.down?.includes(which)) return { ok: false, json: async () => ({}) };
       return { ok: true, json: async () => (answers as any)[which] };
     };
-    return { price: new LamportPrice(LAMPORT_MINT, fetchImpl, { now: () => now }), asked: () => asked, later: (s: number) => { now += s; } };
+    return { price: new LamportPrice(LAMPORT_MINT, POOL, fetchImpl, { now: () => now }), asked: () => asked, urls, later: (s: number) => { now += s; } };
   }
+  const flat = { gecko: { h1: "0", h6: "0" }, dex: { h1: 0, h6: 0 } };
+  const none = async (a: Parameters<typeof priced>[0]) => expect(priced(a).price.usd()).rejects.toThrow("could not be established");
 
   it("is what two or more of three public sources agree on, to within five in a hundred, and is asked for once in half a minute", async () => {
-    const p = priced({ jupiter: jupiter(0.0000522729), gecko: gecko(0.0000523546), dex: dex(0.00005297, {}) });
-    expect(await p.price.usd()).toBeCloseTo((0.0000522729 + 0.0000523546 + 0.00005297) / 3, 12);
+    const p = priced({ jupiter: jupiter(0.0000504308), gecko: gecko(0.0000504622), dex: dex(0.00004981) });
+    // it fell over the hour and over six: the price now is the lowest, and is used
+    expect(await p.price.usd()).toBeCloseTo((0.0000504308 + 0.0000504622 + 0.00004981) / 3, 12);
     expect(p.asked()).toBe(3);
     await p.price.usd();
     expect(p.asked()).toBe(3);
     p.later(31);
     await p.price.usd();
     expect(p.asked()).toBe(6);
-    // one of three that is wrong does not set it: the other two stand
-    expect(await priced({ jupiter: jupiter(0.9), gecko: gecko(0.00005), dex: dex(0.000051, {}) }).price.usd()).toBeCloseTo(0.0000505, 10);
+    // two of the three are asked about the pool by its address, and not about the token
+    expect(p.urls.slice(0, 3).sort()).toEqual([`https://api.dexscreener.com/latest/dex/pairs/solana/${POOL}`, `https://api.geckoterminal.com/api/v2/networks/solana/pools/${POOL}`, `https://lite-api.jup.ag/price/v3?ids=${LAMPORT_MINT}`]);
+    // one of three that is wrong does not set it: the other two stand, and of the two the lower is what it cost before
+    expect(await priced({ jupiter: jupiter(0.9), gecko: gecko(0.00005, flat.gecko), dex: dex(0.000051, flat.dex) }).price.usd()).toBeCloseTo(0.00005, 12);
   });
 
-  it("is the lower of the price now and the price an hour ago: a price pushed up for a minute buys nothing", async () => {
+  it("is the lowest of the price now, an hour ago and six hours ago: a price pushed up for a while buys nothing", async () => {
+    const at = (p: number, g: unknown, d: unknown, o: Parameters<typeof pair>[2] = {}) => priced({ jupiter: jupiter(p), gecko: gecko(p, g), dex: dex(p, d, o) }).price.usd();
     // doubled within the hour: what is used is what it cost before
-    const pumped = await priced({ jupiter: jupiter(0.0001), gecko: gecko(0.0001), dex: dex(0.0001, { h1: 100 }) }).price.usd();
-    expect(pumped).toBeCloseTo(0.00005, 12);
-    // fallen within the hour: the price now is the lower, and is used
-    const fallen = await priced({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, { h1: -50 }) }).price.usd();
-    expect(fallen).toBeCloseTo(0.00005, 12);
-    // no trade in the hour: nothing changed
-    expect(await priced({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, {}) }).price.usd()).toBeCloseTo(0.00005, 12);
-    expect(hourAgo(0.0001, dex(0.0001, { h1: 25 }))).toBeCloseTo(0.00008, 12);
-    // the pool with the most in it is the one read, not the first listed
-    expect(hourAgo(1, [{ priceUsd: "1", liquidity: { usd: 10 }, priceChange: { h1: 900 } }, { priceUsd: "1", liquidity: { usd: 5000 }, priceChange: { h1: 100 } }])).toBeCloseTo(0.5, 12);
+    expect(await at(0.0001, { h1: "100", h6: "100" }, { h1: 100, h6: 100 })).toBeCloseTo(0.00005, 12);
+    // three times the price for the last five hours, and level over the last one: still what it cost six hours ago
+    expect(await at(0.00015, { h1: "0", h6: "200" }, { h1: 0, h6: 200 })).toBeCloseTo(0.00005, 12);
+    // fallen: the price now is the lowest
+    expect(await at(0.00005, { h1: "-50", h6: "-60" }, { h1: -50, h6: -60 })).toBeCloseTo(0.00005, 12);
+    // no trade in six hours: one source says nought, the other leaves the change out and reports no trades
+    expect(await at(0.00005, { h1: "0", h6: "0" }, {}, { txns: QUIET })).toBeCloseTo(0.00005, 12);
+    // where the two that read the pool tell the past differently, the lower is used
+    expect(await at(0.0001, { h1: "0", h6: "0" }, { h1: 100, h6: 0 })).toBeCloseTo(0.00005, 12);
+    expect(await at(0.0001, { h1: "0", h6: "300" }, { h1: 0, h6: 0 })).toBeCloseTo(0.000025, 12);
+    expect(before(0.0001, 25)).toBeCloseTo(0.00008, 12);
+    expect(before(0.0001, "25")).toBeCloseTo(0.00008, 12);
+    for (const bad of [null, undefined, "", "soon", -100, -250, NaN, true, {}]) expect(before(1, bad), String(bad)).toBeNull();
+  });
+
+  it("is read from LAMPORT's own pool: a second pool that somebody makes cannot set it", async () => {
+    // a pool with only LAMPORT in it at ten times the price: deeper to look at, and the token's price to a source that picks by depth.
+    // Jupiter is taken in; asked about the pool, the other two still answer about the pool
+    expect(await priced({ jupiter: jupiter(0.0005), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex) }).price.usd()).toBeCloseTo(0.00005, 12);
+    // an answer about another pool is no answer, whatever it says and however deep it looks
+    await none({ jupiter: jupiter(0.0005), gecko: gecko(0.0005, flat.gecko, { pool: OTHER_POOL }), dex: dex(0.0005, flat.dex, { pool: OTHER_POOL, usd: 900_000 }) });
+    const deeper = pair(0.0005, flat.dex, { pool: OTHER_POOL, usd: 900_000 });
+    expect(await priced({ jupiter: jupiter(0.0005), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex, {}, [deeper]) }).price.usd()).toBeCloseTo(0.00005, 12);
+    // nor is one about the pool with LAMPORT as the other side of it, where the price given is the other token's
+    await none({ jupiter: jupiter(71), gecko: gecko(71, flat.gecko, { base: SOL }), dex: dex(71, flat.dex, { base: SOL }) });
+    // and the past is read from the pool too: no other pool's quiet hour stands in for this one's rise
+    const quiet = pair(0.00015, {}, { pool: OTHER_POOL, usd: 900_000, txns: QUIET });
+    expect(await priced({ jupiter: jupiter(0.00015), gecko: gecko(0.00015, { h1: "200", h6: "200" }), dex: dex(0.00015, { h1: 200, h6: 200 }, {}, [quiet]) }).price.usd()).toBeCloseTo(0.00005, 12);
+  });
+
+  it("does not hang on any one source: either of the two that read the pool can say what it was before", async () => {
+    // DexScreener down: GeckoTerminal agrees with Jupiter and knows the past
+    expect(await priced({ jupiter: jupiter(0.0001), gecko: gecko(0.0001, { h1: "100", h6: "0" }), dex: dex(null), down: ["dex"] }).price.usd()).toBeCloseTo(0.00005, 12);
+    // GeckoTerminal down: DexScreener does
+    expect(await priced({ jupiter: jupiter(0.0001), gecko: gecko(null), dex: dex(0.0001, { h1: 0, h6: 100 }), down: ["gecko"] }).price.usd()).toBeCloseTo(0.00005, 12);
+    // Jupiter down: the two that read the pool agree
+    expect(await priced({ jupiter: jupiter(null), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex), down: ["jupiter"] }).price.usd()).toBeCloseTo(0.00005, 12);
+    // one of the two cannot say what it was before, and the other can: the other's word is used
+    expect(await priced({ jupiter: jupiter(0.0001), gecko: gecko(0.0001, { h1: "100", h6: "100" }), dex: dex(0.0001, {}) }).price.usd()).toBeCloseTo(0.00005, 12);
+    // and what the one that cannot say both does say still counts
+    expect(await priced({ jupiter: jupiter(0.0001), gecko: gecko(0.0001, { h1: "0", h6: "0" }), dex: dex(0.0001, { h6: 100 }) }).price.usd()).toBeCloseTo(0.00005, 12);
   });
 
   it("is not given at all when it cannot be stood behind", async () => {
-    const none = async (a: Parameters<typeof priced>[0]) => expect(priced(a).price.usd()).rejects.toThrow("could not be established");
-    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00006), dex: dex(0.00007) });                 // no two agree
-    await none({ jupiter: jupiter(0.00005), gecko: gecko(null), dex: dex(null) });                       // one answer
-    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005), down: ["dex"] });   // the source that knows the hour before is down
-    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.0001, { h1: 100 }) });      // or is not among those that agree
-    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, null) });            // or says nothing readable about the hour
-    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, { h1: "soon" }) });
-    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005, { h1: -100 }) });
-    await none({ jupiter: jupiter(0), gecko: gecko(0), dex: dex(0, {}) });                               // nothing is not a price
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00006), dex: dex(0.00007) });                                   // no two agree
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(null), dex: dex(null) });                                         // one answer
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005), dex: dex(0.00005), down: ["gecko", "dex"] });            // nothing that reads the pool
+    // nobody who agrees can say what it was an hour and six hours ago
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(null), dex: dex(0.00005, {}), down: ["gecko"] });                  // left out, with trades in the period: not known, not guessed
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(null), dex: dex(0.00005, { h1: 3 }), down: ["gecko"] });           // the hour, and not the six
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005, null), dex: dex(0.00005, null) });
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005, { h1: "soon", h6: "0" }), dex: dex(0.00005, { h1: -100, h6: 0 }) });
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005, { h1: "", h6: "0" }), dex: dex(0.00005, { h1: 0, h6: 1e9 }) }); // a change that puts the price before below anything a price can be
+    // the one that knows the past is not among those that agree about now
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005, null), dex: dex(0.0001, { h1: 100, h6: 100 }) });
+    // and a number that cannot be a price is not one: nothing, or a dollar and more for a token there are a billion of
+    await none({ jupiter: jupiter(0), gecko: gecko(0, flat.gecko), dex: dex(0, flat.dex) });
+    await none({ jupiter: jupiter(999), gecko: gecko(999, flat.gecko), dex: dex(999, flat.dex) });
+  });
+
+  it("asks once for everybody who is waiting, and remembers that there was no price as long as it remembers one", async () => {
+    // twenty pages at once on a cold start: three requests, not sixty
+    const p = priced({ jupiter: jupiter(0.00005), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex) });
+    expect(new Set(await Promise.all(Array.from({ length: 20 }, () => p.price.usd())))).toEqual(new Set([0.00005]));
+    expect(p.asked()).toBe(3);
+    // a source that says "too many requests" is not asked twenty times more for it
+    const f = priced({ jupiter: jupiter(0.00005), gecko: gecko(null), dex: dex(null), down: ["gecko", "dex"] });
+    const all = await Promise.allSettled(Array.from({ length: 20 }, () => f.price.usd()));
+    expect(all.every((r) => r.status === "rejected")).toBe(true);
+    expect(f.asked()).toBe(3);
+    await expect(f.price.usd()).rejects.toThrow("could not be established");
+    expect(f.asked()).toBe(3);
+    f.later(31);
+    await expect(f.price.usd()).rejects.toThrow("could not be established");
+    expect(f.asked()).toBe(6);
+  });
+
+  it("can be shown without waiting for it: the last price while it is recent, and nothing when there is none", async () => {
+    const p = priced({ jupiter: jupiter(0.00005), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex) });
+    // nothing yet: nothing is shown, and the asking has begun behind it
+    expect(p.price.shown()).toBeNull();
+    await p.price.usd();
+    expect(p.asked()).toBe(3);
+    expect(p.price.shown()).toBe(0.00005);
+    expect(p.asked()).toBe(3);
+    // getting old: still shown, and asked for again
+    p.later(31);
+    expect(p.price.shown()).toBe(0.00005);
+    await p.price.usd();
+    expect(p.asked()).toBe(6);
+    // too old to show
+    p.later(200);
+    expect(p.price.shown()).toBeNull();
+    // and where there is no price there is nothing to show, and no error either
+    const f = priced({ jupiter: jupiter(0.00005), gecko: gecko(null), dex: dex(null), down: ["gecko", "dex"] });
+    expect(f.price.shown()).toBeNull();
+    await expect(f.price.usd()).rejects.toThrow();
+    expect(f.price.shown()).toBeNull();
+    expect(f.asked()).toBe(3);
   });
 
   it("turns dollars into whole tokens, rounded up, in the token's smallest units", () => {
@@ -375,6 +482,34 @@ describe("a payment in LAMPORT", () => {
     const tx = fromRpc("x", s.chain.txs[0]!.result)!;
     expect(arrived(tx, TREASURY, "LAMPORT", LAMPORT_MINT)).toBe(0n);
     expect(arrived(tx, key(77).toBase58(), "LAMPORT", LAMPORT_MINT)).toBe(TOKENS(25_000));
+  });
+
+  it("is no more than what was sent to the treasury plainly: a rise there that a program paid in on a stranger's instruction is not a payment", async () => {
+    const s = setup();
+    const q = await s.quoted(1);
+    const rise: [string, bigint, bigint, string] = [TREASURY, 0n, TOKENS(25_000), TREASURY_ACCOUNT];
+    // the treasury's LAMPORT rises by the whole amount in a transaction that names the quote, and nobody who signed it sent it:
+    // an order of the treasury's own being filled, a claim, a stream paying out
+    s.chain.did({ references: [q.reference], balances: [[key(77).toBase58(), TOKENS(300_000), TOKENS(275_000)], rise] });
+    // a transfer to the treasury that the holder of the tokens did not sign (a program moving what it holds)
+    s.chain.did({ references: [q.reference], first: [transfer(TOKENS(25_000), TREASURY_ACCOUNT, key(78), false)], balances: [[key(78).toBase58(), TOKENS(300_000), TOKENS(275_000)], rise] });
+    // a transfer the payer did sign, to somebody else's account, beside such a rise
+    s.chain.did({ references: [q.reference], first: [transfer(TOKENS(25_000), tokenAccountOf(key(77), MINT, TOKEN_2022).toBase58())], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000), PAYER_ACCOUNT], rise] });
+    expect(await s.check(q.reference)).toEqual({ status: "waiting" });
+    expect(s.accounts.profile(s.profile)?.tier).toBe("watch");
+    // half sent plainly and half paid in by a program: short by that half
+    s.chain.did({ references: [q.reference], first: [transfer(TOKENS(12_500), TREASURY_ACCOUNT)], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(287_500), PAYER_ACCOUNT], rise] });
+    expect(await s.check(q.reference)).toMatchObject({ status: "short", arrived: TOKENS(12_500).toString() });
+    // read from the instructions at the top of each, beside what the balances say
+    const tx = (n: number) => fromRpc("x", s.chain.txs[n]!.result)!;
+    expect([0, 1, 2, 3].map((n) => sentPlainly(tx(n), TREASURY, LAMPORT_MINT))).toEqual([0n, 0n, 0n, TOKENS(12_500)]);
+    expect([0, 1, 2, 3].map((n) => arrived(tx(n), TREASURY, "LAMPORT", LAMPORT_MINT))).toEqual([TOKENS(25_000), TOKENS(25_000), TOKENS(25_000), TOKENS(25_000)]);
+    // and the payer's own transfer of the whole of it is a payment, as it always was
+    const own = s.chain.paid([q.reference], TOKENS(25_000));
+    expect(sentPlainly(fromRpc("x", s.chain.txs.find((t) => t.signature === own)!.result)!, TREASURY, LAMPORT_MINT)).toBe(TOKENS(25_000));
+    expect(await s.check(q.reference)).toMatchObject({ status: "paid" });
+    // the wallet USDC and SOL go to takes payments and nothing else, and is counted as before: by what arrived
+    expect(sentPlainly(tx(0), PAY_TO, LAMPORT_MINT)).toBe(0n);
   });
 
   it("that is short starts nothing and is said to be short; the full amount, sent after, is counted", async () => {
@@ -623,19 +758,31 @@ describe("a payment that is hard to find", () => {
 
   it("the service's own look gets to every quote: the ones looked for longest ago go first, and nobody's asking pushes another's out", async () => {
     const s = setup();
-    const q = await s.quoted(1);
-    // a payment was built and sent, and the tab closed
-    expect((await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).ok).toBe(true);
-    s.chain.paid([q.reference], TOKENS(25_000));
-    // then twenty-five other profiles ask about three quotes each, later than that
-    s.later(60);
+    // twenty-five other profiles ask about three quotes each
     const others: [string, string][] = [];
     for (let n = 2; n <= 26; n++) { const p = s.admit(n); for (const months of [1, 3, 12]) { const o = await s.quoted(months, p); others.push([p, o.reference]); await s.check(o.reference, undefined, p); } }
-    // sixty an hour: the first hour does not reach it, the second does, though the others keep asking
+    // then, later than all of them, a payment is built and sent, and the tab closed
+    s.later(60);
+    const q = await s.quoted(1);
+    expect((await s.prepaid.transaction(s.profile, q.reference, payer.toBase58())).ok).toBe(true);
+    s.chain.paid([q.reference], TOKENS(25_000));
+    // sixty an hour, those never looked for in the order they came: the first hour does not reach it, the second does, though the others keep asking
     expect(await s.prepaid.sweep()).toEqual({ looked: 60, paid: 0 });
     expect(s.accounts.profile(s.profile)?.tier).toBe("watch");
     for (const [p, reference] of others) await s.check(reference, undefined, p);
     expect((await s.prepaid.sweep()).paid).toBe(1);
+    expect(s.accounts.profile(s.profile)?.tier).toBe("pro");
+  });
+
+  it("a page that brought an amount up to date three times leaves four quotes: a payment on the first of them is found at the first look, not behind the three after it", async () => {
+    const s = setup();
+    const first = await s.quoted(1);
+    // paid from a phone as it ran out; the page had moved on, and then was closed
+    s.chain.paid([first.reference], TOKENS(25_000));
+    const later: string[] = [];
+    for (let i = 0; i < 3; i++) { s.later(SOL_QUOTE_SECONDS + 2); later.push((await s.quoted(1)).reference); }
+    expect(new Set([first.reference, ...later]).size).toBe(4);
+    expect(await s.prepaid.sweep()).toMatchObject({ paid: 1 });
     expect(s.accounts.profile(s.profile)?.tier).toBe("pro");
   });
 });
@@ -711,7 +858,8 @@ describe("what somebody is told before they pay in LAMPORT", () => {
     expect(terms[0]).toBe(prepaidTerms(1500, 1)[0]);
     expect(terms[0]).toContain("$15 pays for one month, once.");
     expect(terms.slice(1)).toEqual([...LAMPORT_TERMS]);
-    expect(terms[1]).toContain("the lower of its price now, on which two public sources have to agree, and its price an hour before");
+    expect(terms[1]).toContain("the lowest of its price now, on which two public sources have to agree, and its price one hour and six hours before");
+    expect(terms[2]).toContain("made with this page's button or its payment request: they mark the payment as yours. A send typed into a wallet by hand has no such mark and is not counted by itself.");
     expect(terms[2]).toContain("to Lamport's treasury wallet");
     expect(terms[3]).toContain("the LAMPORT that was paid is sent back to the wallet that paid");
     expect(terms[4]).toBe("Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. Lamport does that itself, after the payment; this page does not, and none of it is a promise about what the token is worth.");

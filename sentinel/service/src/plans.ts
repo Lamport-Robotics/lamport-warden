@@ -78,7 +78,7 @@ export function decimal(units: bigint, decimals: number): string {
  */
 export const prepaidTerms = (cents: number, months: number): string[] => [
   `${dollars(cents)} pays for ${months === 1 ? "one month" : `${months} months`}, once. Nothing is charged again and nothing renews: when the time is up your profile goes back to Watch, and nothing is deleted. Your alert channels are told three days before.`,
-  "It is one transfer of exactly the amount shown, to Lamport's address, from any wallet. Like every transfer on the chain it is public: anyone can see that the paying wallet paid Lamport.",
+  "It is one transfer of exactly the amount shown, to Lamport's address, from any wallet, made with this page's button or its payment request: they mark the payment as yours. A send typed into a wallet by hand has no such mark and is not counted by itself. Like every transfer on the chain it is public: anyone can see that the paying wallet paid Lamport.",
   "Paying again before the time is up adds to it. A refund is on the same terms as by card, and is sent back to the wallet that paid.",
 ];
 
@@ -98,8 +98,8 @@ export const lamportTerms = (cents: number, months: number): string[] => [prepai
  * the tokens, which is Lamport's own doing after the payment and nothing the service does.
  */
 export const LAMPORT_TERMS: readonly string[] = [
-  "The amount is that price in dollars, turned into LAMPORT at the token's price when it is shown: the lower of its price now, on which two public sources have to agree, and its price an hour before, so that a price pushed up for a minute buys nothing.",
-  "It is one transfer of exactly the amount shown, to Lamport's treasury wallet, from any wallet. Like every transfer on the chain it is public: anyone can see that the paying wallet paid Lamport.",
+  "The amount is that price in dollars, turned into LAMPORT at the token's price when it is shown: the lowest of its price now, on which two public sources have to agree, and its price one hour and six hours before, so that a price pushed up for a while buys nothing. After a rise in those six hours that is more tokens than the price of the moment would give.",
+  "It is one transfer of exactly the amount shown, to Lamport's treasury wallet, from any wallet, made with this page's button or its payment request: they mark the payment as yours. A send typed into a wallet by hand has no such mark and is not counted by itself. Like every transfer on the chain it is public: anyone can see that the paying wallet paid Lamport.",
   "Paying again before the time is up adds to it. A refund is on the same terms as by card: the LAMPORT that was paid is sent back to the wallet that paid.",
   "Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. Lamport does that itself, after the payment; this page does not, and none of it is a promise about what the token is worth.",
 ];

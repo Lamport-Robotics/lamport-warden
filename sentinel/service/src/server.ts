@@ -292,7 +292,7 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       if (!deps.prepaid || !quote.checkoutOpen || quote.subscribed) return ok({ ...quote, crypto: null });
       // with LAMPORT's price now, where it is taken, so that the page can show about how many tokens the plan comes to
       const offer = deps.prepaid.offer();
-      const usd = offer.lamport ? (await deps.prepaid.lamportNow?.()) ?? null : null;
+      const usd = offer.lamport ? deps.prepaid.lamportNow?.() ?? null : null;
       return ok({ ...quote, crypto: offer.lamport ? { ...offer, lamport: { ...offer.lamport, usd } } : offer });
     }
     if (route === "POST /billing/crypto/quote" || route === "POST /billing/crypto/check" || route === "POST /billing/crypto/transaction") {
