@@ -27,10 +27,9 @@ points at the Sentinel page for how it can be paid. The current one is 0.8.0, wh
 experiment, off unless turned on.
 
 **Before submitting 0.8.0:** `LAMPORT_DECOYS` in `src/defaults.ts` is empty, so a decoy is shown only to
-somebody who names an address themselves. The description below says only that a site "is handed a decoy's
-address". If the list is still empty when this is submitted, add to that paragraph that the address is one
-the user names in the settings. (0.7.8 is the version to submit if the decoy is not ready: package it from
-`main`.)
+somebody who names an address themselves, and the description below says so ("an address you name in the
+settings"). If Lamport's own decoys are in the list by the time this is submitted, change that sentence to
+say a decoy is built in. (0.7.8 is the version to submit if the decoy is not ready: package it from `main`.)
 
 To submit 0.8.0:
 
@@ -86,7 +85,8 @@ You can watch it work before you trust it with anything: warden.lamportrobotics.
 that holds nothing and eight requests to try on it.
 
 An experiment you can turn on in the settings: a decoy first. A site you have not used is handed a decoy's
-address when it asks your wallet to connect. A site that then asks the decoy to give everything away is a
+address when it asks your wallet to connect: an address you name in the settings, that holds something and
+whose key you do not have. A site that then asks the decoy to give everything away is a
 thief, caught before it has seen your address or reached your wallet. Any other site is then connected to
 your own wallet and asks again, which costs one more press the first time you use it. It is off until you
 turn it on.
