@@ -1,4 +1,5 @@
-// Draws site/og.png, the picture a link to warden.lamportrobotics.com shows where it is posted (1200 x 630).
+// Draws site/og.png, the picture a link to warden.lamportrobotics.com shows where it is posted (1200 x 630),
+// and store/promo-440x280.png, the small tile the Chrome Web Store shows beside the listing.
 // It is the page's own first screen: the headline, and the prompt as the extension draws it. The fonts and the
 // mark are the main site's, fetched from where the page itself gets them, so this needs the network.
 //
@@ -54,5 +55,23 @@ await page.setContent(html, { waitUntil: 'load' });
 const fonts = await page.evaluate(async () => { await Promise.all([300, 400, 500].map((w) => document.fonts.load(`${w} 20px Switzer`))); await document.fonts.ready; return [...document.fonts].filter((f) => f.status === 'loaded').length; });
 if (fonts < 2) { await browser.close(); throw new Error(`the site's fonts did not load (${fonts}): og.png was not written`); }
 await page.screenshot({ path: join(root, 'site', 'og.png'), type: 'png' });
-await browser.close();
 console.log('site/og.png');
+
+// The Chrome Web Store's small promo tile (440 x 280): the name and the one line, large enough to read at the size the store shows it.
+const tile = await browser.newPage({ viewport: { width: 440, height: 280 }, deviceScaleFactor: 1 });
+await tile.setContent(`<!doctype html><html><head><meta charset="utf-8"><style>
+  @font-face { font-family: Switzer; src: url(${font[300]}) format("woff2"); font-weight: 300; }
+  @font-face { font-family: Switzer; src: url(${font[500]}) format("woff2"); font-weight: 500; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { width: 440px; height: 280px; background: #0b0b0a; color: #f2eee3; font-family: Switzer, system-ui, sans-serif; padding: 34px 36px; display: flex; flex-direction: column; justify-content: space-between; -webkit-font-smoothing: antialiased; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 500; font-size: 19px; letter-spacing: -.02em; color: rgba(242, 238, 227, .78); }
+  .brand img { width: 15px; height: 20px; }
+  h1 { font-weight: 300; font-size: 44px; line-height: 1; letter-spacing: -.05em; }
+</style></head><body>
+  <div class="brand"><img src="${mark}" alt=""><span>Lamport Warden</span></div>
+  <h1>It reads the request before you sign it.</h1>
+</body></html>`, { waitUntil: 'load' });
+await tile.evaluate(async () => { await Promise.all([300, 500].map((w) => document.fonts.load(`${w} 20px Switzer`))); await document.fonts.ready; });
+await tile.screenshot({ path: join(root, 'store', 'promo-440x280.png'), type: 'png' });
+console.log('store/promo-440x280.png');
+await browser.close();

@@ -136,7 +136,7 @@
   </ul>
 
   <h2>The paid plan</h2>
-  <p>Watch is free. Pro is paid by the month, by card, through Stripe; or, where the Sentinel page offers it, paid ahead in USDC or SOL.</p>
+  <p>Watch is free. Pro is paid by the month, by card, through Stripe; or, where the Sentinel page offers it, paid ahead in USDC, SOL or $LAMPORT.</p>
   <ul id="plan-terms">
     <li>$15 is charged to your card today, and again every month until you cancel. Stripe takes the payment; Sentinel never sees the card.</li>
     <li>Cancel any time from this page. The plan then runs to the end of the month you paid for, your profile goes back to Watch, and nothing is deleted.</li>
@@ -146,15 +146,24 @@
   <p>Paid ahead in USDC or SOL, for one month here; three and twelve months are the same at three and twelve times the price:</p>
   <ul id="prepaid-terms">
     <li>$15 pays for one month, once. Nothing is charged again and nothing renews: when the time is up your profile goes back to Watch, and nothing is deleted. Your alert channels are told three days before.</li>
-    <li>It is one transfer of exactly the amount shown, to Lamport's address, from any wallet. Like every transfer on the chain it is public: anyone can see that the paying wallet paid Lamport.</li>
+    <li>It is one transfer of exactly the amount shown, to Lamport's address, from any wallet, made with this page's button or its payment request: they mark the payment as yours. A send typed into a wallet by hand has no such mark and is not counted by itself. Like every transfer on the chain it is public: anyone can see that the paying wallet paid Lamport.</li>
     <li>Paying again before the time is up adds to it. A refund is on the same terms as by card, and is sent back to the wallet that paid.</li>
   </ul>
   <p>A payment counts when the chain has made it final and the amount that arrived is at least the amount shown. An amount in SOL is priced when it is shown and holds for ten minutes. A payment that is short, or that arrives after a price in SOL has run out, starts nothing: write to us and it is sent back to the wallet it came from, less the network's fee.</p>
+  <p id="lamport">Paid ahead in $LAMPORT, where the Sentinel page offers it. It is the same price in dollars, the holder's price included, and the page shows how many tokens that is before you pay. Like the other ways of paying ahead it pays once and nothing renews, and:</p>
+  <ul id="lamport-terms">
+    <li>The amount is that price in dollars, turned into LAMPORT at the token's price when it is shown: the lowest of its price now, on which two public sources have to agree, and its price one hour and six hours before, so that a price pushed up for a while buys nothing. After a rise in those six hours that is more tokens than the price of the moment would give.</li>
+    <li>It is one transfer of exactly the amount shown, to Lamport's treasury wallet, from any wallet, made with this page's button or its payment request: they mark the payment as yours. A send typed into a wallet by hand has no such mark and is not counted by itself. Like every transfer on the chain it is public: anyone can see that the paying wallet paid Lamport.</li>
+    <li>Paying again before the time is up adds to it. A refund is on the same terms as by card: the LAMPORT that was paid is sent back to the wallet that paid.</li>
+    <li>Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. Lamport does that itself, after the payment; this page does not, and none of it is a promise about what the token is worth.</li>
+  </ul>
+  <p>It counts, like a payment in USDC, when the chain has made it final and the amount that arrived at the treasury wallet is at least the amount shown. Like an amount in SOL, an amount in $LAMPORT holds for ten minutes, and when the token cannot be priced no amount in it is shown. A payment that is short, or that arrives after the amount has run out, starts nothing: write to us and it is sent back to the wallet it came from. What counts is a transfer the paying wallet itself signed: tokens that a program pays in (from a multisig, say), or a send typed in by hand that does not name the amount's address, are not counted by themselves, and are counted or sent back by hand when you write to us. The service looks for a payment while the Sentinel page is open and, by itself, about once an hour for three days after it was last asked about, so it does not depend on the page staying open.</p>
   <ul>
     <li><b>Refunds.</b> If you ask within 14 days of your first payment, we refund it in full. After that a payment is not refunded, and cancelling stops the next one. Where the law where you live gives you more than this, you have that too.</li>
     <li><b>If we change the price</b> of the plan itself, we say so on the Sentinel page and through your alert channels at least 30 days before the first bill at the new price, and you can cancel before it.</li>
     <li><b>Taxes.</b> If a tax applies where you are, checkout shows it before you pay.</li>
     <li><b>Holding $LAMPORT</b> gets you the lower price and nothing else. It is not a share in anything, and the lower price is not a promise about the token.</li>
+    <li><b>Paying in $LAMPORT</b> gets you the plan and nothing else. It is not a share in anything, and what Lamport then does with the tokens is not a promise about what the token is worth.</li>
   </ul>
 
   <h2 id="rescue">Rescue</h2>

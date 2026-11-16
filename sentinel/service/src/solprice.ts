@@ -17,12 +17,15 @@ export const SOURCES: readonly { name: string; url: string; read: (j: any) => un
 /** How far apart two sources may be and still count as agreeing. */
 export const AGREE_WITHIN = 0.02;
 
-/** The price two or more of these agree on (their mean), or null when no two do. */
-export function agreed(prices: number[]): number | null {
-  const sane = prices.filter((p) => Number.isFinite(p) && p > 0.01 && p < 1_000_000).sort((a, b) => a - b);
+/**
+ * The price two or more of these agree on (their mean), or null when no two do. `within`: how far apart two
+ * may be. `least`, `most`: outside these a number is not a price (SOL's bounds unless given).
+ */
+export function agreed(prices: number[], within: number = AGREE_WITHIN, least = 0.01, most = 1_000_000): number | null {
+  const sane = prices.filter((p) => Number.isFinite(p) && p > least && p < most).sort((a, b) => a - b);
   let best: number[] = [];
   for (let i = 0; i < sane.length; i++) {
-    const close = sane.filter((p) => p >= sane[i]! && p <= sane[i]! * (1 + AGREE_WITHIN));
+    const close = sane.filter((p) => p >= sane[i]! && p <= sane[i]! * (1 + within));
     if (close.length > best.length) best = close;
   }
   return best.length >= 2 ? best.reduce((a, b) => a + b, 0) / best.length : null;

@@ -173,6 +173,16 @@ export class Accounts {
     this.store.flush();
   }
 
+  /** Every quote that is kept. */
+  intents(): readonly PayIntent[] { return this.data.intents ?? []; }
+
+  /** Notes that a payment for a quote was built or looked for. */
+  asked(intent: PayIntent, now: number): void {
+    if (intent.askedAt === now) return;
+    intent.askedAt = now;
+    this.store.flush();
+  }
+
   intentOf(profile: string, reference: string): PayIntent | undefined {
     return (this.data.intents ?? []).find((i) => i.profile === profile && i.reference === reference);
   }
@@ -182,16 +192,25 @@ export class Accounts {
 
   /**
    * Credits a payment: the transaction is marked as spent, the quote as paid by it, and the profile is paid
-   * until `until`. False when the transaction was credited before: it is never credited twice.
+   * until `until`. False when the transaction was credited before or the quote was paid before: neither
+   * happens twice.
    */
   credit(intent: PayIntent, payment: Payment, until: number): boolean {
     const p = this.profile(intent.profile);
-    if (!p || this.credited(payment.signature)) return false;
+    if (!p || intent.paidBy || this.credited(payment.signature)) return false;
     (this.data.credited ??= {})[payment.signature] = { profile: p.id, at: payment.at };
     intent.paidBy = payment.signature;
     p.prepaid = { until, payments: [...(p.prepaid?.payments ?? []), payment].slice(-12) };
     this.store.flush();
     return true;
+  }
+
+  /** Notes the transactions a payer's page says paid a quote: the newest five are kept, and read by signature at every look. */
+  reported(intent: PayIntent, signatures: readonly string[]): void {
+    const next = [...new Set([...(intent.sent ?? []), ...signatures])].slice(-5);
+    if (next.length === (intent.sent ?? []).length && next.every((x, i) => x === intent.sent![i])) return;
+    intent.sent = next;
+    this.store.flush();
   }
 
   /** Notes that the profile's owner was told its paid time is ending. */

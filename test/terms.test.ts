@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PRICE_CENTS, RESCUE_TERMS, prepaidTerms, purchaseTerms } from "../sentinel/service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, LAMPORT_TERMS, PRICE_CENTS, RESCUE_TERMS, lamportTerms, prepaidTerms, purchaseTerms } from "../sentinel/service/src/plans.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (...p: string[]) => readFileSync(join(root, ...p), "utf8");
@@ -27,11 +27,49 @@ describe("the terms", () => {
     const prepaid = read("sentinel", "service", "src", "prepaid.ts");
     // final, and at least the amount: both are what the code checks
     expect(text).toContain("A payment counts when the chain has made it final and the amount that arrived is at least the amount shown.");
-    expect(prepaid).toContain('commitment: "finalized"');
+    expect(prepaid).toContain('const list = await this.listed(intent, "finalized");');
+    expect(prepaid).toContain('const tx = await this.readOne(intent, signature, "finalized");');
     expect(prepaid).toContain("if (got < BigInt(intent.units))");
     // ten minutes for a price in SOL, three days' notice before the time is up
     expect(prepaid).toContain("export const SOL_QUOTE_SECONDS = 600;");
     expect(prepaid).toContain("export const REMIND_BEFORE_SECONDS = 3 * 86_400;");
+  });
+
+  it("state paying in LAMPORT in the page's own words, with no number of tokens: the page shows that", () => {
+    const list = /<ul id="lamport-terms">([\s\S]*?)<\/ul>/.exec(terms)![1]!;
+    const lines = [...list.matchAll(/<li>([\s\S]*?)<\/li>/g)].map((m) => m[1]!.trim());
+    expect(lines).toEqual([...LAMPORT_TERMS]);
+    // the lines that do not depend on the amount are the same for any amount
+    expect(lamportTerms(4500, 3).slice(1)).toEqual([...LAMPORT_TERMS]);
+    const prepaid = read("sentinel", "service", "src", "prepaid.ts"), price = read("sentinel", "service", "src", "lamportprice.ts");
+    // the price in dollars, the holder's included, at the token's price: two sources that agree, and never above the price one hour or six hours before
+    expect(text).toContain("It is the same price in dollars, the holder's price included, and the page shows how many tokens that is before you pay.");
+    expect(prepaid).toContain("const cents = (holder ? this.selling.centsHolder : this.selling.centsFull) * months;");
+    expect(prepaid).toContain("units = lamportFor(cents, await this.opts.lamportPrice!(), token.decimals);");
+    expect(price).toContain("return Math.min(now, ...pools.flatMap((a) => a.before.filter(sane)));");
+    // read from the token's own pool, by its address
+    expect(price).toContain("url: `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool}`");
+    expect(price).toContain("url: `https://api.dexscreener.com/latest/dex/pairs/solana/${pool}`");
+    expect(price).toContain("const now = agreed(answers.map((a) => a.price), LAMPORT_AGREE_WITHIN, LEAST, MOST);");
+    // ten minutes, as for SOL, and late after that
+    expect(text).toContain("Like an amount in SOL, an amount in $LAMPORT holds for ten minutes, and when the token cannot be priced no amount in it is shown.");
+    expect(prepaid).toContain('expiresAt: now + (asset === "USDC" ? USDC_QUOTE_SECONDS : SOL_QUOTE_SECONDS)');
+    expect(prepaid).toContain('if (intent.asset !== "USDC" && (tx.blockTime ?? this.now()) > intent.expiresAt + SOL_QUOTE_GRACE_SECONDS)');
+    expect(text).toContain("It counts, like a payment in USDC, when the chain has made it final and the amount that arrived at the treasury wallet is at least the amount shown.");
+    expect(prepaid).toContain("const came = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);");
+    // at the treasury, which has other business: no more than what its sender sent it plainly
+    expect(prepaid).toContain("const plainly = sentPlainly(tx, intent.payTo ?? this.cfg.payTo, intent.mint ?? this.mint);");
+    expect(prepaid).toContain("if (plainly < got) got = plainly;");
+    // and a pool with too little in it, or a price that is not the token's price elsewhere, is no price
+    expect(price).toContain("const pools = reads.filter((a) => a.depth !== undefined && a.depth >= LAMPORT_POOL_LEAST_USD);");
+    expect(text).toContain("The service looks for a payment while the Sentinel page is open and, by itself, about once an hour for three days after it was last asked about, so it does not depend on the page staying open.");
+    expect(prepaid).toContain("SWEEP_SECONDS = 3 * 86_400");
+    expect(read("sentinel", "service", "src", "main.ts")).toContain("await prepaid.sweep()");
+    // what becomes of the tokens is said, as Lamport's own doing and no promise about the token
+    expect(text).toContain("Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. Lamport does that itself, after the payment; this page does not, and none of it is a promise about what the token is worth.");
+    expect(text).toContain("It is not a share in anything, and what Lamport then does with the tokens is not a promise about what the token is worth.");
+    // and the service does neither: it has no key, and builds nothing but the payer's own transfer
+    expect(prepaid).not.toMatch(/burn/i);
   });
 
   it("promise only what the service does", () => {

@@ -45,6 +45,12 @@
  *                              closed: a profile one of them is in. For running a real payment before selling.
  *   SENTINEL_PAY_TO            Lamport's wallet address. With it (and the settings above) the plan can also be paid
  *                              ahead in USDC or SOL, to that address (prepaid.ts); without it, by card only.
+ *   SENTINEL_LAMPORT_PAY_TO    Lamport's treasury wallet. With it the plan can also be paid in the holders' token
+ *                              (LAMPORT), by a transfer to that wallet: the same price in dollars, turned into
+ *                              LAMPORT at a price public sources agree on (lamportprice.ts). Left out, that is
+ *                              not offered. There is no default: nothing is sent to a wallet nobody named.
+ *   SENTINEL_LAMPORT_POOL      the address of the one pool the token's price is read from. Left out, LAMPORT's
+ *                              known pool (LAMPORT_POOL below); it has to be named for any other token.
  *   SENTINEL_PAY_SOL           "off" to take USDC only. Otherwise SOL is quoted at a price two public sources agree on.
  *   SENTINEL_PRICE_CENTS, SENTINEL_HOLDER_PRICE_CENTS          what the page shows (default 1500 and 1000)
  *   SENTINEL_HOLDER_MINT, SENTINEL_HOLDER_MIN                  the token and whole-token amount for the holder price
@@ -72,7 +78,8 @@ import { Prepaid } from "./prepaid.js";
 import { Push, pushUrlFor } from "./push.js";
 import { Rescue } from "./rescue.js";
 import { Rescuer } from "./rescuer.js";
-import { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
+import { LamportPrice } from "./lamportprice.js";
 import { SolPrice } from "./solprice.js";
 import { LinkCodes, TOKEN_SHAPE, TelegramBot, listen as hearTelegram, type TelegramDeps } from "./telegram.js";
 import { channelAddedNotice, channelRemovedNotice } from "./notices.js";
@@ -82,10 +89,19 @@ import { NonceBook } from "./signin.js";
 import { FileStore, type MemoryStore, type StoredEvent } from "./store.js";
 import { ACCOUNTS_PER_CALL, Watcher, type Notifier } from "./watcher.js";
 
-export interface Config { rescuerKey: Uint8Array | null; rescueRpcUrl: string | null; payTo: string | null; payUsdcMint: string | null; paySol: boolean; telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
+export interface Config { rescuerKey: Uint8Array | null; rescueRpcUrl: string | null; payTo: string | null; payUsdcMint: string | null; paySol: boolean; /** Paying in the holders' token: the treasury wallet it goes to; null: not offered. */ lamportPayTo: string | null; lamportMint: string; /** The one pool LAMPORT's price is read from (lamportprice.ts). */ lamportPool: string | null; telegramToken: string | null; rpcUrl: string; dataKey: Buffer; dataDir: string; origin: string; port: number; pollSeconds: number; proPollSeconds: number; maxWallets: number; reservedForPro: number; rpcPace: Pace; readers: number; pushUrl: string | null; pushLines: number; pushPerLine: number; reads: ReadBudget | null; ntfyHosts: Set<string>; trustProxy: boolean; opsChannel: { kind: Exclude<ChannelKind, "telegram">; url: string } | null; billing: (BillingConfig & { holderRpcUrl: string }) | null }
 
 /** $LAMPORT, the same token the Pincer1 holder price reads. */
 export const LAMPORT_MINT = "D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun";
+/**
+ * The pool $LAMPORT trades in, whose price is the token's (lamportprice.ts): LAMPORT against SOL on Raydium
+ * (CPMM). On 2026-11-16 it was the only pool DexScreener listed for the token, with about $19,000 in it, and
+ * GeckoTerminal knew the same address as LAMPORT against SOL on Raydium. If the token's trading ever moves,
+ * SENTINEL_LAMPORT_POOL names the pool it moved to.
+ */
+export const LAMPORT_POOL = "2ZJpQEnyTugE237Cs9X5FHPrXhPauC6DBx5jLV5FqyV7";
+/** An address is 32 bytes: the right letters at the right length are not enough to be one. */
+const isAddress = (s: string): boolean => { try { return new PublicKey(s).toBase58() === s; } catch { return false; } };
 
 function billingFrom(env: Record<string, string | undefined>, origin: string, rpcUrl: string): { ok: true; billing: Config["billing"] } | { ok: false; why: string } {
   const names = ["SENTINEL_STRIPE_SECRET_KEY", "SENTINEL_STRIPE_WEBHOOK_SECRET", "SENTINEL_STRIPE_PRICE_FULL", "SENTINEL_STRIPE_PRICE_HOLDER"] as const;
@@ -163,6 +179,16 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   const opsChannel = env.SENTINEL_OPS_CHANNEL ? cleanTarget(env.SENTINEL_OPS_CHANNEL, ntfyHosts) : null;
   // where payments in USDC or SOL go: an address, or nothing; and only beside the rest of the paid plan
   const payTo = (env.SENTINEL_PAY_TO ?? "").trim() || null;
+  const lamportPayTo = (env.SENTINEL_LAMPORT_PAY_TO ?? "").trim() || null;
+  if (lamportPayTo && !isAddress(lamportPayTo)) return { ok: false, why: "SENTINEL_LAMPORT_PAY_TO has to be a wallet address." };
+  // the pool the token's price is read from: the known one for the known token, a named one for any other
+  const lamportMint = env.SENTINEL_HOLDER_MINT || LAMPORT_MINT;
+  const lamportPool = (env.SENTINEL_LAMPORT_POOL ?? "").trim() || (lamportMint === LAMPORT_MINT ? LAMPORT_POOL : null);
+  if (lamportPool && !isAddress(lamportPool)) return { ok: false, why: "SENTINEL_LAMPORT_POOL has to be the address of the pool the token trades in." };
+  if (lamportPayTo && !lamportPool) return { ok: false, why: "SENTINEL_LAMPORT_PAY_TO needs SENTINEL_LAMPORT_POOL beside it for a token other than LAMPORT: the pool its price is read from." };
+  if (lamportPayTo && !payTo) return { ok: false, why: "SENTINEL_LAMPORT_PAY_TO needs SENTINEL_PAY_TO beside it: paying in LAMPORT is one of the ways of paying ahead." };
+  // (an amount of LAMPORT is no longer a setting: it is the price in dollars at the token's price)
+  if ((env.SENTINEL_LAMPORT_PER_MONTH ?? "").trim()) return { ok: false, why: "SENTINEL_LAMPORT_PER_MONTH is not a setting any more: the amount is the plan's price in dollars at LAMPORT's price. Take it out." };
   if (payTo && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(payTo)) return { ok: false, why: "SENTINEL_PAY_TO has to be a wallet address." };
   const payUsdcMint = (env.SENTINEL_PAY_USDC_MINT ?? "").trim() || null;
   const telegramToken = (env.SENTINEL_TELEGRAM_BOT_TOKEN ?? "").trim() || null;
@@ -187,7 +213,7 @@ export function configFrom(env: Record<string, string | undefined>): { ok: true;
   if (rescuerKey === undefined) return { ok: false, why: "SENTINEL_RESCUER_KEY has to be a keypair as solana-keygen writes it (a list of 64 numbers), or those 64 bytes in base64." };
   const rescueRpcUrl = (env.SENTINEL_RESCUE_RPC_URL ?? "").trim() || null;
   try { if (rescueRpcUrl && !/^https?:$/.test(new URL(rescueRpcUrl).protocol)) throw new Error(); } catch { return { ok: false, why: "SENTINEL_RESCUE_RPC_URL has to be the address of a Solana RPC." }; }
-  return { ok: true, config: { rescuerKey, rescueRpcUrl, payTo, payUsdcMint, paySol: env.SENTINEL_PAY_SOL !== "off", telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
+  return { ok: true, config: { rescuerKey, rescueRpcUrl, payTo, payUsdcMint, paySol: env.SENTINEL_PAY_SOL !== "off", lamportPayTo, lamportMint, lamportPool, telegramToken, rpcUrl, dataKey, dataDir: env.SENTINEL_DATA_DIR ?? "./sentinel-data", origin, port, pollSeconds, proPollSeconds, maxWallets, reservedForPro, rpcPace, readers, pushUrl, pushLines, pushPerLine, reads, ntfyHosts, trustProxy: env.SENTINEL_TRUST_PROXY === "1", opsChannel, billing: billing.billing } };
 }
 
 /**
@@ -515,12 +541,19 @@ export async function run(env: Record<string, string | undefined>): Promise<() =
   // Paying ahead in USDC or SOL: sold to the same people at the same prices as the card plan, checked on
   // the chain, and looked at once an hour for what has run out or is about to.
   const solPrice = new SolPrice();
+  const lamportPrice = cfg.lamportPayTo && cfg.lamportPool ? new LamportPrice(cfg.lamportMint, cfg.lamportPool) : null;
   const prepaid = billing && cfg.payTo
-    ? new Prepaid({ payTo: cfg.payTo, ...(cfg.payUsdcMint ? { usdcMint: cfg.payUsdcMint } : {}) }, accounts, rpc,
+    ? new Prepaid({ payTo: cfg.payTo, ...(cfg.payUsdcMint ? { usdcMint: cfg.payUsdcMint } : {}), ...(cfg.lamportPayTo && lamportPrice ? { lamport: { mint: cfg.lamportMint, payTo: cfg.lamportPayTo } } : {}) }, accounts, rpc,
       { sells: (p) => billing.sellsTo(p), holder: (p) => billing.holder(p), byCard: (p) => billing.byCard(p), centsFull: billing.cents.full, centsHolder: billing.cents.holder },
-      { notice: (profile, sentence) => notifier.notice(profile, sentence), ...(cfg.paySol ? { price: () => solPrice.usd() } : {}) })
+      { notice: (profile, sentence) => notifier.notice(profile, sentence), ...(cfg.paySol ? { price: () => solPrice.usd() } : {}), ...(lamportPrice ? { lamportPrice: () => lamportPrice.usd(), lamportShown: () => lamportPrice.shown() } : {}) })
     : null;
-  const stopPrepaid = prepaid ? startRounds(async () => { const { ended, reminded } = prepaid.expire(); if (ended || reminded) console.error(`sentinel: ${ended} paid-ahead plan(s) ended, ${reminded} told they are about to`); }, 3600) : () => undefined;
+  const stopPrepaid = prepaid ? startRounds(async () => {
+    // first the payments nobody is waiting on a page for, so that nothing just paid is ended
+    const { looked, paid } = await prepaid.sweep().catch(() => ({ looked: 0, paid: 0 }));
+    if (paid) console.error(`sentinel: found ${paid} payment(s) by itself among ${looked} quote(s) asked about`);
+    const { ended, reminded } = prepaid.expire();
+    if (ended || reminded) console.error(`sentinel: ${ended} paid-ahead plan(s) ended, ${reminded} told they are about to`);
+  }, 3600) : () => undefined;
 
   // Once a day. First, Stripe's side: every profile is made to match what Stripe says, in case a webhook was
   // missed, and a subscription nobody here has is reported. Then whoever stopped holding the token moves to

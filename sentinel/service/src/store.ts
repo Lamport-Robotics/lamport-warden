@@ -138,14 +138,26 @@ export interface Profile {
    */
   prepaid?: { until: number; remindedFor?: number; payments: Payment[] };
 }
-export type PayAsset = "USDC" | "SOL";
+/** USDC and SOL are paid to Lamport's payments wallet; LAMPORT, to its treasury wallet (prepaid.ts). */
+export type PayAsset = "USDC" | "SOL" | "LAMPORT";
 /** One payment that was credited: the transaction, what it paid in its asset's smallest units, and for how many months. */
 export interface Payment { signature: string; asset: PayAsset; units: string; months: number; cents: number; at: number }
 /**
  * An amount a profile was quoted, and the address that marks the payment as this one (a "reference": an
  * address nobody holds, named in the paying transaction and in no other).
  */
-export interface PayIntent { reference: string; profile: string; asset: PayAsset; units: string; months: number; cents: number; createdAt: number; expiresAt: number; paidBy?: string }
+export interface PayIntent {
+  reference: string; profile: string; asset: PayAsset; units: string; months: number; cents: number; createdAt: number; expiresAt: number; paidBy?: string;
+  /**
+   * For a quote in LAMPORT: the token, its decimals and the treasury wallet it was made for, as they were
+   * then. A payment made on the quote is counted against these, whatever the settings are by then.
+   */
+  mint?: string; payTo?: string; decimals?: number;
+  /** When a payment for it was last built or looked for: such a quote is looked for by the service too (prepaid.ts, sweep). */
+  askedAt?: number;
+  /** The transactions the payer's page said paid it, the newest five: read by signature, whatever else names the quote. */
+  sent?: string[];
+}
 /** Which profile a watched wallet belongs to, and the hash of the token its owner's browser reports with. */
 export interface WalletOwner {
   profile: string; addedAt: number; reportTokenHash?: string;
