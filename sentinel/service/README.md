@@ -620,6 +620,10 @@ of the customer and the subscription.
 - **Paid in LAMPORT** (`src/prepaid.ts`, `src/lamportprice.ts`), where `SENTINEL_LAMPORT_PAY_TO` names
   Lamport's treasury wallet. It is off until that is set, it has no default, and it needs `SENTINEL_PAY_TO`
   beside it, since it is one more way of paying ahead: the same months, the same profiles, nothing renews.
+  - `sentinel/lamport-on.sh <treasury wallet address> [ssh-host]` switches it on for the deployed service:
+    it asks the chain whether that wallet has an account for the token, copies the server's settings file
+    and the running service aside, names the wallet in the settings, and puts up the service and then the
+    pages, in that order, so that no page says LAMPORT is taken before it is.
   - It is a transfer, like the one in USDC, to another wallet: the tokens go to the treasury wallet and
     not to the wallet USDC and SOL go to. Lamport keeps a part of them there, locked for the long term,
     and burns the rest. That is done by Lamport, by hand, from that wallet: the service holds no key, does
