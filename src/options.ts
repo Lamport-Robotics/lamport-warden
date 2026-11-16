@@ -67,7 +67,7 @@ async function load() {
     el("p", `${PLANS.pro.name} is ${dollars(PRICE_CENTS)} a month, or ${dollars(HOLDER_PRICE_CENTS)} while a wallet in your Sentinel profile holds ${HOLDER_MIN_LAMPORT.toLocaleString("en-US")} $LAMPORT. It adds:`),
     listOf(PRO_FEATURES),
     el("p", PRO_NOT_YET),
-    el("p", "A plan is started and cancelled on the Sentinel page, which also says whether Pro is on sale. It is paid by card through Stripe; nothing is bought inside this extension."),
+    el("p", "A plan is started and cancelled on the Sentinel page, which also says whether Pro is on sale and how it can be paid; nothing is bought inside this extension."),
   );
   const armed = new Map<string, { vault: string; pending: boolean }>();
   for (const [k, v] of Object.entries(all)) {
