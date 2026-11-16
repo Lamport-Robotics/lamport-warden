@@ -114,7 +114,7 @@ Terms: https://warden.lamportrobotics.com/terms
 a swap with what a simulation showed, the settings page, and the practice page with a request stopped. The
 fourth is taken from the practice page as it is deployed, so `pnpm shots` needs the network for it.
 
-**Small promo tile** (440 x 280): not made yet.
+**Small promo tile** (440 x 280): `store/promo-440x280.png`, drawn by `node scripts/og.mjs`.
 
 **Store icon** (128 x 128): `public/icons/icon128.png`.
 
