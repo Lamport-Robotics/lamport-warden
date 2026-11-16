@@ -1,8 +1,10 @@
 /** The settings page. Everything is built with textContent: stored addresses and labels are never parsed as HTML. */
-import { DEFAULT_RPC, PRACTICE_PAGE, SENTINEL_PAGE } from "./defaults.js";
+import { DEFAULT_RPC, LAMPORT_DECOYS, PRACTICE_PAGE, SENTINEL_PAGE } from "./defaults.js";
+import { fromBase58 } from "./intercept.js";
 import { LINK_PREFIX, linkFrom } from "./sentinel-link.js";
 import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES } from "../sentinel/service/src/plans.js";
-import { KEYS, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
+import { KEYS, cleanAddress, cleanOrigin, cleanRpcUrl, settingsFrom } from "./settings.js";
+import { findDecoy } from "./decoy-find.js";
 import type { MemoryState } from "../pincer1/daemon/src/warden/index.js";
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -31,6 +33,26 @@ async function load() {
   const mode = s.rpcUrl === "" ? "off" : cleanRpcUrl(s.rpcUrl) === cleanRpcUrl(DEFAULT_RPC) ? "public" : "own";
   for (const r of document.querySelectorAll<HTMLInputElement>('input[name="rpc"]')) r.checked = r.value === mode;
   $<HTMLInputElement>("rpcUrl").value = mode === "own" ? s.rpcUrl : "";
+
+  // a decoy first
+  $<HTMLInputElement>("decoyFirst").checked = s.decoyFirst;
+  $<HTMLInputElement>("decoyAddress").value = s.decoyAddress;
+  $("decoyLamport").hidden = LAMPORT_DECOYS.length === 0;
+  // the marks themselves say nothing a person can read: how many there are is what there is to show
+  const kept = await chrome.storage.local.get(["decoyPassed", "decoyCaught"]);
+  const count = (v: unknown) => (v && typeof v === "object" ? Object.keys(v as object).length : 0);
+  const passed = count(kept.decoyPassed), caught = count(kept.decoyCaught);
+  $("decoySites").hidden = passed + caught === 0;
+  $("decoyCount").textContent = `Kept now: a mark for ${passed} ${passed === 1 ? "site" : "sites"} you went on to use, and for ${caught} that ${caught === 1 ? "was" : "were"} caught.`;
+  // the decoy found for this browser, where the owner named none and Lamport keeps none
+  const finds = LAMPORT_DECOYS.length === 0 && !s.decoyAddress;
+  const own = ownDecoy((await chrome.storage.local.get("decoyOwn")).decoyOwn);
+  $("decoyFound").hidden = LAMPORT_DECOYS.length !== 0;
+  $("decoyOwn").hidden = !(s.decoyFirst && finds && own);
+  if (own) $("decoyOwnText").textContent = `This browser's decoy, found on ${new Date(own.at * 1000).toLocaleDateString()}: ${own.address}.`;
+  if (s.decoyFirst && finds && !own && s.rpcUrl === "") note("decoyNote", "On, and there is no decoy to show: the RPC is turned off above, so Warden cannot find one. Give an address above, or turn the RPC on. Until then every site is connected as always.", true);
+  else if (s.decoyFirst && finds && !own) { note("decoyNote", "On. Finding this browser a decoy…"); void findOwn(s.rpcUrl); }
+  else if (s.decoyFirst && s.rpcUrl === "") note("decoyNote", "On. The RPC is turned off above, so Warden cannot ask what the decoy holds: a thief is then caught only when it asks for control of an account or for a permission to spend, and not by how much it asks to be sent.", true);
 
   // simulation
   $<HTMLInputElement>("simulate").checked = s.simulate;
@@ -148,6 +170,56 @@ $("simulate").addEventListener("change", async () => {
   const on = $<HTMLInputElement>("simulate").checked;
   await chrome.storage.local.set({ simulate: on });
   note("simNote", on ? "On. The RPC above will see each transaction Warden simulates." : "Off. No transaction leaves this browser.");
+  await load();
+});
+
+/** The decoy found for this browser, as it is kept (background.ts keeps the same shape). */
+function ownDecoy(kept: unknown): { address: string; at: number } | null {
+  const k = kept as { address?: unknown; at?: unknown } | null;
+  return k && typeof k.address === "string" && cleanAddress(k.address) !== "" && typeof k.at === "number" ? { address: k.address, at: k.at } : null;
+}
+let findingOwn = false;
+/** Finds this browser a decoy on the chain and keeps it. Says so when none could be found: the experiment then shows nothing, and every site is connected as always. */
+async function findOwn(rpcUrl: string): Promise<void> {
+  if (findingOwn) return;
+  findingOwn = true;
+  try {
+    const address = await findDecoy(rpcUrl, (url, init) => fetch(url, { ...init, credentials: "omit", cache: "no-store", referrerPolicy: "no-referrer" }), (below) => crypto.getRandomValues(new Uint32Array(1))[0]! % below);
+    if (!address) return note("decoyNote", "On, but no decoy could be found just now: the RPC did not answer, or the newest blocks had no wallet worth showing. It is tried again when a site next asks to connect. Until then every site is connected as always.", true);
+    await chrome.storage.local.set({ decoyOwn: { address, at: Math.floor(Date.now() / 1000) } });
+    await load();
+    note("decoyNote", "On. A site you have not used is shown this browser's decoy before your wallet.");
+  } finally { findingOwn = false; }
+}
+$("findDecoy").addEventListener("click", async () => {
+  const s = settingsFrom(await chrome.storage.local.get([...KEYS]));
+  await chrome.storage.local.remove("decoyOwn");
+  note("decoyNote", "Finding another…");
+  await findOwn(s.rpcUrl);
+});
+$("decoyFirst").addEventListener("change", async () => {
+  const on = $<HTMLInputElement>("decoyFirst").checked;
+  await chrome.storage.local.set({ decoyFirst: on });
+  // off, the record of which sites passed has no use, nor has the decoy that was found: they are removed
+  if (!on) await chrome.storage.local.remove(["decoyPassed", "decoyCaught", "decoyOwn"]);
+  note("decoyNote", on ? "On. A site you have not used is shown the decoy before your wallet." : "Off. Every site is connected to your wallet as always, and the marks of sites that passed or were caught are removed.");
+  await load();
+});
+$("saveDecoy").addEventListener("click", async () => {
+  const typed = $<HTMLInputElement>("decoyAddress").value.trim();
+  // an address is 32 bytes: text of the right length that does not decode to that would never be shown to anybody
+  const address = fromBase58(cleanAddress(typed))?.length === 32 ? cleanAddress(typed) : "";
+  if (typed !== "" && !address) return note("decoyNote", "That is not an address.", true);
+  // the sites that passed were judged against the old decoy: they are shown the new one once
+  await chrome.storage.local.set({ decoyAddress: address });
+  await chrome.storage.local.remove("decoyPassed");
+  note("decoyNote", address ? "Saved." : LAMPORT_DECOYS.length ? "Removed. Sites are shown one of Lamport's decoys." : "Removed. There is no decoy to show.");
+  await load();
+});
+
+$("forgetDecoySites").addEventListener("click", async () => {
+  await chrome.storage.local.remove(["decoyPassed", "decoyCaught"]);
+  note("decoyNote", "Forgotten. Every site is shown the decoy first again.");
   await load();
 });
 

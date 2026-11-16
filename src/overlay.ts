@@ -175,3 +175,114 @@ export function prompt(verdict: WireVerdict, origin: string): Promise<boolean> {
     }
   });
 }
+
+const NOTICE_CSS = `
+:host { all: initial; direction: ltr; unicode-bidi: isolate; }
+.note { box-sizing: border-box; width: min(340px, calc(100vw - 24px)); background: #f2eee3; color: #14130f; border-radius: 12px; padding: 12px 14px 12px; box-shadow: 0 10px 36px rgba(0, 0, 0, 0.4); font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+.tag { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; color: #4a4a40; margin-bottom: 6px; }
+.tag.warn { color: #a1260d; }
+p { margin: 0 0 10px; overflow-wrap: anywhere; }
+button { font: inherit; font-weight: 600; border-radius: 999px; padding: 6px 14px; border: 1px solid #14130f; background: transparent; color: #14130f; cursor: pointer; }
+`;
+
+/**
+ * A small card in a corner of the page that stays until it is taken down. It says a decoy is showing, and
+ * its one button ends that. It does not cover the page and asks nothing. Drawn like the prompt: in a closed
+ * shadow root, and its button counts only when a person presses it where it can be seen.
+ */
+export function notice(o: { text: string; button: string; warn?: boolean; onPress(): void }): { remove(): void } {
+  const host = document.createElement("div");
+  const root = host.attachShadow({ mode: "closed" });
+  const style = document.createElement("style");
+  style.textContent = NOTICE_CSS;
+  const card = document.createElement("div");
+  card.className = "note";
+  card.setAttribute("role", "status");
+  const el = (tag: string, cls: string, text: string) => { const e = document.createElement(tag); e.className = cls; e.textContent = text; return e; };
+  const button = el("button", "", o.button) as HTMLButtonElement;
+  card.append(el("div", o.warn ? "tag warn" : "tag", "Lamport Warden · A decoy first"), el("p", "", o.text), button);
+  const parent: ParentNode = document.documentElement ?? document;
+  const topLayer = typeof (host as { showPopover?: unknown }).showPopover === "function";
+  const watching: { disconnect(): void }[] = [];
+  let taken = false;
+  // The same care as the prompt's button (see `prompt`): a press counts from a person, on a card the browser
+  // reports fully in view and unaltered, in the top layer where Warden put it, whose button has been in one
+  // place for a moment.
+  const tracked = typeof IntersectionObserver === "function" && typeof IntersectionObserverEntry === "function" && "isVisible" in IntersectionObserverEntry.prototype;
+  const seenSince = new Map<Element, number | null>([[button, null], [card, null]]);
+  if (tracked) {
+    const io = new IntersectionObserver((entries) => {
+      for (const entry of entries as (IntersectionObserverEntry & { isVisible?: boolean })[]) {
+        seenSince.set(entry.target, entry.isIntersecting && entry.isVisible ? (seenSince.get(entry.target) ?? performance.now()) : null);
+      }
+    }, { threshold: 1, trackVisibility: true, delay: 100 } as IntersectionObserverInit);
+    io.observe(button);
+    io.observe(card);
+    watching.push(io);
+  }
+  const placed = typeof button.getBoundingClientRect === "function";
+  const place = () => { const r = button.getBoundingClientRect(); return `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`; };
+  let at = "", atSince = performance.now();
+  const look = () => { if (!placed) return; const now = place(); if (now !== at) { at = now; atSince = performance.now(); } };
+  if (placed) {
+    const looking = setInterval(look, 100);
+    (looking as { unref?: () => void }).unref?.();
+    watching.push({ disconnect: () => clearInterval(looking) });
+  }
+  /** When the page last changed the notice's own element, or took it out. */
+  let stirred = -Infinity;
+  button.addEventListener("click", (e) => {
+    if (!e.isTrusted) return;
+    const now = performance.now();
+    for (const since of seenSince.values()) if (tracked && (since === null || now - since < 400)) return; // covered, altered, or only just shown
+    if (now - stirred < 400) return; // its element was changed, or taken out, a moment ago
+    look();
+    if (placed && now - atSince < 400) return; // moved a moment ago: a button slid under a pointer is not a button somebody chose to press
+    if (host.parentNode != null && host.parentNode !== parent) return; // put somewhere else in the page
+    if (topLayer && !host.matches(":popover-open")) return; // taken out of the browser's top layer, where the page can paint over it
+    o.onPress();
+  });
+  root.append(style, card);
+  parent.append(host);
+  // (no colour is named here: see the prompt's own element)
+  const laidOut = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;left:auto !important;bottom:auto !important;width:auto !important;height:auto !important;margin:0 !important;padding:0 !important;overflow:visible !important;direction:ltr !important;unicode-bidi:isolate !important;";
+  let raising: ReturnType<typeof setInterval> | undefined;
+  let asSet = "";
+  try {
+    host.setAttribute("popover", "manual");
+    host.style.cssText = laidOut;
+    asSet = host.style.cssText;
+    const raise = () => { try { if (!host.matches(":popover-open")) host.showPopover(); } catch { /* no top layer here: it stays where it is */ } };
+    raise();
+    raising = setInterval(raise, 1000);
+    (raising as { unref?: () => void }).unref?.();
+  } catch {
+    host.style.cssText = "all:initial !important;position:fixed !important;top:12px !important;right:12px !important;z-index:2147483647 !important;direction:ltr !important;";
+    asSet = host.style.cssText;
+  }
+  // The element is the page's to reach, though not what is in it. A page that changes it has its changes put
+  // back, and one that takes it out, or puts it somewhere else, has it put in again: it is the owner's way of
+  // ending the decoy. A page that keeps at this can keep the button from counting; it cannot press it. (A
+  // page can tell from the notice that a decoy is showing. It can tell that anyway.)
+  if (typeof MutationObserver === "function") {
+    const still = new MutationObserver(() => {
+      let changed = false;
+      for (const a of Array.from(host.attributes)) if (a.name !== "popover" && a.name !== "style" && !a.name.startsWith("data-") && !a.name.startsWith("aria-")) { host.removeAttribute(a.name); changed = true; }
+      if (host.style.cssText !== asSet) { host.style.cssText = laidOut; asSet = host.style.cssText; changed = true; }
+      if (changed) stirred = performance.now();
+      still.takeRecords();
+    });
+    still.observe(host, { attributes: true });
+    let putBack = 0;
+    const back = () => { if (taken || host.parentNode === parent) return; putBack = performance.now(); stirred = putBack; parent.append(host); };
+    const there = new MutationObserver(() => {
+      if (taken || host.parentNode === parent) return;
+      // (not in a loop with a page that keeps taking it out: a few times a second is enough to be seen)
+      if (performance.now() - putBack < 250) setTimeout(back, 250); else back();
+    });
+    there.observe(document, { childList: true, subtree: true });
+    watching.push(still, there);
+  }
+  return { remove() { taken = true; for (const w of watching) w.disconnect(); if (raising !== undefined) clearInterval(raising); host.remove(); } };
+}
+

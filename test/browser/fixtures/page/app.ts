@@ -28,6 +28,20 @@ w.__app = {
     results[tag] = "pending";
     standard(door).features["standard:connect"].connect().then((r: any) => { results[tag] = String(r?.accounts?.[0]?.address ?? "none"); }, (e: any) => { results[tag] = String(e?.name ?? e); });
   },
+  /** Connects through the older object on the window, and files the address it was handed under `tag` (or the error's name). */
+  connectOlder(tag: string, door: string, opts?: unknown) {
+    const provider = door.split(".").reduce((o: any, k) => o?.[k], w);
+    results[tag] = "pending";
+    provider.connect(opts).then((r: any) => { results[tag] = String(r?.publicKey?.toBase58?.() ?? "none"); }, (e: any) => { results[tag] = String(e?.name ?? e); });
+  },
+  /** What the older object says its account is now, and whether it says it is connected. */
+  older: (door: string): { key: string | null; connected: unknown } => { const p = door.split(".").reduce((o: any, k) => o?.[k], w); return { key: p?.publicKey ? String(p.publicKey.toBase58()) : null, connected: p?.isConnected }; },
+  /** Listens at the older object the way a site does; what it hears is kept in window.__heard. */
+  listen(door: string) {
+    const p = door.split(".").reduce((o: any, k) => o?.[k], w);
+    w.__heard = w.__heard ?? [];
+    for (const ev of ["connect", "disconnect", "accountChanged"]) p.on(ev, (x: any) => { w.__heard.push(`${ev}:${typeof x?.toBase58 === "function" ? x.toBase58() : typeof x?.publicKey === "string" ? x.publicKey : ""}`); });
+  },
   /** The addresses the wallet lists as its accounts now. */
   accounts: (door: string): string[] => [...(standard(door)?.accounts ?? [])].map((a: any) => String(a.address)),
   count: (name: string) => wallets.get().filter((x) => x.name === name).length,

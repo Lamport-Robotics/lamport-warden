@@ -4,9 +4,9 @@
  */
 import { HANDSHAKE, HELLO, channelFor, newSecret, type DoneMessage, type DoorsMessage, type ReplyMessage, type RequestMessage } from "./channel.js";
 import { ARMING_ORIGIN } from "./defaults.js";
-import { prompt } from "./overlay.js";
+import { notice, prompt } from "./overlay.js";
 import { PAGE_ASKS, WARDEN_ANSWERS, readPageAsk, type PageAnswer } from "./sentinel-link.js";
-import type { JudgeReply, ToBackground, WireRequest, WireVerdict } from "./messages.js";
+import type { DecoyAskedReply, DecoyFirstReply, JudgeReply, Noted, ToBackground, WireRequest, WireVerdict } from "./messages.js";
 
 const secret = newSecret();
 const channel = channelFor(secret);
@@ -28,6 +28,37 @@ async function ask(req: WireRequest): Promise<WireVerdict> {
   }
 }
 
+/** Decoy first: what this frame knows of it. */
+let caughtHere = false;
+/** The day this site was caught before, when the worker says it was. */
+let caughtBefore: string | null = null;
+let showing: { remove(): void } | null = null;
+const takeDown = () => { showing?.remove(); showing = null; };
+const CAUGHT_BEFORE = (day: string): WireVerdict => ({ level: "confirm", sentence: `This site tried to rob a decoy wallet on ${day}. Go on only if you are sure of this site: your own wallet is then connected to it.`, reasons: ["it was caught asking a decoy for what only a thief asks.", "a thief that was caught once can behave the next time."], confirm: { kind: "acknowledge", expect: "I understand" } });
+/** Tells the worker the owner goes on with this site. False when it would not write that down: the site was caught, and the owner has not typed that they understand. */
+async function goOn(sure: boolean): Promise<Noted> {
+  try { return ((await chrome.runtime.sendMessage({ type: "decoy-passed", sure } satisfies ToBackground)) as Noted | undefined) ?? { noted: false }; } catch { return { noted: false }; }
+}
+/** The owner pressed "use my wallet here": the decoy comes down and their own wallet is connected in its place. */
+async function useMine(): Promise<void> {
+  if (caughtHere) return;
+  // a site that was caught once is not gone on with at a press, and it may have been caught in another tab since this one was opened
+  let sure = false;
+  if (caughtBefore !== null) { if (!(await prompt(CAUGHT_BEFORE(caughtBefore), location.origin)) || caughtHere) return; sure = true; }
+  let noted = await goOn(sure);
+  if (!noted.noted && typeof noted.caughtOn === "string" && !sure) {
+    caughtBefore = noted.caughtOn;
+    if (!(await prompt(CAUGHT_BEFORE(caughtBefore), location.origin)) || caughtHere) return;
+    noted = await goOn(true);
+  }
+  // Not written down because the site was caught, and the owner did not type past that: the decoy stays.
+  // Not written down for any other reason (the experiment was turned off in another tab, the extension was
+  // reloaded): the owner still asked for their wallet on this page, and gets it.
+  if (!noted.noted && typeof noted.caughtOn === "string") return;
+  takeDown();
+  window.dispatchEvent(new CustomEvent(channel.own));
+}
+
 /** Requests the owner let through, waiting to hear whether the wallet signed. */
 const approved = new Map<string, WireRequest>();
 let queue: Promise<void> = Promise.resolve();
@@ -39,6 +70,65 @@ window.addEventListener(channel.request, (e) => {
   try { m = JSON.parse(String((e as CustomEvent).detail)); } catch { return; }
   if (!m || typeof m.id !== "string" || !["tx", "msg", "signin", "opaque"].includes(m.kind) || typeof m.bytes !== "string") return;
   const req: WireRequest = { kind: m.kind, bytes: m.bytes, owner: String(m.owner ?? "") };
+  // Decoy first (decoy.ts). Whether this page is shown a decoy is the worker's to say; the top frame only.
+  if (m.decoy === "first") {
+    const none = () => reply({ id: m.id, ok: false });
+    if (window.top !== window) { none(); return; }
+    // (an extension that was reloaded under this page throws here: the page is then connected as always, and never left waiting)
+    try {
+      chrome.runtime.sendMessage({ type: "decoy-first" } satisfies ToBackground).then((r: DecoyFirstReply | undefined) => {
+        if (!r || typeof r.address !== "string") { none(); return; }
+        caughtBefore = typeof r.caughtOn === "string" ? r.caughtOn : null;
+        reply({ id: m.id, ok: true, address: r.address });
+      }, none);
+    } catch { none(); }
+    return;
+  }
+  // A decoy has begun to show on this page, or has stopped. The owner is told while it shows, and can end it.
+  if (m.decoy === "showing") {
+    if (window.top !== window || caughtHere) return;
+    const shown = String(m.owner ?? ""), brief = shown.length > 8 ? `${shown.slice(0, 4)}…${shown.slice(-4)}` : shown;
+    takeDown();
+    showing = notice({
+      warn: caughtBefore !== null,
+      text: caughtBefore !== null
+        ? `This site tried to rob a decoy wallet on ${caughtBefore}. It is being shown a decoy (${brief}) again, not your wallet.`
+        : `This site is being shown a decoy wallet (${brief}), not yours. If it asks the decoy for anything, I will tell you what.`,
+      button: "Use my wallet here",
+      onPress: () => { void useMine(); },
+    });
+    return;
+  }
+  if (m.decoy === "gone") { takeDown(); return; }
+  // The page asked the decoy to sign something. The worker says whether that was a robbery; the owner is
+  // shown which, and for a site that passed chooses whether to go on with their own wallet.
+  if (m.decoy === "asked") {
+    queue = queue.then(async () => {
+      try {
+        // a page that was caught is not asked about again, and its owner is not shown "this one is all right" after "this is a thief"
+        if (caughtHere) { reply({ id: m.id, ok: true, caught: true }); return; }
+        const more = (Array.isArray(m.more) ? m.more : []).filter((x) => x && ["tx", "msg", "signin", "opaque"].includes(x.kind) && typeof x.bytes === "string").slice(0, 31);
+        const reqs: WireRequest[] = [req, ...more.map((x) => ({ kind: x.kind as WireRequest["kind"], bytes: x.bytes, owner: req.owner }))];
+        const total = typeof m.total === "number" && m.total > reqs.length ? m.total : reqs.length;
+        const r = (await chrome.runtime.sendMessage({ type: "decoy-asked", reqs, total } satisfies ToBackground)) as DecoyAskedReply | undefined;
+        if (!r || !r.ok) { reply({ id: m.id, ok: false }); return; }
+        if (r.caught) {
+          caughtHere = true;
+          takeDown();
+          if (r.verdict) await prompt(r.verdict, location.origin);
+          reply({ id: m.id, ok: true, caught: true });
+          return;
+        }
+        // (no verdict: this site has passed already, in another tab say, and there is nothing more to ask)
+        let go = r.verdict ? await prompt(r.verdict, location.origin) : true;
+        // only now is the site remembered as one the owner went on with; typed past a warning, that is said too
+        if (go && r.verdict) go = (await goOn(r.verdict.level === "confirm")).noted;
+        if (go) takeDown();
+        reply({ id: m.id, ok: go, caught: false });
+      } catch { reply({ id: m.id, ok: false }); }
+    });
+    return;
+  }
   // one prompt at a time, in the order the wallet was asked
   queue = queue.then(async () => {
     let ok = false;

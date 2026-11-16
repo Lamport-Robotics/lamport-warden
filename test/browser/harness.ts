@@ -25,6 +25,10 @@ export interface Site {
   simulated: string[];
   /** What the chain holds before, and what a simulated run leaves, by address (jsonParsed account objects). */
   setChain(before: Record<string, unknown>, after: Record<string, unknown>): void;
+  /** What one address holds: its SOL, and its token accounts (asked about for a decoy). Every other address holds nothing. */
+  setHoldings(address: string, lamports: number, tokens: { account: string; mint: string; amount: string; decimals: number }[]): void;
+  /** The addresses whose holdings were asked for. */
+  holdingsAsked: string[];
 }
 
 /** The dapp page, and an RPC that knows whatever lookup tables a test gives it. */
@@ -33,6 +37,8 @@ export async function serve(): Promise<Site> {
   const rpcCalls: string[][] = [];
   const simulated: string[] = [];
   let chain: { before: Record<string, unknown>; after: Record<string, unknown> } = { before: {}, after: {} };
+  let holdings: { address: string; lamports: number; tokens: { account: string; mint: string; amount: string; decimals: number }[] } = { address: "", lamports: 0, tokens: [] };
+  const holdingsAsked: string[] = [];
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname === "/rpc") {
@@ -50,6 +56,11 @@ export async function serve(): Promise<Site> {
           simulated.push(params[0]);
           return answer({ value: { err: null, logs: [], accounts: (params[1].accounts.addresses as string[]).map((a) => chain.after[a] ?? null) } });
         }
+        if (method === "getBalance") { holdingsAsked.push(params[0]); return answer({ value: params[0] === holdings.address ? holdings.lamports : 0 }); }
+        if (method === "getTokenAccountsByOwner") {
+          const mine = params[0] === holdings.address && params[1]?.programId === "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+          return answer({ value: mine ? holdings.tokens.map((t) => ({ pubkey: t.account, account: { data: { parsed: { info: { mint: t.mint, tokenAmount: { amount: t.amount, decimals: t.decimals } } } } } })) : [] });
+        }
         const keys: string[] = params[0];
         // the accounts before a simulation are asked for parsed; a lookup table is asked for as bytes
         if (params[1]?.encoding === "jsonParsed") return answer({ value: keys.map((k) => chain.before[k] ?? null) });
@@ -64,7 +75,7 @@ export async function serve(): Promise<Site> {
   });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const port = (server.address() as { port: number }).port;
-  return { server, origin: `http://localhost:${port}`, rpcCalls, simulated, setTable: (k, v) => { if (v === null) tables.delete(k); else tables.set(k, v); }, setChain: (before, after) => { chain = { before, after }; } };
+  return { server, origin: `http://localhost:${port}`, rpcCalls, simulated, setTable: (k, v) => { if (v === null) tables.delete(k); else tables.set(k, v); }, setChain: (before, after) => { chain = { before, after }; }, setHoldings: (address, lamports, tokens) => { holdings = { address, lamports, tokens }; }, holdingsAsked };
 }
 
 export interface Browser { ctx: BrowserContext; extensionId: string; close(): Promise<void> }
@@ -173,6 +184,51 @@ export class Prompt {
     const card = await this.card();
     const go = card && find(card, (n) => n.nodeName === "BUTTON" && texts(n).join("") === "Continue to wallet")[0];
     return !!go && attr(go, "disabled") === undefined;
+  }
+}
+
+/** Warden's notice in the corner of a page (overlay.ts, `notice`), read and pressed the way the prompt is. */
+export class Notice {
+  private constructor(private page: Page, private cdp: CDPSession) {}
+  static async on(page: Page): Promise<Notice> { return new Notice(page, await page.context().newCDPSession(page)); }
+
+  private async card(): Promise<Node | null> {
+    const { root } = (await this.cdp.send("DOM.getDocument", { depth: -1, pierce: true })) as { root: Node };
+    let found: Node | null = null;
+    const walk = (n: Node, inShadow: boolean) => {
+      if (inShadow && n.nodeName === "DIV" && attr(n, "class") === "note") found = n;
+      for (const c of n.children ?? []) walk(c, inShadow);
+      for (const s of n.shadowRoots ?? []) walk(s, true);
+    };
+    walk(root, false);
+    return found;
+  }
+
+  /** Waits for the notice and returns what it says, or null when none came up in time. */
+  async text(timeoutMs = 4000): Promise<{ text: string; warn: boolean; button: string } | null> {
+    const until = Date.now() + timeoutMs;
+    for (;;) {
+      const card = await this.card();
+      if (card) {
+        const tag = find(card, (n) => (attr(n, "class") ?? "").split(" ").includes("tag"))[0];
+        return { text: texts(find(card, (n) => n.nodeName === "P")[0]).join(""), warn: (attr(tag ?? card, "class") ?? "").split(" ").includes("warn"), button: texts(find(card, (n) => n.nodeName === "BUTTON")[0]).join("") };
+      }
+      if (Date.now() > until) return null;
+      await this.page.waitForTimeout(100);
+    }
+  }
+
+  async shown(): Promise<boolean> { return (await this.card()) !== null; }
+
+  /** Presses the notice's button with the mouse, after the moment the browser takes to report it visible. */
+  async press(): Promise<void> {
+    await this.page.waitForTimeout(750);
+    const card = await this.card();
+    const button = card && find(card, (n) => n.nodeName === "BUTTON")[0];
+    if (!button) throw new Error("there is no notice to press");
+    const { model } = (await this.cdp.send("DOM.getBoxModel", { backendNodeId: button.backendNodeId })) as { model: { content: number[] } };
+    const [x1, y1, , , x3, y3] = model.content as [number, number, number, number, number, number];
+    await this.page.mouse.click((x1 + x3) / 2, (y1 + y3) / 2);
   }
 }
 

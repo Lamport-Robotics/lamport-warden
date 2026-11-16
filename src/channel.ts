@@ -37,10 +37,12 @@ export interface Channel {
   done: string;
   /** inpage -> content: {unguarded}: the wallet doors on this page Warden could not get in front of */
   doors: string;
+  /** content -> inpage, no detail: the owner chose, in Warden's notice, to use their own wallet on this site now */
+  own: string;
 }
 
 export function channelFor(secret: string): Channel {
-  return { ack: `lw:${secret}:a`, request: `lw:${secret}:q`, reply: `lw:${secret}:r`, done: `lw:${secret}:d`, doors: `lw:${secret}:o` };
+  return { ack: `lw:${secret}:a`, request: `lw:${secret}:q`, reply: `lw:${secret}:r`, done: `lw:${secret}:d`, doors: `lw:${secret}:o`, own: `lw:${secret}:w` };
 }
 
 export function newSecret(): string {
@@ -52,8 +54,21 @@ export function newSecret(): string {
 export const toBase64 = (b: Uint8Array): string => { let s = ""; for (const x of b) s += String.fromCharCode(x); return btoa(s); };
 export const fromBase64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
-export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string }
+/**
+ * `decoy`: a question about the decoy instead of a request to sign (intercept.ts, DecoyGate). "first": may
+ * this page be shown a decoy, and which (kind, bytes and owner are empty). "asked": the site asked the decoy
+ * to sign this (owner is the decoy's address), and `more` are the other requests of the same call.
+ * `total` is how many the call held, which may be more than are sent. "showing": a decoy has begun to show
+ * on this page (owner is its address). "gone": none shows any more. The last two are told, not asked: no
+ * reply comes.
+ */
+export interface RequestMessage { id: string; kind: "tx" | "msg" | "signin" | "opaque"; bytes: string; owner: string; decoy?: "first" | "asked" | "showing" | "gone"; more?: { kind: string; bytes: string }[]; total?: number }
 export interface DoorsMessage { unguarded: string[] }
-export interface ReplyMessage { id: string; ok: boolean }
+/**
+ * For a signing request: `ok` lets it through. For "first": `address` is the decoy to show, when there is
+ * one. For "asked": `ok` false means the owner chose to stay as they are; otherwise `caught` says whether
+ * the site was caught.
+ */
+export interface ReplyMessage { id: string; ok: boolean; address?: string; caught?: boolean }
 /** `sigs`: for a signed transaction, the signatures in the wallet's answer, base64, first one first. */
 export interface DoneMessage { id: string; signed: boolean; sigs?: string[] }

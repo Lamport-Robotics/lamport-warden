@@ -90,6 +90,97 @@ transaction, and the transaction names your wallet. A simulation is a reading of
 behave differently a block later, so it is worded as what a simulation showed, and it can only make a verdict
 stricter. A transaction made only of instructions Warden reads in full is never sent.
 
+## A decoy first (an experiment, off unless turned on)
+
+Connecting a wallet to a site hands the site an address and nothing else: nothing is signed. So the first
+address a site is handed does not have to be the owner's. With this on, a site Warden has not seen is handed
+a decoy's: an address that holds something and whose key is not in the browser, so that nothing it is asked
+to sign can be signed.
+
+A site that robs wallets looks up what the connected address holds and asks it to sign that away. A site
+that does not, waits for its visitor. So what a site asks the decoy for says what the site is, before it has
+seen the owner's address (`src/decoy.ts`):
+
+- it asks the decoy to hand over an account, or to let somebody spend its tokens without limit, or nearly
+  all of them, or with nothing in the transaction that would use the permission: caught;
+- it asks the decoy to send out most of two or more different things, in transactions that do nothing else:
+  caught (a sweep);
+- it asks the decoy to send out nine tenths or more of what it holds of something, in transactions that do
+  nothing else: caught;
+- anything else: it passes. The owner is told, and when they go on their own wallet is connected in the
+  decoy's place, the site is told its account changed and to ask again, and Warden reads that request like
+  any other.
+
+"Does nothing else" means it calls only programs whose every instruction Warden reads. What is sent out is
+added up over everything asked in one call, so a balance taken in pieces is taken. What moves into the
+decoy's own accounts is not sent out (wrapping SOL), unless the same transaction takes it out of there:
+closes that account to somebody else, sends the wrapped SOL on, or lets somebody spend it. More than the
+decoy holds of something is a price and not a balance, and is not counted; what the decoy holds is read
+again before that is believed, because it is somebody's live wallet and may have been sent more since. And
+when nothing is known of what the decoy holds (the RPC is off, or does not answer), how much is asked says
+nothing: only a power handed over catches anybody then, and the owner is told the amounts could not be
+weighed. The first sixteen requests of a call are read; a call that asks for more is not gone on with at a
+press.
+
+While a site is being shown the decoy, Warden says so in a corner of the page, with a button: **use my
+wallet here**. A site that has nothing to ask a wallet for straight away (a portfolio page, a swap form that
+first wants a balance) never asks the decoy for anything, and that button is how its visitor goes on.
+
+Where it stands, and what it remembers:
+
+- **Both of a wallet's doors**: its Wallet Standard wallet, and the older object on the window
+  (`window.solana.connect()`), which is how the simplest thieving scripts reach a wallet. It answers connect,
+  what the wallet says its account is, and the event a site listens for. What a provider hands a page is a
+  `PublicKey` of the wallet's own web3.js; `keyLike()` is the decoy's address in that shape.
+- **One page, one decoy, one outcome.** Caught at one door, the page gets nothing more through any; passed
+  at one, the decoy comes down at all.
+- **A wallet the site already knows is left as it is**: one that is already connected, or that answers a
+  connect which asked not to prompt. That site has its address already.
+- **A site the owner went on to use is not shown a decoy again; a site that was caught is remembered.** On a
+  later visit it is shown the decoy again, and going on with it takes typing, not a press.
+
+It is run in Chromium by `test/browser/decoy.test.ts`, on an ordinary site in front of wallets built the way
+Phantom, Solflare and Backpack are, and by `pnpm test:wallets` in front of those extensions themselves.
+
+What it is not:
+
+- **It only adds a way of being caught.** A thief that recognises a decoy asks it for nothing, passes, and
+  then faces what every site faces: Warden reading each request made of the real wallet. So does one that
+  behaves first and robs later, one that adds a call to a program Warden does not read, and one that asks
+  the visitor to sign in before it asks them to connect.
+- **A decoy can be recognised.** It answers at once with no window from the wallet, and the key it hands a
+  page is not the wallet's own kind of object. No list of addresses is needed to tell, so rotating or hiding
+  the addresses would buy nothing. A decoy catches the thief that has not adapted to it.
+- **The decoy has to be a real address that really holds something**, or a thief that looks it up sees an
+  empty wallet. Where the owner names none, Warden finds the browser one of its own (`src/decoy-find.ts`): a
+  wallet that paid for a transaction in a block made final a moment ago and holds at least three SOL, picked
+  at random and found again each week. No two browsers show the same one, so there is no list of decoys to
+  learn, and nothing for anybody to fund. It is a stranger's real wallet: a site that is shown the decoy sees
+  that address arrive from the visitor's browser, and may record it. Nothing can be signed for it and nothing
+  of its owner's is at risk, but an owner who would rather not show a stranger's address names one of their
+  choosing, which must be one they have no key to. `LAMPORT_DECOYS` in `src/defaults.ts` is where wallets
+  Lamport funds for this would go; it is empty, and with a decoy found for each browser it can stay so.
+- **It can take an honest request for a robbery.** Any plain payment of nine tenths or more of what the
+  decoy holds of something is caught like a thief: a "max" button, or a price that happens to be about what
+  the decoy holds. So is a permission for nearly all of a holding, whatever uses it. A page that was caught
+  gets nothing more until it is loaded again, and the site is remembered. The button in the corner is the
+  way round, pressed before the site asks for anything; and "Forget them" in the settings.
+- **A page can keep the notice from being pressed.** Its element is in the page: a page that keeps taking it
+  out or changing it has it put back each time, and the button does not count for a moment after. A page
+  cannot press it. Turning the experiment off in the settings ends a decoy on any page.
+- **No answer, no decoy.** If Warden's own worker has not said within three seconds of a page's first
+  connect whether that page has a decoy, the page is connected as always.
+- **The top frame only.** A page inside a frame is connected as always, and a page that was caught can
+  still reach a wallet from inside a frame. Warden reads what is asked there like any other request.
+- **Not at Solflare's older door.** Nothing can be put in front of `window.solflare` (see the table above),
+  so a page that calls it directly is connected as always. Its Wallet Standard door is covered.
+- **Phantom, Backpack and Solflare are the wallets it was shaped against.** Another wallet gets a decoy only
+  where Warden can also answer for what that wallet says its account is, and none otherwise.
+- **It keeps records Warden otherwise would not**: a mark for each site the owner went on to use and for
+  each site that was caught (see the privacy policy). And with it off, Warden still stands in front of each
+  wallet's connect, to ask whether the page has a decoy; the answer is no, and the wallet's own list of
+  accounts is left untouched.
+
 ## How it is put together
 
 | File | Where it runs | Job |
@@ -104,6 +195,7 @@ stricter. A transaction made only of instructions Warden reads in full is never 
 | `src/simulate.ts` | worker | Asks the RPC what a transaction would do, and reads the wallet's accounts before and after. |
 | `src/options.ts` | settings page | The RPC, simulation, the sites allowed to ask for Privacy Rings keys, and what Warden remembers. |
 | `src/channel.ts` | page and isolated | How the two halves on a page find each other without the page listening in. |
+| `src/decoy.ts` | worker | The decoy experiment: what a site asked a decoy for, and whether that is a robbery. Pure, tested in Node. |
 
 The only permission is `storage`.
 

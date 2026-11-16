@@ -22,14 +22,19 @@ object said it was Backpack, which a page can make any wallet's object say: **0.
 payment that goes through three of its doors; and lets a prompt taller than the window scroll. 0.7.7: an
 account named in a call is read once and the wallet is handed what was read; anything handed to Backpack's
 `send` that is not plain text is taken for a transaction; and a transaction is read only from the sides that
-sign it. The current one is 0.7.8, which changes one sentence: the settings page no longer says a plan is
-paid by card only, and points at the Sentinel page for how it can be paid.
+sign it. 0.7.8 changed one sentence: the settings page no longer says a plan is paid by card only, and
+points at the Sentinel page for how it can be paid. The current one is 0.8.0, which adds a decoy first: an
+experiment, off unless turned on.
 
-To submit 0.7.8:
+**Before submitting 0.8.0:** `LAMPORT_DECOYS` in `src/defaults.ts` is empty: Warden finds each browser a decoy
+of its own on the chain, or the user names one, and the description below says so. If Lamport's own decoys
+are in the list by the time this is submitted, change that sentence. (0.7.8 is the version to submit if the decoy is not ready: package it from `main`.)
 
-1. Package tab: upload `lamport-warden-0.7.8.zip` (`pnpm package`).
+To submit 0.8.0:
+
+1. Package tab: upload `lamport-warden-0.8.0.zip` (`pnpm package`).
 2. Store listing tab: paste the description below again (it now mentions Sentinel and the practice page)
-   and replace the screenshots with the four in `store/screenshots/` (retaken from 0.7.8).
+   and replace the screenshots with the five in `store/screenshots/` (retaken from 0.8.0).
 3. Privacy tab: paste the storage justification and the data-usage note below again.
 4. Distribution tab: Payments. The extension itself sells nothing; it links to the Sentinel page, where the
    paid plan is sold once checkout is open. Choose "Contains in-app purchases" if checkout is open when you
@@ -78,6 +83,13 @@ page tells you when Warden meets it.
 You can watch it work before you trust it with anything: warden.lamportrobotics.com/try has a practice wallet
 that holds nothing and eight requests to try on it.
 
+An experiment you can turn on in the settings: a decoy first. A site you have not used is handed a decoy's
+address when it asks your wallet to connect: one that Warden finds for your browser on the chain, or one you
+name, that holds something and whose key you do not have. A site that then asks the decoy to give everything away is a
+thief, caught before it has seen your address or reached your wallet. Any other site is then connected to
+your own wallet and asks again, which costs one more press the first time you use it. It is off until you
+turn it on.
+
 No account, no model, and by default nothing goes to Lamport. The only network requests are to a Solana RPC
 you can change or turn off: to read on-chain lookup tables, and, on the Sentinel page, a wallet's rescue setup. You can turn on simulation, which sends a swap,
 unsigned, to your RPC to find out what it would do; it is off until you choose it.
@@ -110,9 +122,10 @@ extension never sees. It is open source: https://github.com/Lamport-Robotics/lam
 
 Terms: https://warden.lamportrobotics.com/terms
 
-**Screenshots** (1280 x 800): `store/screenshots/`, made by `pnpm shots`. Four: a look-alike address blocked,
-a swap with what a simulation showed, the settings page, and the practice page with a request stopped. The
-fourth is taken from the practice page as it is deployed, so `pnpm shots` needs the network for it.
+**Screenshots** (1280 x 800): `store/screenshots/`, made by `pnpm shots`. Five: a look-alike address blocked,
+a swap with what a simulation showed, the settings page, the practice page with a request stopped, and a
+site that asked a decoy for everything, caught. The fourth is taken from the practice page as it is
+deployed, so `pnpm shots` needs the network for it.
 
 **Small promo tile** (440 x 280): `store/promo-440x280.png`, drawn by `node scripts/og.mjs`.
 
@@ -132,12 +145,13 @@ that match known theft patterns.
 **Permission justification, storage:**
 Keeps, on the user's device, the addresses each of their wallets has paid (to recognise familiar payments
 and look-alike addresses), the user's settings, and, for a wallet the user linked to Sentinel, the token it
-reports with.
+reports with. If the user turns on the decoy experiment: the decoy's address (a public wallet address that is not the user's), and a salted hash for each site that passed it, so that
+a site already in use is not shown a decoy again; removed when the experiment is turned off.
 
 **Host permission justification** (content scripts on https://*/*):
 Any web page can ask a Solana wallet to sign, and a page built to steal is not on any list. Warden's scripts
-run on every https page to do two things: put Warden in front of the wallet's signing calls, and draw its
-prompt. They do not read the page's content.
+run on every https page to do two things: put Warden in front of the wallet's connect and signing calls, and
+draw its prompt and, while a decoy is showing, its notice. They do not read the page's content.
 
 **Remote code:** No. Everything the extension runs is in the package.
 
@@ -160,7 +174,7 @@ No login is needed. No wallet or cryptocurrency is needed.
 1. Install the extension. It opens its own settings page with a short welcome. Press
    "See it work with a practice wallet" there, or open https://warden.lamportrobotics.com/try/
    The page makes a practice wallet that holds nothing. Nothing on it is sent to any blockchain.
-   Near the top it says "Warden 0.7.8 is in this browser and is standing in front of the practice wallet."
+   Near the top it says "Warden 0.8.0 is in this browser and is standing in front of the practice wallet."
 2. Press "Try it" beside "Pay someone for the first time".
    The extension shows its prompt: one sentence saying what the request does, with Cancel and
    "Continue to wallet". Press "Continue to wallet".
