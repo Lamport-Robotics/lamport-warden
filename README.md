@@ -152,9 +152,14 @@ What it is not:
   page is not the wallet's own kind of object. No list of addresses is needed to tell, so rotating or hiding
   the addresses would buy nothing. A decoy catches the thief that has not adapted to it.
 - **The decoy has to be a real address that really holds something**, or a thief that looks it up sees an
-  empty wallet. There is none in this build: the owner names one in the settings, and it must be an address
-  they have no key to. `LAMPORT_DECOYS` in `src/defaults.ts` is where wallets Lamport funds for this would
-  go; it is empty.
+  empty wallet. Where the owner names none, Warden finds the browser one of its own (`src/decoy-find.ts`): a
+  wallet that paid for a transaction in a block made final a moment ago and holds at least three SOL, picked
+  at random and found again each week. No two browsers show the same one, so there is no list of decoys to
+  learn, and nothing for anybody to fund. It is a stranger's real wallet: a site that is shown the decoy sees
+  that address arrive from the visitor's browser, and may record it. Nothing can be signed for it and nothing
+  of its owner's is at risk, but an owner who would rather not show a stranger's address names one of their
+  choosing, which must be one they have no key to. `LAMPORT_DECOYS` in `src/defaults.ts` is where wallets
+  Lamport funds for this would go; it is empty, and with a decoy found for each browser it can stay so.
 - **It can take an honest request for a robbery.** Any plain payment of nine tenths or more of what the
   decoy holds of something is caught like a thief: a "max" button, or a price that happens to be about what
   the decoy holds. So is a permission for nearly all of a holding, whatever uses it. A page that was caught

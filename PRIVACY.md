@@ -17,7 +17,7 @@ In the browser's extension storage on your machine, and nowhere else:
 - If you use Sentinel: for each wallet, the vault you chose for rescues, as this browser saw you set it up;
   and for each wallet you linked on the Sentinel page, the token that wallet reports with.
 - The names of wallet objects it could not guard, with the day each was last seen.
-- If you turn on the decoy experiment: the decoy's address if you named one, a mark for each site you went on
+- If you turn on the decoy experiment: the decoy's address (the one you named, or the one Warden found for this browser, with the day it was found), a mark for each site you went on
   to use with your own wallet after it was shown a decoy, and a mark for each site that was caught asking a
   decoy for what only a thief asks (the newest five hundred of each, with the day). The first is so that a
   site you already use is not shown a decoy again; the second so that a site that was caught is not gone on
@@ -46,13 +46,11 @@ turn it on.
    tokens for rescue and this browser has no memory of that wallet's setup, Warden asks the RPC for the
    setup's account, to see which vault it names. The RPC receives that account's address, which is worked
    out from your wallet's address, and your IP address.
-4. **Reading what a decoy holds, only if you turn the decoy experiment on.** Warden asks the RPC what the
-   decoy holds, so that it can tell a site that asks the decoy for everything from one that asks for a
+4. **Reading what a decoy holds, only if you turn the decoy experiment on.** If you named no decoy, Warden first finds this browser one: it asks the RPC for the newest blocks of the chain, which anyone can read and which say nothing about you, and picks a wallet from them, again each week. Warden then asks the RPC what the decoy holds, so that it can tell a site that asks the decoy for everything from one that asks for a
    little. The RPC receives the decoy's address and your IP address, and nothing about your wallet.
 
    A site that is shown a decoy sees the decoy's address before it sees yours, and can tell it is not an
-   ordinary wallet. If you named a decoy of your own, every such site sees that same address: sites that
-   compare what they saw could tell that the same person visited each of them.
+   ordinary wallet. Every such site sees the same address (the one you named, or the one found for this browser, until another is found a week later): sites that compare what they saw could tell that the same person visited each of them. The decoy Warden finds is somebody's real wallet, picked at random from the chain: a site that records which address connected records that one, arriving from your connection.
 
 5. **Telling Sentinel a signature was yours, only if you turn it on.** Sentinel is Lamport's watching
    service. It sees only the chain, so it cannot tell a payment you made from one a thief made with your key.

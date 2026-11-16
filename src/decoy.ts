@@ -52,11 +52,13 @@ const MEMO = new Set(["MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr", "Memo1UhkJR
 const PLAIN = new Set([SYSTEM, TOKEN, TOKEN_2022, ASSOCIATED, COMPUTE_BUDGET, ...MEMO]);
 
 export { LAMPORT_DECOYS } from "./defaults.js";
+export { DECOY_KEPT_SECONDS, DECOY_LEAST_LAMPORTS, decoysIn, findDecoy } from "./decoy-find.js";
 
 /**
- * The decoy a site is shown: the owner's own if they named one, or else one of Lamport's. `mark` is the
- * site's mark in this browser (hex), so that a site sees the same one each time, and different sites and
- * different browsers do not all see the same one.
+ * The decoy a site is shown: the one the owner named, or the one found for this browser (background.ts
+ * hands either in as `named`), or else one of Lamport's. `mark` is the site's mark in this browser (hex), so
+ * that a site sees the same one of Lamport's each time, and different sites and different browsers do not
+ * all see the same one.
  */
 export function pickDecoy(named: string, roster: readonly string[], mark: string): string | null {
   if (named) return named;

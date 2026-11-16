@@ -8,7 +8,7 @@ import "../src/polyfill.js";
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { LAMPORT_DECOYS, PASSED_ON_WORDS, decoyVerdict, judgeCall, judgeDecoy, pickDecoy, readHoldings, type Decoy } from "../src/decoy.js";
+import { DECOY_LEAST_LAMPORTS, LAMPORT_DECOYS, PASSED_ON_WORDS, decoyVerdict, decoysIn, findDecoy, judgeCall, judgeDecoy, pickDecoy, readHoldings, type Decoy } from "../src/decoy.js";
 import { WardenRejected, installLegacyHook, installStandardHook, keyLike, patchStandardWalletInPlace, useOwnWallet, wrapStandardWallet, type DecoyGate, type Guard, type GuardRequest } from "../src/intercept.js";
 import { cleanAddress, settingsFrom } from "../src/settings.js";
 import type { FetchLike } from "../src/rpc.js";
@@ -678,6 +678,68 @@ describe("which decoy a site is shown", () => {
 
   it("is nothing when there is none: no address named, and none of Lamport's in the build", () => {
     expect(pickDecoy("", [], "00000001")).toBeNull();
+  });
+
+  // a block as the RPC gives one when asked for its accounts only: each transaction's keys, the payer first, and the balances it left
+  const VOTE = "Vote111111111111111111111111111111111111111";
+  const paid = (payer: string, left: unknown, o: { err?: unknown; others?: string[]; plain?: boolean } = {}) => ({
+    meta: { err: o.err ?? null, fee: 5000, preBalances: [0], postBalances: [left, 1] },
+    transaction: { accountKeys: [payer, ...(o.others ?? [key(90).toBase58()])].map((pubkey, i) => (o.plain ? pubkey : { pubkey, signer: i === 0, writable: true, source: "transaction" })), signatures: ["s"] },
+  });
+  const SOL = 1_000_000_000;
+  const rich = [key(60), key(61), key(62)].map((k) => k.toBase58());
+
+  it("is a wallet of this browser's own when the owner named none: found among the wallets that paid in a block just made final and hold enough to be worth robbing", () => {
+    const block = { transactions: [
+      paid(rich[0]!, 12 * SOL), paid(rich[1]!, 3 * SOL), paid(rich[2]!, 4000 * SOL, { plain: true }),
+      paid(key(63).toBase58(), 3 * SOL - 1),                          // holds too little: a thief would look and leave
+      paid(key(64).toBase58(), 50 * SOL, { err: { InstructionError: [0, "Custom"] } }), // its transaction failed
+      paid(key(65).toBase58(), 900 * SOL, { others: [key(91).toBase58(), VOTE] }),       // a validator voting: one of a few hundred anyone can list
+      paid("not an address", 50 * SOL), paid(key(66).toBase58(), "50000000000"), paid(key(67).toBase58(), 2 ** 60), // not a wallet; not a balance
+      paid(rich[0]!, 11 * SOL),                                       // the same wallet again is one wallet
+      null, {}, { meta: { err: null }, transaction: {} },
+    ] };
+    expect(decoysIn(block)).toEqual(rich);
+    expect(DECOY_LEAST_LAMPORTS).toBe(3 * SOL);
+    for (const nothing of [null, undefined, {}, { transactions: "x" }, { transactions: [] }, []]) expect(decoysIn(nothing)).toEqual([]);
+  });
+
+  it("is found by asking the RPC for blocks anyone can read, and is a different one for whoever asks", async () => {
+    const asked: [string, unknown[]][] = [];
+    const blocks: Record<number, unknown> = { 1000: { transactions: [paid(rich[0]!, 5 * SOL)] }, 999: null, 998: { transactions: [paid(rich[1]!, 5 * SOL), paid(rich[2]!, 9 * SOL)] }, 997: { transactions: [paid(key(70).toBase58(), 5 * SOL)] } };
+    const rpc = (o: { slot?: unknown; down?: boolean } = {}): FetchLike => async (_url, init) => {
+      const { method, params } = JSON.parse(String(init!.body));
+      asked.push([method, params]);
+      if (o.down) return { ok: false, json: async () => ({}) } as any;
+      if (method === "getSlot") return { ok: true, json: async () => ({ result: "slot" in o ? o.slot : 1000 }) } as any;
+      if (params[0] === 999) return { ok: true, json: async () => ({ error: { code: -32007, message: "Slot 999 was skipped" } }) } as any;
+      return { ok: true, json: async () => ({ result: blocks[params[0]] ?? null }) } as any;
+    };
+    const found = [rich[0]!, rich[1]!, rich[2]!, key(70).toBase58()];
+    // whichever the picker says, of the wallets in the newest few blocks: a skipped slot is passed over
+    for (let i = 0; i < found.length; i++) expect(await findDecoy("https://rpc.example", rpc(), () => i)).toBe(found[i]);
+    // it asks for the newest final slot and then for blocks with their accounts only: nothing about the owner is in any of it
+    expect(asked[0]).toEqual(["getSlot", [{ commitment: "finalized" }]]);
+    expect(asked[1]).toEqual(["getBlock", [1000, { encoding: "json", transactionDetails: "accounts", rewards: false, maxSupportedTransactionVersion: 1, commitment: "finalized" }]]);
+    // an RPC that refuses the newest kind of transaction by number is asked the older way, and its block is read
+    const older: FetchLike = async (_url, init) => {
+      const { method, params } = JSON.parse(String(init!.body));
+      if (method === "getSlot") return { ok: true, json: async () => ({ result: 1000 }) } as any;
+      if (params[1].maxSupportedTransactionVersion !== 0) return { ok: true, json: async () => ({ error: { code: -32602, message: "invalid transaction version" } }) } as any;
+      return { ok: true, json: async () => ({ result: blocks[params[0]] ?? null }) } as any;
+    };
+    expect(await findDecoy("https://rpc.example", older, () => 0)).toBe(found[0]);
+    expect(new Set(asked.map((a) => a[0]))).toEqual(new Set(["getSlot", "getBlock"]));
+    expect(JSON.stringify(asked)).not.toContain(BAIT.address);
+    // a picker that answers out of range does not pick nothing
+    expect(await findDecoy("https://rpc.example", rpc(), () => 99)).toBe(found[0]);
+    expect(await findDecoy("https://rpc.example", rpc(), () => NaN)).toBe(found[0]);
+    // and there is none when the RPC is off, does not answer, or says something that is not a slot
+    expect(await findDecoy("", rpc(), () => 0)).toBeNull();
+    expect(await findDecoy("https://rpc.example", rpc({ down: true }), () => 0)).toBeNull();
+    for (const slot of [null, "1000", -1, 1.5]) expect(await findDecoy("https://rpc.example", rpc({ slot }), () => 0), String(slot)).toBeNull();
+    // or when the newest blocks have no wallet worth showing
+    expect(await findDecoy("https://rpc.example", rpc({ slot: 5000 }), () => 0)).toBeNull();
   });
 
   it("carries only real, different addresses in the build", () => {

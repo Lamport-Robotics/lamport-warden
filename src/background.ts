@@ -13,7 +13,7 @@ import { reportOwnSignature } from "./report.js";
 import { LINK_PREFIX, fromSentinelPage, linkFrom, linkKey, readPageAsk, type PageAnswer } from "./sentinel-link.js";
 import { TableReader, readAccount } from "./rpc.js";
 import { configAddress, vaultOfConfig } from "./sentinel.js";
-import { LAMPORT_DECOYS, decoyVerdict, judgeCall, pickDecoy, readHoldings, type AskedOf, type Decoy } from "./decoy.js";
+import { DECOY_KEPT_SECONDS, LAMPORT_DECOYS, decoyVerdict, findDecoy, judgeCall, pickDecoy, readHoldings, type AskedOf, type Decoy } from "./decoy.js";
 import type { DecoyAskedReply, DecoyFirstReply, Noted } from "./messages.js";
 import { KEYS, settingsFrom } from "./settings.js";
 import { Simulator } from "./simulate.js";
@@ -107,6 +107,28 @@ function heldBy(address: string, rpcUrl: string): Promise<Pick<Decoy, "lamports"
   return held;
 }
 
+/**
+ * The decoy found for this browser (decoy.ts, `findDecoy`), kept with when it was found: `{ address, at }`.
+ * Used when the owner has named none. After a week another is found; until that one is there the old one
+ * stands, and with none yet no decoy is shown (the site is connected as always).
+ */
+const OWN = "decoyOwn";
+const ownOf = (kept: unknown): { address: string; at: number } | null => {
+  const k = kept as { address?: unknown; at?: unknown } | null;
+  return k && typeof k.address === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(k.address) && typeof k.at === "number" ? { address: k.address, at: k.at } : null;
+};
+let finding: Promise<void> | null = null;
+async function ownDecoy(rpcUrl: string): Promise<string | null> {
+  const kept = ownOf((await chrome.storage.local.get(OWN))[OWN]);
+  if (kept && Date.now() / 1000 - kept.at < DECOY_KEPT_SECONDS) return kept.address;
+  // one finding at a time, and nobody waits for it: a page asking whether it is shown a decoy is answered at once
+  finding ??= findDecoy(rpcUrl, plainFetch, (below) => crypto.getRandomValues(new Uint32Array(1))[0]! % below)
+    .then(async (address) => { if (address) await chrome.storage.local.set({ [OWN]: { address, at: Math.floor(Date.now() / 1000) } }); })
+    .catch(() => undefined)
+    .finally(() => { finding = null; });
+  return kept ? kept.address : null;
+}
+
 /** Sites that were caught asking a decoy for what only a thief asks: kept like the ones that passed, as marks with the day. */
 const CAUGHT_SITES = "decoyCaught";
 async function marks(list: string): Promise<Record<string, string>> {
@@ -132,10 +154,12 @@ async function standing(origin: string, frameId: number | undefined): Promise<St
   const s = await settings();
   const web = origin.startsWith("https://") || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
   if (!s.decoyFirst || !web || origin === ARMING_ORIGIN) return { kind: "none" };
-  if (!s.decoyAddress && LAMPORT_DECOYS.length === 0) return { kind: "none" }; // nothing to show: no mark of the site is made either
+  // the one the owner named; or the one found for this browser; or, where Lamport keeps decoys, one of those
+  const own = s.decoyAddress || (LAMPORT_DECOYS.length === 0 ? await ownDecoy(s.rpcUrl) : null) || "";
+  if (!own && LAMPORT_DECOYS.length === 0) return { kind: "none" }; // nothing to show: no mark of the site is made either
   const mark = await markOf(origin);
   if (Object.hasOwn(await marks(PASSED), mark)) return { kind: "passed" };
-  const address = pickDecoy(s.decoyAddress, LAMPORT_DECOYS, mark);
+  const address = pickDecoy(own, LAMPORT_DECOYS, mark);
   if (!address) return { kind: "none" };
   const caught = (await marks(CAUGHT_SITES))[mark];
   return { kind: "decoy", address, mark, caughtOn: typeof caught === "string" ? caught : null, rpcUrl: s.rpcUrl };
