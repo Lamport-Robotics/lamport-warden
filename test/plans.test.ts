@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, paceText } from "../sentinel/service/src/plans.js";
+import { HOLDER_MIN_LAMPORT, HOLDER_PRICE_CENTS, LAMPORT_TERMS, PLANS, PRICE_CENTS, PRO_FEATURES, PRO_NOT_YET, WATCH_FEATURES, paceText } from "../sentinel/service/src/plans.js";
 import { LAMPORT_MINT, configFrom } from "../sentinel/service/src/main.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,6 +23,19 @@ describe("the plans, wherever they are described", () => {
     expect(page).toContain(`${HOLDER_MIN_LAMPORT.toLocaleString("en-US")} $LAMPORT`);
     // rescue is never listed as something Pro gives today
     expect(page).not.toMatch(/Pro (includes|gives you|comes with) rescue/i);
+  });
+
+  it("the Warden site names the one token the service counts and takes, and promises nothing about it", () => {
+    const html = readFileSync(join(root, "site", "index.html"), "utf8");
+    // the address on the page is the one in the service's settings, letter for letter
+    expect(/<p class="mint" id="lamport-mint">([^<]+)<\/p>/.exec(html)![1]).toBe(LAMPORT_MINT);
+    const page = flat(html);
+    expect(page).toContain("paid by card through Stripe, or ahead of time in USDC, SOL or $LAMPORT");
+    // what becomes of the tokens is said the way the terms say it
+    expect(page).toContain("keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest");
+    expect(LAMPORT_TERMS[3]).toContain("keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest");
+    expect(page).toContain("None of that is a promise about what the token is worth");
+    expect(page).not.toMatch(/guarantee|will (rise|go up|increase)|investment|returns?\b/i);
   });
 
   it("an owner is told how their wallets are being read, as it is right now", () => {

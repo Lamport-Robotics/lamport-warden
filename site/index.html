@@ -8,6 +8,14 @@
 <meta name="theme-color" content="#0b0b0a">
 <meta property="og:title" content="Lamport Warden">
 <meta property="og:description" content="It reads the request before you sign it.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://warden.lamportrobotics.com/">
+<meta property="og:image" content="https://warden.lamportrobotics.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Lamport Warden blocking a payment to a look-alike address.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://warden.lamportrobotics.com/og.png">
 <link rel="icon" href="/site/mark.svg">
 <link rel="preload" href="/site/fonts/switzer-300.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/site/fonts/switzer-400.woff2" as="font" type="font/woff2" crossorigin>
@@ -79,6 +87,7 @@
   .plans ul { list-style: none; color: var(--dim); margin-bottom: 14px; max-width: 32em; }
   .plans li { padding: 10px 0; border-top: 1px solid var(--line); }
   .plans li.not { color: var(--care); }
+  .two p.mint { font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; color: var(--bone); overflow-wrap: anywhere; user-select: all; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--raise); }
   .foot { display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: center; padding: 28px var(--pad) 40px; border-top: 1px solid var(--line); font-size: 14px; color: var(--mute); }
   .foot nav { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-left: auto; }
   .foot a:hover { color: var(--bone); }
@@ -213,7 +222,26 @@
           <li>$10 a month, not $15, while a wallet in your profile holds 250,000 $LAMPORT</li>
           <li class="not">Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs Lamport Vault and the rescue program on Solana mainnet, and neither is there yet. It joins Pro when they are, at the same price.</li>
         </ul>
-        <p>A plan is started and cancelled on the Sentinel page, which says whether Pro is on sale yet. It is paid by card through Stripe.</p>
+        <p>A plan is started and cancelled on the Sentinel page, which says whether Pro is on sale yet. It is paid by card through Stripe, or ahead of time in USDC, SOL or $LAMPORT.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" id="lamport">
+    <div class="inner two">
+      <div>
+        <p class="eyebrow">$LAMPORT</p>
+        <h2>What the token <span>does here.</span></h2>
+        <p>Two things, both in Sentinel. While a wallet in your profile holds 250,000 $LAMPORT, Pro is $10 a month, not $15. And Pro can be paid for in $LAMPORT: the plan's price in dollars, turned into tokens at the token's price when you pay. The Sentinel page shows the amount before you pay it.</p>
+        <p>Lamport keeps a part of the LAMPORT it takes in its treasury, locked for the long term, and burns the rest. None of that is a promise about what the token is worth, and paying in it gets you the plan and nothing else.</p>
+        <p>Warden and the free plan need no token.</p>
+      </div>
+      <div>
+        <p class="eyebrow">On Solana</p>
+        <h2>One address.</h2>
+        <p>$LAMPORT is one token on Solana, and this is its address:</p>
+        <p class="mint" id="lamport-mint">D4CzGsZgusVj2K8R1its5H8WWdo9mazbDwBc6qvsmfun</p>
+        <p>Sentinel counts and takes only the token at that address. Anything else that calls itself LAMPORT is a different token.</p>
       </div>
     </div>
   </section>

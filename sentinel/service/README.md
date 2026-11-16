@@ -19,7 +19,7 @@ and answer them. It holds no signing key and moves nothing. There is no rescuer 
 | `src/server.ts` | The HTTP API. |
 | `src/main.ts`, `src/cli.ts` | The process: the watcher on a timer and the API beside it. |
 | `src/billing.ts` | The paid plan: a monthly Stripe subscription at one of two prices, the webhook that moves a profile between tiers, and the daily look at who holds the token. |
-| `src/prepaid.ts`, `src/solprice.ts` | The same plan paid ahead in USDC or SOL: the quote and its reference, the payment read from the chain, and the price of SOL from sources that have to agree. |
+| `src/prepaid.ts`, `src/solprice.ts` | The same plan paid ahead in USDC or SOL: the quote and its reference, the payment read from the chain, and the price of SOL from sources that have to agree. And, where it is turned on, paid in LAMPORT to the treasury wallet (`src/lamportprice.ts`: what a LAMPORT costs). |
 | `src/program.ts` | The rescue program's instructions, for arming (the owner signs) and for a rescue, and the plan of a rescue: which accounts, in what order, in how many transactions. |
 | `src/crypto.ts` | Random tokens and their hashes, the sealed box for channel addresses, and the check of a wallet's signature. All from Node itself. |
 
@@ -577,8 +577,34 @@ of the customer and the subscription.
     transaction names it. Any wallet can pay, from the page or from a phone; the reference is what ties the
     payment to the profile.
   - A payment is read from the chain at `finalized` and counted by what arrived at Lamport's address in it,
-    from the balances before and after: not by what the page says and not by what an instruction says. That
-    the transaction names the reference is read from the transaction, not taken from the RPC's list.
+    from the balances before and after: not by what the page says and not by what an instruction says.
+    That the transaction names the reference is read from the transaction, not taken from the RPC's list.
+  - How a payment is found.
+    - By its signature, for certain. The page gives the service the signature its wallet returned, and one
+      can be typed in for a payment made somewhere else. The service keeps the newest five with the quote
+      and reads those transactions at every look, whatever else names the quote.
+    - By the chain's list for the quote's address, as a convenience: the newest thousand that name it,
+      read twelve at a time from each end. From the old end, because a payment is older than what is sent
+      after it to bury it; from the new end, because the latest payment may be the one that is enough.
+      Anyone can add to that list once a payment has shown the address, and for a few thousandths of a SOL
+      can push a payment out of the thousand, or keep the middle of it unread for a while. Such a payment
+      is not lost: it is found by its signature.
+    - A final transaction is read once (`seen`): what was nothing, short or late is remembered, so a pile
+      of small payments costs one read each and cannot fill every look. One transaction that cannot be
+      read does not lose the others.
+  - Nothing is credited twice, however many looks overlap: a transaction is marked spent and its quote
+    paid in one step, with nothing awaited in between (`credit`). Looks at one quote take turns (`inTurn`);
+    looks at different quotes do not wait for each other, so one profile's cannot hold up another's.
+  - The service looks by itself, about once an hour (`sweep`), for every unpaid quote a payment was built
+    for or asked about in the last three days; and then, while there is room, for the quotes of the last
+    day that were only shown, so that a payment made from a phone by someone who never came back to the
+    page is found too. Sixty quotes an hour, three of any one profile, the ones looked for longest ago
+    first, so every quote gets its turn and nobody's asking pushes another's out. A tab closed before the
+    chain made a payment final does not lose it, and the owner's channels are told when it is found.
+  - While a payment the page handed to a wallet is being looked for, the page hands a wallet nothing more
+    and shows no other amount. The box is kept when the page draws itself again every twenty seconds, with
+    the amount, the payment request and that hold. The page does not say that nothing was paid when it
+    cannot know.
   - A transaction pays for one thing, once: its signature is kept, and one that names two quotes is
     credited to one. A short payment starts nothing and is said to be short. USDC is a dollar for a dollar
     and a quote holds a week. SOL is priced when quoted, at a price two of three public sources agree on to
@@ -591,6 +617,93 @@ of the customer and the subscription.
     subscription, and a card plan is not started over months already paid for.
   - `prepaid.test.ts` runs it against a list of transactions; `prepaid.validator.test.ts` runs a real token
     payment and a real SOL payment on a local validator, and is part of `pnpm test:rescue`.
+- **Paid in LAMPORT** (`src/prepaid.ts`, `src/lamportprice.ts`), where `SENTINEL_LAMPORT_PAY_TO` names
+  Lamport's treasury wallet. It is off until that is set, it has no default, and it needs `SENTINEL_PAY_TO`
+  beside it, since it is one more way of paying ahead: the same months, the same profiles, nothing renews.
+  - It is a transfer, like the one in USDC, to another wallet: the tokens go to the treasury wallet and
+    not to the wallet USDC and SOL go to. Lamport keeps a part of them there, locked for the long term,
+    and burns the rest. That is done by Lamport, by hand, from that wallet: the service holds no key, does
+    neither, and the page and the terms say so in the same words.
+  - The price is the plan's price in dollars, the holder's included, turned into LAMPORT when the amount is
+    shown, in whole tokens rounded up. Like a quote in SOL it holds ten minutes, and a payment made after
+    that is late and starts nothing.
+  - What a LAMPORT costs (`src/lamportprice.ts`). Three public sources that need no key are asked at once
+    (Jupiter, GeckoTerminal, DexScreener), and a price is given only when two of them agree to within five
+    in a hundred. LAMPORT trades in one small pool, and two things follow from that.
+    - Which pool. Asked about a token, a source answers for whichever pool it takes for the token's, and
+      anybody can make a pool: one holding only LAMPORT at ten times its price costs nothing to keep and
+      looks deep. So GeckoTerminal and DexScreener are asked about the one pool by its address
+      (`LAMPORT_POOL` in `src/main.ts`, or `SENTINEL_LAMPORT_POOL`), and an answer about any other pool, or
+      one where LAMPORT is not the token priced, is no answer. Jupiter is asked about the token and can
+      only agree with them. If the token's trading moves to another pool, the setting has to follow it:
+      until it does, the old pool's price is the one used, or none.
+    - How long. Somebody could push the price up in that pool, ask for an amount while it is up and be
+      asked for fewer tokens than the plan costs. So the price used is the lowest of the price now, the
+      price an hour before and the price six hours before. The two sources that read the pool each report
+      the change over those periods; at least one that agrees about the price now has to give both, and
+      what either gives is counted. A change that cannot be read is not taken for no change. When nobody
+      can say, there is no price and no amount in LAMPORT is shown; USDC needs no price and always is.
+    - How deep. All of that rests on the pool holding enough that moving its price costs something. Each
+      of the two that read the pool also has to say it holds at least `LAMPORT_POOL_LEAST_USD` ($5,000;
+      it held about $19,000 on 2026-11-16), or its word about the pool is not taken. And when Jupiter,
+      which follows the token wherever it trades, answers and does not agree with the pool's price, there
+      is no price. So if what is in the pool is taken out, or trading moves, paying in LAMPORT goes off
+      by itself until `SENTINEL_LAMPORT_POOL` names where it went. Somebody who can mislead Jupiter can
+      turn it off for a while the same way; off is the safe way for this to fail.
+    - What that does not do. A rise that has stood for six hours is the price. After any rise inside six
+      hours a payer is asked for more tokens than the price of the moment would give (the terms say so).
+      All three sources read the same chain, so "two agree" guards against a source being wrong, not
+      against a trade. And the most anybody gains by getting a price wrong is the plan for less: no money
+      leaves Lamport by it.
+    - It is asked for once for everybody: a price, and the lack of one, stands for half a minute, and
+      whoever asks meanwhile waits for the one answer. The page's estimate (`lamportNow`) waits for
+      nothing; it is the last price while that is under three minutes old, and nothing otherwise.
+  - The amount follows the price by itself, on the service and on the page. Every amount asked for is
+    worked out from the price at that moment. With what it offers, the service gives the page LAMPORT's
+    price now (`lamportNow`), and the page shows about how many tokens the plan comes to, again each time
+    it draws itself (every twenty seconds): an estimate, which binds nobody. An amount that was shown and
+    ran out with nothing paid on it is brought up to date by the page itself, after one look for a payment
+    on the old one: three times running while the page is being looked at, and after that on asking. The
+    same goes for an amount in SOL. An amount a payment is being looked for on is left as it is. The
+    amount that ran out is asked about for six minutes more, once a minute: the service counts a payment
+    up to five minutes late, and somebody who paid from a phone as it ran out is told it was found and
+    not to pay the new amount. The page counts an amount down from the seconds the service says are left
+    on it (`left`), not from the browser's clock, which may be minutes out.
+  - A quote keeps the wallet, the token and the decimals it was made for. A payment made on it is counted
+    against those, whatever the settings are by then: moving the treasury, changing the number or switching
+    LAMPORT off does not strand a payment that was already asked for. The other side of that: an amount
+    already shown still names the old wallet for its ten minutes. If the treasury is moved because its key
+    was lost to somebody, take the setting out first, wait ten minutes, and then name the new wallet.
+  - It is counted like USDC, by what arrived in the treasury's accounts of the token at `finalized`, and
+    by one thing more (`sentPlainly`): no more than what was sent there by a transfer at the top of the
+    transaction that the holder of the tokens signed. The wallet USDC and SOL go to does nothing but take
+    payments. The treasury has other business, and a program can pay tokens into it on a stranger's
+    instruction (an order of the treasury's own being filled, a claim, a stream paying out): a
+    transaction like that which named a quote would show a rise the treasury itself paid for. A program
+    moves tokens inside its own instruction, so that is not counted. Nor, for the same reason, is a
+    payment made through a program such as a multisig: it is counted by hand, and whoever made it is not
+    left waiting. The answer to "has it arrived" is then `held`: the whole amount is at the treasury and
+    was not sent plainly, with what to do about it. One shape still passes: the payer sends plainly, and
+    in the same transaction a program pays the treasury's own SOL out for it. That needs the treasury to
+    have such an order open, so the treasury keeps no open orders that anyone can fill. A payment that is
+    short or late starts nothing and is said to be; sending it back is done by hand from the treasury.
+  - A send typed into a wallet by hand names no quote, and nothing on the chain says whose it is: it is
+    never found, with or without its signature. The page and the terms say so before anybody pays (the
+    same has always held for USDC and SOL, and was not said). Whoever does it anyway writes to support.
+  - It is taken only for a token with no more to it than a name and a picture (`PLAIN_EXTENSIONS`). A token
+    that keeps back a fee on transfers would arrive short of what the page asked a wallet for, every time.
+    LAMPORT has no such fee and can never be given one.
+  - The treasury wallet needs its own account for the token before anything can be paid into it. Until it
+    has one, a payment from the page is refused with "LAMPORT cannot be taken just now".
+  - The page shows the treasury wallet and, beside it, the token account of that wallet that the payment
+    lands in. A wallet's prompt and Warden's name the token account, and Warden gives the amount in the
+    token's smallest units (its engine has no name for LAMPORT): the page says both, so that the payer
+    does not meet an address or a number nobody mentioned. Naming the token in Warden's own sentence is
+    not done here.
+  - `lamport-payment.test.ts` runs it against a list of transactions, including looks that overlap and
+    payments buried or hidden from the chain's list. `prepaid.validator.test.ts` sends a token under
+    Token-2022 to a treasury wallet for real on a local validator, and checks that tokens burned beside
+    a quote count for nothing. It has not been run with LAMPORT itself, on mainnet.
 - **A real payment before it is on sale.** `SENTINEL_CHECKOUT_TESTERS` names up to twenty wallet addresses,
   separated by commas. A profile that one of them is in sees the button and can buy while checkout is closed
   to everyone else, so the whole path (the page, Stripe's checkout with a real card, the webhook, the tier,

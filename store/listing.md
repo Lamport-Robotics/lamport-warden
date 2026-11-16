@@ -22,12 +22,14 @@ object said it was Backpack, which a page can make any wallet's object say: **0.
 payment that goes through three of its doors; and lets a prompt taller than the window scroll. 0.7.7: an
 account named in a call is read once and the wallet is handed what was read; anything handed to Backpack's
 `send` that is not plain text is taken for a transaction; and a transaction is read only from the sides that
-sign it. The current one is 0.8.0, which adds a decoy first: an experiment, off unless turned on.
+sign it. 0.7.8 changed one sentence: the settings page no longer says a plan is paid by card only, and
+points at the Sentinel page for how it can be paid. The current one is 0.8.0, which adds a decoy first: an
+experiment, off unless turned on.
 
 **Before submitting 0.8.0:** `LAMPORT_DECOYS` in `src/defaults.ts` is empty, so a decoy is shown only to
 somebody who names an address themselves. The description below says only that a site "is handed a decoy's
 address". If the list is still empty when this is submitted, add to that paragraph that the address is one
-the user names in the settings. (0.7.7 is the version to submit if the decoy is not ready: package it from
+the user names in the settings. (0.7.8 is the version to submit if the decoy is not ready: package it from
 `main`.)
 
 To submit 0.8.0:
@@ -38,9 +40,12 @@ To submit 0.8.0:
 3. Privacy tab: paste the storage justification and the data-usage note below again.
 4. Distribution tab: Payments. The extension itself sells nothing; it links to the Sentinel page, where the
    paid plan is sold once checkout is open. Choose "Contains in-app purchases" if checkout is open when you
-   submit, "Free of charge" if it is not.
+   submit, "Free of charge" if it is not. Checkout has been open since 2026-11-13.
 5. Test instructions tab: paste the text below (update the version in step 1 if it changed).
-6. Submit. Google flags the host permission for an in-depth review, so expect longer than a few days.
+6. Submit, with "Publish automatically after it has passed review" unticked. The review then starts and
+   nothing is public when it ends: the approved version waits (Google keeps it up to 30 days) until
+   "Publish" is pressed. Google flags the host permission for an in-depth review, so expect longer than a
+   few days.
 
 ## Store listing tab
 
@@ -111,7 +116,7 @@ Pro is $15 a month, or $10 while a wallet in your Sentinel profile holds 250,000
 Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs Lamport Vault and the rescue program on Solana mainnet, and neither is there yet. It joins Pro when they are, at the same price.
 
 A plan is started and cancelled on the Sentinel page (warden.lamportrobotics.com/sentinel), which says
-whether Pro is on sale. It is paid by card through Stripe; nothing is bought inside the extension.
+whether Pro is on sale and how it can be paid. Nothing is bought inside the extension.
 
 Warden is advice in front of your wallet, not a lock on it. A page can still reach a wallet in ways an
 extension never sees. It is open source: https://github.com/Lamport-Robotics/lamport-warden
@@ -123,7 +128,7 @@ a swap with what a simulation showed, the settings page, the practice page with 
 site that asked a decoy for everything, caught. The fourth is taken from the practice page as it is
 deployed, so `pnpm shots` needs the network for it.
 
-**Small promo tile** (440 x 280): not made yet.
+**Small promo tile** (440 x 280): `store/promo-440x280.png`, drawn by `node scripts/og.mjs`.
 
 **Store icon** (128 x 128): `public/icons/icon128.png`.
 

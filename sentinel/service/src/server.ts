@@ -59,7 +59,7 @@ export interface ApiDeps {
    */
   notice?: (profile: string, sentence: string, opts?: { quiet?: boolean }) => Promise<void>;
   /** Paying for the plan ahead in USDC or SOL (prepaid.ts). Absent: the plan is paid by card only. */
-  prepaid?: Pick<Prepaid, "offer" | "quote" | "check" | "transaction">;
+  prepaid?: Pick<Prepaid, "offer" | "quote" | "check" | "transaction"> & Partial<Pick<Prepaid, "lamportNow">>;
   /** The Telegram bot, when the service has one: its name, and the codes that tie a chat to a profile. Absent: Telegram is not offered. */
   telegram?: { username: string; codes: Pick<LinkCodes, "issue"> };
   /**
@@ -289,7 +289,11 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
       if (!deps.billing) return ok({ enabled: false });
       const quote = await deps.billing.api.quote(session);
       // paying ahead in USDC or SOL is offered to whoever the card is offered to, and not beside a card plan
-      return ok({ ...quote, crypto: deps.prepaid && quote.checkoutOpen && !quote.subscribed ? deps.prepaid.offer() : null });
+      if (!deps.prepaid || !quote.checkoutOpen || quote.subscribed) return ok({ ...quote, crypto: null });
+      // with LAMPORT's price now, where it is taken, so that the page can show about how many tokens the plan comes to
+      const offer = deps.prepaid.offer();
+      const usd = offer.lamport ? deps.prepaid.lamportNow?.() ?? null : null;
+      return ok({ ...quote, crypto: offer.lamport ? { ...offer, lamport: { ...offer.lamport, usd } } : offer });
     }
     if (route === "POST /billing/crypto/quote" || route === "POST /billing/crypto/check" || route === "POST /billing/crypto/transaction") {
       if (!deps.prepaid) return no(404, "the plan cannot be paid in USDC or SOL here.");
@@ -305,7 +309,7 @@ export function api(deps: ApiDeps): (req: ApiRequest) => Promise<ApiResponse> {
         const made = await deps.prepaid.transaction(session, field(req.body, "reference"), field(req.body, "payer"));
         return made.ok ? ok({ transaction: made.transaction }) : no(made.status, made.why);
       }
-      const r = await deps.prepaid.check(session, field(req.body, "reference"));
+      const r = await deps.prepaid.check(session, field(req.body, "reference"), field(req.body, "signatures"));
       return r.ok ? ok(r.result) : no(r.status, r.why);
     }
     if (route === "POST /billing/checkout" || route === "POST /billing/portal") {
