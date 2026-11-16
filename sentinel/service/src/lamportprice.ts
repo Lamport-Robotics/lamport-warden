@@ -25,6 +25,14 @@
  * Taking the lowest can only ask for more tokens, never fewer, so a source that lies about the past cannot
  * lie in a payer's favour further than the price now, on which two have to agree.
  *
+ * How deep. All of that rests on the pool having enough in it that holding its price up costs something.
+ * If what is in it were taken out, or trading moved elsewhere, a few hundred dollars would hold any price
+ * in what was left, and the two sources that read it would agree with each other about it. So each of them
+ * also has to say the pool holds at least LAMPORT_POOL_LEAST_USD, or its word about the pool is not taken;
+ * and when Jupiter, the one source that follows the token wherever it trades, answers and does not agree,
+ * there is no price. That last lets somebody who can mislead Jupiter turn paying in LAMPORT off for a
+ * while. Off is the safe way for this to fail.
+ *
  * What this does not do: a rise older than six hours is the price, and after any rise inside six hours a
  * payer is asked for more tokens than the price of the moment would give. Both are said in the terms.
  *
@@ -38,19 +46,26 @@ import { agreed, type PriceFetch } from "./solprice.js";
 export const LAMPORT_AGREE_WITHIN = 0.05;
 /** The least and the most a LAMPORT is taken to cost: outside these a number is not a price. A dollar a token would be a billion dollars for all of them. */
 const LEAST = 1e-9, MOST = 1;
+/** The least a pool has to hold, in dollars as its sources count it, for its price to be taken as the token's. On 2026-11-16 LAMPORT's held about 19,000. */
+export const LAMPORT_POOL_LEAST_USD = 5_000;
 /** How long a price, or the lack of one, stands before the sources are asked again. */
 export const LAMPORT_KEEP_SECONDS = 30;
 /** How old a price may be and still be shown as "about this many" (never used for an amount to pay). */
 export const LAMPORT_SHOW_SECONDS = 180;
 
-/** What one source said: the price now, and for a source that reads the pool, the price one hour and six hours before (null where it could not be read). */
-export interface LamportAnswer { price: number; before: readonly (number | null)[] }
+/** What one source said: the price now, and for a source that reads the pool, the price one hour and six hours before (null where it could not be read) and what the pool holds in dollars. */
+export interface LamportAnswer { price: number; before: readonly (number | null)[]; depth?: number }
 const NOTHING: LamportAnswer = { price: NaN, before: [] };
+
+/** A number as a source writes one: a number, or its digits in a string. Anything else (nothing, a space, a list, true) is not a number, whatever JavaScript would make of it. */
+export function written(x: unknown): number {
+  if (typeof x === "number") return Number.isFinite(x) ? x : NaN;
+  return typeof x === "string" && /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(x) ? Number(x) : NaN;
+}
 
 /** The price before, from the price now and the change since, in percent. Null when what was reported is not a change. */
 export function before(now: number, percent: unknown): number | null {
-  if (percent === null || percent === undefined || percent === "" || typeof percent === "boolean") return null;
-  const change = Number(percent);
+  const change = written(percent);
   if (!Number.isFinite(change) || change <= -100) return null;
   return now / (1 + change / 100);
 }
@@ -58,17 +73,16 @@ export function before(now: number, percent: unknown): number | null {
 export interface LamportSource { name: string; /** It is asked about the pool, not about the token. */ pool: boolean; url: string; read: (j: any) => LamportAnswer }
 
 export const lamportSources = (mint: string, pool: string): readonly LamportSource[] => [
-  { name: "jupiter", pool: false, url: `https://lite-api.jup.ag/price/v3?ids=${mint}`, read: (j) => ({ price: Number(j?.[mint]?.usdPrice), before: [] }) },
+  { name: "jupiter", pool: false, url: `https://lite-api.jup.ag/price/v3?ids=${mint}`, read: (j) => ({ price: written(j?.[mint]?.usdPrice), before: [] }) },
   {
     name: "geckoterminal", pool: true, url: `https://api.geckoterminal.com/api/v2/networks/solana/pools/${pool}`,
     read: (j) => {
       const d = j?.data, a = d?.attributes;
       // the pool that was asked about, with LAMPORT as the token it prices
       if (!a || a.address !== pool || d?.relationships?.base_token?.data?.id !== `solana_${mint}`) return NOTHING;
-      if (typeof a.base_token_price_usd !== "string" && typeof a.base_token_price_usd !== "number") return NOTHING;
-      const price = Number(a.base_token_price_usd);
+      const price = written(a.base_token_price_usd);
       const change = a.price_change_percentage;
-      return { price, before: [before(price, change?.h1), before(price, change?.h6)] };
+      return { price, before: [before(price, change?.h1), before(price, change?.h6)], depth: written(a.reserve_in_usd) };
     },
   },
   {
@@ -77,17 +91,16 @@ export const lamportSources = (mint: string, pool: string): readonly LamportSour
       const pairs: any[] = Array.isArray(j?.pairs) ? j.pairs : j?.pair ? [j.pair] : [];
       const p = pairs.find((x) => x?.pairAddress === pool);
       if (!p || p.baseToken?.address !== mint) return NOTHING;
-      if (typeof p.priceUsd !== "string" && typeof p.priceUsd !== "number") return NOTHING;
-      const price = Number(p.priceUsd);
+      const price = written(p.priceUsd);
       // DexScreener leaves a period's change out when it has none to give. With no trade in the period the
       // price then was the price now; left out with trades in it, it is not known, and is not guessed.
       const over = (k: "h1" | "h6"): number | null => {
         const c = p.priceChange?.[k];
         if (c !== undefined && c !== null) return before(price, c);
         const t = p.txns?.[k];
-        return t && Number(t.buys) === 0 && Number(t.sells) === 0 ? price : null;
+        return t && t.buys === 0 && t.sells === 0 ? price : null;
       };
-      return { price, before: [over("h1"), over("h6")] };
+      return { price, before: [over("h1"), over("h6")], depth: written(p.liquidity?.usd) };
     },
   },
 ];
@@ -100,8 +113,13 @@ export function lamportPriceFrom(sources: readonly LamportSource[], answers: rea
   const now = agreed(answers.map((a) => a.price), LAMPORT_AGREE_WITHIN, LEAST, MOST);
   if (now === null) throw new Error("the price of LAMPORT could not be established: fewer than two sources agree");
   const agrees = (p: number) => p >= now / (1 + LAMPORT_AGREE_WITHIN) && p <= now * (1 + LAMPORT_AGREE_WITHIN);
-  const pools = answers.filter((a, i) => sources[i]!.pool && agrees(a.price));
-  if (!pools.length) throw new Error("the price of LAMPORT could not be established: no source that reads its pool is among those that agree");
+  // the source that follows the token wherever it trades: when it answers, the pool's price has to be the token's price
+  if (answers.some((a, i) => !sources[i]!.pool && a.price > LEAST && a.price < MOST && !agrees(a.price))) throw new Error("the price of LAMPORT could not be established: its price in its pool is not its price elsewhere");
+  const reads = answers.filter((a, i) => sources[i]!.pool && agrees(a.price));
+  if (!reads.length) throw new Error("the price of LAMPORT could not be established: no source that reads its pool is among those that agree");
+  // and the pool has to hold enough that its price costs something to move: a source that does not say so is not taken at its word about it
+  const pools = reads.filter((a) => a.depth !== undefined && a.depth >= LAMPORT_POOL_LEAST_USD);
+  if (!pools.length) throw new Error("the price of LAMPORT could not be established: its pool holds too little for its price to be relied on");
   const sane = (p: number | null): p is number => p !== null && p >= LEAST && p <= MOST;
   // one of them has to say what it was both an hour and six hours ago; whatever any of them says is counted
   if (!pools.some((a) => a.before.length === 2 && a.before.every(sane))) throw new Error("the price of LAMPORT could not be established: what it was one hour and six hours ago could not be read");

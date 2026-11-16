@@ -558,6 +558,17 @@ function base58(bytes: Uint8Array): string {
   return out;
 }
 const SIGNATURE = /^[1-9A-HJ-NP-Za-km-z]{64,88}$/;
+/** How long a wallet is waited on: to say which account, and then to say what it did with the payment. A popup that was closed, or a wallet that never answers, must not hold the page for good. */
+const WALLET_CONNECT_SECONDS = 120, WALLET_SIGN_SECONDS = 300;
+class WalletSilent extends Error {}
+function within<T>(work: Promise<T>, seconds: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new WalletSilent("the wallet did not answer")), seconds * 1000);
+    work.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+  });
+}
+/** The quotes a payment was announced for on this page: said once, whichever look found it. */
+const announced = new Set<string>();
 /** The payments this tab sent for a quote, by signature: kept for the tab, so that a reload can still look for them. */
 function sentFor(reference: string): string[] {
   try { const kept = JSON.parse(sessionStorage.getItem(`sentinel:sent:${reference}`) ?? "[]"); return Array.isArray(kept) ? kept.filter((x) => typeof x === "string" && SIGNATURE.test(x)).slice(-5) : []; } catch { return []; }
@@ -611,7 +622,7 @@ function quoted(out: HTMLElement, q: PayQuote, holdPicker: (on: boolean) => void
       /** True from the moment the wallet is handed the payment: after that, nothing here may say that nothing was sent. */
       let handed = false;
       try {
-        const { accounts } = await w.features["standard:connect"].connect();
+        const { accounts } = await within<{ accounts: any[] }>(w.features["standard:connect"].connect(), WALLET_CONNECT_SECONDS);
         const account = accounts[0];
         if (!account) throw new Error("the wallet gave no account");
         const made = await call("POST", "/billing/crypto/transaction", { reference: q.reference, payer: account.address });
@@ -619,7 +630,7 @@ function quoted(out: HTMLElement, q: PayQuote, holdPicker: (on: boolean) => void
         let answer: unknown;
         handed = true;
         try {
-          answer = await w.features["solana:signAndSendTransaction"].signAndSendTransaction({ account, chain: "solana:mainnet", transaction: Uint8Array.from(atob(made.body.transaction), (c) => c.charCodeAt(0)) });
+          answer = await within<unknown>(w.features["solana:signAndSendTransaction"].signAndSendTransaction({ account, chain: "solana:mainnet", transaction: Uint8Array.from(atob(made.body.transaction), (c) => c.charCodeAt(0)) }), WALLET_SIGN_SECONDS);
         } catch {
           // A wallet that says no has sent nothing. One that failed after it sent has, and nothing here can
           // tell the two apart: so it is looked for before anybody is asked to pay again.
@@ -632,8 +643,9 @@ function quoted(out: HTMLElement, q: PayQuote, holdPicker: (on: boolean) => void
         if (signature instanceof Uint8Array && signature.length === 64) { sent.push(base58(signature)); keepSent(q.reference, sent); }
         // nothing more is handed to a wallet for this quote while the payment just sent is being looked for
         await watchFor(q, status, 36, known());
-      } catch {
+      } catch (e) {
         if (handed) status.textContent = "That could not be looked up just now. If the wallet sent it, it is not lost: look for it with the button below.";
+        else if (e instanceof WalletSilent) say("The wallet did not answer, and was not asked to pay anything. Open the wallet and try again.", true);
         else say("That did not work. The wallet was not asked for anything.", true);
       } finally { hold(false); }
     });
@@ -670,6 +682,8 @@ function quoted(out: HTMLElement, q: PayQuote, holdPicker: (on: boolean) => void
   })(), Math.max(0, until - Date.now()) + 1500);
 }
 
+/** What somebody is told whose payment is at the treasury in full and did not come as their wallet's own transfer. */
+const HELD = "The full amount arrived, but not as a transfer the paying wallet made itself: it came through a program, as from a multisig wallet. That is not counted by itself. Nothing is lost: write to support@lamportrobotics.com and it is counted by hand, or sent back.";
 /** For how long after an amount ran out it is still asked about, and how often: the service counts a payment up to five minutes late, and the chain takes a little to make one final. */
 const TRAIL_SECONDS = 360, TRAIL_EVERY_SECONDS = 60;
 /**
@@ -682,18 +696,24 @@ async function trail(q: PayQuote, signatures: () => string[]): Promise<void> {
     await new Promise((res) => setTimeout(res, TRAIL_EVERY_SECONDS * 1000));
     const r = await call("POST", "/billing/crypto/check", { reference: q.reference, signatures: signatures().slice(-5) });
     const s = r.status === 200 ? r.body?.status : null;
-    if (s === "paid") { say(`Paid: the payment made on the earlier amount was found. Your plan runs until ${dayOf(Number(r.body.until))}. Do not pay the amount shown now.`); await refresh(); return; }
+    if (s === "paid") {
+      if (!announced.has(q.reference)) { announced.add(q.reference); say(`Paid: the payment made on the earlier amount was found. Your plan runs until ${dayOf(Number(r.body.until))}. If another amount is shown now, do not pay it.`); }
+      await refresh();
+      return;
+    }
+    if (s === "held") { say(`A payment on the earlier amount: ${HELD}`, true); return; }
     if (s === "short" || s === "late") { say(`A payment on the earlier amount arrived ${s === "short" ? "short" : "after it had run out"} and was not counted. Write to support@lamportrobotics.com to have it sent back or counted.`, true); return; }
   }
 }
 
 /** Asks the service whether the payment has arrived, every five seconds, so many times, and says what it found. A payment counts when the chain has made it final, which takes about a quarter of a minute. `signatures`: the payments this page knows were sent for it. */
-async function watchFor(q: PayQuote, status: HTMLElement, times: number, signatures: string[] = [], notThere = "Not there yet. A payment counts once the chain has made it final; look again in a minute. The service also looks by itself every hour, and tells your alert channels when it finds it."): Promise<"paid" | "short" | "late" | "waiting" | "unread"> {
+async function watchFor(q: PayQuote, status: HTMLElement, times: number, signatures: string[] = [], notThere = "Not there yet. A payment counts once the chain has made it final; look again in a minute. The service also looks by itself every hour, and tells your alert channels when it finds it."): Promise<"paid" | "short" | "late" | "held" | "waiting" | "unread"> {
   for (let i = 0; i < times; i++) {
     status.textContent = "Looking for the payment on the chain…";
     const r = await call("POST", "/billing/crypto/check", { reference: q.reference, signatures: signatures.slice(-5) });
     const s = r.status === 200 ? r.body?.status : null;
-    if (s === "paid") { status.textContent = ""; say(`Paid. Your plan runs until ${dayOf(Number(r.body.until))}.`); await refresh(); return "paid"; }
+    if (s === "paid") { status.textContent = ""; if (!announced.has(q.reference)) { announced.add(q.reference); say(`Paid. Your plan runs until ${dayOf(Number(r.body.until))}.`); } await refresh(); return "paid"; }
+    if (s === "held") { status.textContent = HELD; return "held"; }
     if (s === "short") { status.textContent = `A payment arrived that is short: ${(q.asset === "LAMPORT" ? grouped : decimal)(BigInt(r.body.arrived), q.decimals)} ${q.asset} of ${(q.asset === "LAMPORT" ? grouped : decimal)(BigInt(r.body.wanted), q.decimals)}. Nothing was started. Write to support@lamportrobotics.com from the Terms page to have it sent back, or send the full amount.`; return "short"; }
     if (s === "late") { status.textContent = `A payment arrived after this price in ${q.asset} had run out, so it was not counted. Write to support@lamportrobotics.com to have it sent back or counted.`; return "late"; }
     if (r.status !== 200) { status.textContent = String(r.body?.error ?? "That could not be looked up just now."); return "unread"; }

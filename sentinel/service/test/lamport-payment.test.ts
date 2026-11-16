@@ -15,7 +15,7 @@ import { Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana
 import { LAMPORT_MINT, configFrom } from "../src/main.js";
 import { Accounts } from "../src/accounts.js";
 import { LAMPORT_TERMS, grouped, lamportTerms, prepaidTerms } from "../src/plans.js";
-import { LamportPrice, before, lamportFor } from "../src/lamportprice.js";
+import { LAMPORT_POOL_LEAST_USD, LamportPrice, before, lamportFor, written } from "../src/lamportprice.js";
 import { Prepaid, SOL_QUOTE_GRACE_SECONDS, SOL_QUOTE_SECONDS, arrived, paymentInstruction, sentPlainly, tokenAccountOf } from "../src/prepaid.js";
 import type { PriceFetch } from "../src/solprice.js";
 import { fromRpc } from "../src/observed.js";
@@ -245,14 +245,14 @@ describe("the price of LAMPORT", () => {
   const SOL = "So11111111111111111111111111111111111111112";
   // the three sources' answers, in the shapes they gave on 2026-11-16: Jupiter about the token, the other two about the pool
   const jupiter = (p: number | null) => (p === null ? {} : { [LAMPORT_MINT]: { usdPrice: p, liquidity: 9451.88, decimals: 6, priceChange24h: -17.04 } });
-  const gecko = (p: number | null, change: unknown = { m5: "0", h1: "-3.118", h6: "-20.752", h24: "-16.082" }, o: { pool?: string; base?: string } = {}) => (p === null ? { errors: [{ status: "404", title: "Not Found" }] } : {
+  const gecko = (p: number | null, change: unknown = { m5: "0", h1: "-3.118", h6: "-20.752", h24: "-16.082" }, o: { pool?: string; base?: string; usd?: unknown } = {}) => (p === null ? { errors: [{ status: "404", title: "Not Found" }] } : {
     data: {
       id: `solana_${o.pool ?? POOL}`,
-      attributes: { address: o.pool ?? POOL, base_token_price_usd: String(p), quote_token_price_usd: "71.17", price_change_percentage: change, reserve_in_usd: "18730.1295" },
+      attributes: { address: o.pool ?? POOL, base_token_price_usd: String(p), quote_token_price_usd: "71.17", price_change_percentage: change, reserve_in_usd: "usd" in o ? o.usd : "18730.1295" },
       relationships: { base_token: { data: { id: `solana_${o.base ?? LAMPORT_MINT}` } }, quote_token: { data: { id: `solana_${SOL}` } }, dex: { data: { id: "raydium" } } },
     },
   });
-  const pair = (p: number, change: unknown, o: { pool?: string; base?: string; txns?: unknown; usd?: number } = {}) => ({ chainId: "solana", dexId: "raydium", pairAddress: o.pool ?? POOL, baseToken: { address: o.base ?? LAMPORT_MINT }, quoteToken: { address: SOL }, priceUsd: String(p), priceChange: change, txns: o.txns ?? { h1: { buys: 2, sells: 3 }, h6: { buys: 8, sells: 13 } }, liquidity: { usd: o.usd ?? 18880.38 } });
+  const pair = (p: number, change: unknown, o: { pool?: string; base?: string; txns?: unknown; usd?: unknown } = {}) => ({ chainId: "solana", dexId: "raydium", pairAddress: o.pool ?? POOL, baseToken: { address: o.base ?? LAMPORT_MINT }, quoteToken: { address: SOL }, priceUsd: String(p), priceChange: change, txns: o.txns ?? { h1: { buys: 2, sells: 3 }, h6: { buys: 8, sells: 13 } }, liquidity: { usd: "usd" in o ? o.usd : 18880.38 } });
   const dex = (p: number | null, change: unknown = { h1: -2.14, h6: -23.98, h24: -17.07 }, o: Parameters<typeof pair>[2] = {}, first: unknown[] = []) => (p === null ? { schemaVersion: "1.0.0", pairs: null, pair: null } : { schemaVersion: "1.0.0", pairs: [...first, pair(p, change, o)] });
   const QUIET = { h1: { buys: 0, sells: 0 }, h6: { buys: 0, sells: 0 } };
   function priced(answers: { jupiter?: unknown; gecko?: unknown; dex?: unknown; down?: string[] }) {
@@ -281,8 +281,8 @@ describe("the price of LAMPORT", () => {
     expect(p.asked()).toBe(6);
     // two of the three are asked about the pool by its address, and not about the token
     expect(p.urls.slice(0, 3).sort()).toEqual([`https://api.dexscreener.com/latest/dex/pairs/solana/${POOL}`, `https://api.geckoterminal.com/api/v2/networks/solana/pools/${POOL}`, `https://lite-api.jup.ag/price/v3?ids=${LAMPORT_MINT}`]);
-    // one of three that is wrong does not set it: the other two stand, and of the two the lower is what it cost before
-    expect(await priced({ jupiter: jupiter(0.9), gecko: gecko(0.00005, flat.gecko), dex: dex(0.000051, flat.dex) }).price.usd()).toBeCloseTo(0.00005, 12);
+    // one of the two that read the pool being wrong does not set it: the other and Jupiter stand, and of the two the lower is what it cost before
+    expect(await priced({ jupiter: jupiter(0.000051), gecko: gecko(0.00005, flat.gecko), dex: dex(0.0009, flat.dex) }).price.usd()).toBeCloseTo(0.00005, 12);
   });
 
   it("is the lowest of the price now, an hour ago and six hours ago: a price pushed up for a while buys nothing", async () => {
@@ -305,17 +305,45 @@ describe("the price of LAMPORT", () => {
 
   it("is read from LAMPORT's own pool: a second pool that somebody makes cannot set it", async () => {
     // a pool with only LAMPORT in it at ten times the price: deeper to look at, and the token's price to a source that picks by depth.
-    // Jupiter is taken in; asked about the pool, the other two still answer about the pool
-    expect(await priced({ jupiter: jupiter(0.0005), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex) }).price.usd()).toBeCloseTo(0.00005, 12);
-    // an answer about another pool is no answer, whatever it says and however deep it looks
+    // An answer about another pool is no answer, whatever it says and however deep it looks
     await none({ jupiter: jupiter(0.0005), gecko: gecko(0.0005, flat.gecko, { pool: OTHER_POOL }), dex: dex(0.0005, flat.dex, { pool: OTHER_POOL, usd: 900_000 }) });
+    // listed first and deeper, beside the real one: the real one is the one read
     const deeper = pair(0.0005, flat.dex, { pool: OTHER_POOL, usd: 900_000 });
-    expect(await priced({ jupiter: jupiter(0.0005), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex, {}, [deeper]) }).price.usd()).toBeCloseTo(0.00005, 12);
+    expect(await priced({ jupiter: jupiter(0.00005), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex, {}, [deeper]) }).price.usd()).toBeCloseTo(0.00005, 12);
+    // Jupiter taken in by it: the pool's price is not then given as the token's, and the made pool's price never is. Off, not wrong
+    await none({ jupiter: jupiter(0.0005), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex) });
     // nor is one about the pool with LAMPORT as the other side of it, where the price given is the other token's
     await none({ jupiter: jupiter(71), gecko: gecko(71, flat.gecko, { base: SOL }), dex: dex(71, flat.dex, { base: SOL }) });
     // and the past is read from the pool too: no other pool's quiet hour stands in for this one's rise
     const quiet = pair(0.00015, {}, { pool: OTHER_POOL, usd: 900_000, txns: QUIET });
     expect(await priced({ jupiter: jupiter(0.00015), gecko: gecko(0.00015, { h1: "200", h6: "200" }), dex: dex(0.00015, { h1: 200, h6: 200 }, {}, [quiet]) }).price.usd()).toBeCloseTo(0.00005, 12);
+  });
+
+  it("is the pool's price only while the pool holds enough for a price to cost something, and while the token costs the same elsewhere", async () => {
+    // what was in the pool has been taken out and its price is held at ten times: the two that read it agree with each other, and that is not enough
+    await none({ jupiter: jupiter(0.00005), gecko: gecko(0.0005, flat.gecko), dex: dex(0.0005, flat.dex) });                                         // Jupiter, which follows the token, says otherwise
+    await none({ jupiter: jupiter(null), gecko: gecko(0.0005, flat.gecko, { usd: "310.20" }), dex: dex(0.0005, flat.dex, { usd: 305 }), down: ["jupiter"] }); // and with Jupiter away, the pool is too thin to be believed
+    await none({ jupiter: jupiter(0.0005), gecko: gecko(0.0005, flat.gecko, { usd: "310.20" }), dex: dex(0.0005, flat.dex, { usd: 305 }) });           // even if Jupiter has come to agree with it
+    // a source that does not say what the pool holds is not taken at its word about the pool
+    for (const usd of [undefined, null, "", " ", "deep", [9e9], true]) await none({ jupiter: jupiter(0.00005), gecko: gecko(0.00005, flat.gecko, { usd }), dex: dex(0.00005, flat.dex, { usd }) });
+    // one of the two says enough is there: its word is the one used
+    expect(await priced({ jupiter: jupiter(0.0001), gecko: gecko(0.0001, { h1: "0", h6: "0" }, { usd: "12" }), dex: dex(0.0001, { h1: 100, h6: 0 }) }).price.usd()).toBeCloseTo(0.00005, 12);
+    expect(await priced({ jupiter: jupiter(0.0001), gecko: gecko(0.0001, { h1: "0", h6: "0" }), dex: dex(0.0001, { h1: 100, h6: 0 }, { usd: 12 }) }).price.usd()).toBeCloseTo(0.0001, 12);
+    // at the least it has to hold, it holds enough
+    expect(await priced({ jupiter: jupiter(0.00005), gecko: gecko(0.00005, flat.gecko, { usd: String(LAMPORT_POOL_LEAST_USD) }), dex: dex(0.00005, flat.dex, { usd: LAMPORT_POOL_LEAST_USD - 1 }) }).price.usd()).toBeCloseTo(0.00005, 12);
+    // a number Jupiter gives that cannot be a price is no answer from it, and vetoes nothing
+    expect(await priced({ jupiter: jupiter(40), gecko: gecko(0.00005, flat.gecko), dex: dex(0.00005, flat.dex) }).price.usd()).toBeCloseTo(0.00005, 12);
+  });
+
+  it("reads a number only where a number is written", async () => {
+    for (const x of [null, undefined, "", " ", "1e", "0x10", "12px", [], [3], ["3"], {}, true, false, NaN, Infinity]) expect(written(x), JSON.stringify(x) ?? String(x)).toBeNaN();
+    for (const [x, n] of [[3, 3], ["3", 3], ["-3.118", -3.118], ["0", 0], ["5.04e-5", 0.0000504], [-2.14, -2.14]] as const) expect(written(x)).toBe(n);
+    // a change that is a space or an empty list is not "no change": during a rise it would have hidden the rise
+    for (const blank of [" ", [], [0], ""]) await none({ jupiter: jupiter(0.00015), gecko: gecko(0.00015, { h1: blank, h6: blank }), dex: dex(null), down: ["dex"] });
+    // nor are trade counts that are not counts "no trades"
+    for (const txns of [{ h1: { buys: null, sells: null }, h6: { buys: null, sells: null } }, { h1: { buys: "0", sells: "0" }, h6: { buys: "0", sells: "0" } }, { h1: {}, h6: {} }]) await none({ jupiter: jupiter(0.00015), gecko: gecko(null), dex: dex(0.00015, {}, { txns }), down: ["gecko"] });
+    // and a price in a list is not a price
+    await none({ jupiter: { [LAMPORT_MINT]: { usdPrice: [0.00005] } }, gecko: gecko(0.00005, flat.gecko), dex: dex(null), down: ["dex"] });
   });
 
   it("does not hang on any one source: either of the two that read the pool can say what it was before", async () => {
@@ -346,6 +374,8 @@ describe("the price of LAMPORT", () => {
     // and a number that cannot be a price is not one: nothing, or a dollar and more for a token there are a billion of
     await none({ jupiter: jupiter(0), gecko: gecko(0, flat.gecko), dex: dex(0, flat.dex) });
     await none({ jupiter: jupiter(999), gecko: gecko(999, flat.gecko), dex: dex(999, flat.dex) });
+    // one of the three wrong in a way that could be a price: Jupiter, which follows the token, is not outvoted by the two that read the pool
+    await none({ jupiter: jupiter(0.9), gecko: gecko(0.00005, flat.gecko), dex: dex(0.000051, flat.dex) });
   });
 
   it("asks once for everybody who is waiting, and remembers that there was no price as long as it remembers one", async () => {
@@ -495,11 +525,25 @@ describe("a payment in LAMPORT", () => {
     s.chain.did({ references: [q.reference], first: [transfer(TOKENS(25_000), TREASURY_ACCOUNT, key(78), false)], balances: [[key(78).toBase58(), TOKENS(300_000), TOKENS(275_000)], rise] });
     // a transfer the payer did sign, to somebody else's account, beside such a rise
     s.chain.did({ references: [q.reference], first: [transfer(TOKENS(25_000), tokenAccountOf(key(77), MINT, TOKEN_2022).toBase58())], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(275_000), PAYER_ACCOUNT], rise] });
-    expect(await s.check(q.reference)).toEqual({ status: "waiting" });
+    // Not counted, and not "nothing is there yet" either: the whole amount is at the treasury, and whoever paid it
+    // through a program (a multisig, say) is told what happened and what to do, at this look and at every later one
+    const held = { status: "held", arrived: TOKENS(25_000).toString(), wanted: TOKENS(25_000).toString() };
+    expect(await s.check(q.reference)).toEqual(held);
+    expect(await s.check(q.reference)).toEqual(held);
     expect(s.accounts.profile(s.profile)?.tier).toBe("watch");
-    // half sent plainly and half paid in by a program: short by that half
+    // half sent plainly and half paid in by a program: still not counted, and still said
     s.chain.did({ references: [q.reference], first: [transfer(TOKENS(12_500), TREASURY_ACCOUNT)], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(287_500), PAYER_ACCOUNT], rise] });
-    expect(await s.check(q.reference)).toMatchObject({ status: "short", arrived: TOKENS(12_500).toString() });
+    expect(await s.check(q.reference)).toEqual(held);
+    // (where less than the amount arrived at all, it is short, as it always was)
+    const other = await s.quoted(3);
+    s.chain.did({ references: [other.reference], first: [transfer(TOKENS(10), TREASURY_ACCOUNT)], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(299_990), PAYER_ACCOUNT], [TREASURY, 0n, TOKENS(10), TREASURY_ACCOUNT]] });
+    expect(await s.check(other.reference)).toMatchObject({ status: "short", arrived: TOKENS(10).toString() });
+    // Token-2022's transfer that names its fee, with none, is the payer's own transfer too
+    const withFee = Buffer.alloc(19); withFee[0] = 26; withFee[1] = 1; withFee.writeBigUInt64LE(TOKENS(75_000), 2); withFee[10] = 6;
+    const named = transfer(0n, TREASURY_ACCOUNT); named.data = withFee;
+    const feeNamed = s.chain.did({ references: [other.reference], first: [named], balances: [[payer.toBase58(), TOKENS(300_000), TOKENS(225_000), PAYER_ACCOUNT], [TREASURY, 0n, TOKENS(75_000), TREASURY_ACCOUNT]] });
+    expect(sentPlainly(fromRpc("x", s.chain.txs.find((t) => t.signature === feeNamed)!.result)!, TREASURY, LAMPORT_MINT)).toBe(TOKENS(75_000));
+    expect(await s.check(other.reference)).toMatchObject({ status: "paid" });
     // read from the instructions at the top of each, beside what the balances say
     const tx = (n: number) => fromRpc("x", s.chain.txs[n]!.result)!;
     expect([0, 1, 2, 3].map((n) => sentPlainly(tx(n), TREASURY, LAMPORT_MINT))).toEqual([0n, 0n, 0n, TOKENS(12_500)]);

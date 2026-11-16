@@ -80,7 +80,9 @@ export interface QuoteView {
   /** For a token: the token account of `payTo` that the payment lands in. A wallet's prompt, and Warden's, name this address and not `payTo`. */
   account: string | null;
 }
-export type CheckView = { status: "waiting" } | { status: "paid"; until: number } | { status: "short"; arrived: string; wanted: string } | { status: "late" };
+export type CheckView = { status: "waiting" } | { status: "paid"; until: number } | { status: "short"; arrived: string; wanted: string } | { status: "late" }
+  /** The whole amount is at the treasury, and did not come as a transfer its sender made (it came through a program): not counted by itself, and said so, so that nobody waits for it. */
+  | { status: "held"; arrived: string; wanted: string };
 
 const ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -178,10 +180,11 @@ export function arrived(tx: ObservedTx, payTo: string, asset: PayAsset, usdcMint
  * and no more than what was sent to it plainly. A payment made through a program (a multisig, say) is not
  * counted by itself for the same reason, and is counted by hand.
  */
-export function sentPlainly(tx: ObservedTx, payTo: string, mint: string): bigint {
+export function sentPlainly(tx: ObservedTx, payTo: string, mint: string): bigint | null {
   if (tx.failed) return 0n;
+  // (null: its instructions could not be read. That is not "nothing was sent", and is not remembered as that.)
   const read = decode(tx, "");
-  if (!read) return 0n;
+  if (!read) return null;
   const keys = accountKeys(tx);
   const theirs = new Set(tx.postTokenBalances.filter((b) => b.owner === payTo && b.mint === mint).map((b) => keys[b.accountIndex]));
   let sum = 0n;
@@ -189,11 +192,13 @@ export function sentPlainly(tx: ObservedTx, payTo: string, mint: string): bigint
     if (ix.program !== TOKEN_PROGRAM.toBase58() && ix.program !== TOKEN_2022_PROGRAM.toBase58()) continue;
     const d = ix.data, a = ix.accounts;
     // Transfer (3): from, to, the one who signs. TransferChecked (12): from, the token, to, the one who signs.
+    // And Token-2022's transfer that names its fee (26, 1), with the same accounts, which a token without a fee takes too.
     const checked = d[0] === 12 && d.length >= 10 && a.length >= 4, plain = d[0] === 3 && d.length >= 9 && a.length >= 3;
-    if (!checked && !plain) continue;
-    const to = a[checked ? 2 : 1], by = a[checked ? 3 : 2];
+    const withFee = d[0] === 26 && d[1] === 1 && d.length >= 19 && a.length >= 4;
+    if (!checked && !plain && !withFee) continue;
+    const to = a[plain ? 1 : 2], by = a[plain ? 2 : 3];
     if (!to || !by || !theirs.has(to) || !read.signers.includes(by)) continue;
-    sum += Buffer.from(d.buffer, d.byteOffset, d.byteLength).readBigUInt64LE(1);
+    sum += Buffer.from(d.buffer, d.byteOffset, d.byteLength).readBigUInt64LE(withFee ? 2 : 1);
   }
   return sum;
 }
@@ -215,10 +220,10 @@ export class Prepaid {
    * `${reference}:${signature}`: a transaction is nothing toward one quote and may be the payment of another.
    * Lost on a restart, which costs the reads again.
    */
-  private seen = new Map<string, { got: bigint; late: boolean }>();
-  private note(intent: PayIntent, signature: string, got: bigint, late = false): void {
+  private seen = new Map<string, { got: bigint; late: boolean; /** What arrived in full and was not sent plainly, where that is why it was not counted. */ held: bigint }>();
+  private note(intent: PayIntent, signature: string, got: bigint, late = false, held = 0n): void {
     if (this.seen.size >= 50_000) this.seen.clear();
-    this.seen.set(`${intent.reference}:${signature}`, { got, late });
+    this.seen.set(`${intent.reference}:${signature}`, { got, late, held });
   }
   private lines = new Map<string, Promise<unknown>>();
   /** Looks at one quote take turns. Looks at different quotes do not wait for each other. */
@@ -443,11 +448,17 @@ export class Prepaid {
       if (tx === "unread") { unread += 1; continue; }
       if (tx === null || tx === "nothing") continue;
       // (at the wallet and in the token the quote was made for: for LAMPORT, the treasury's, as they were then)
-      let got = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);
+      const came = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);
+      let got = came;
       // (the treasury has other business than taking payments: there, no more than what was sent to it plainly)
-      if (intent.asset === "LAMPORT" && got > 0n) { const plainly = sentPlainly(tx, intent.payTo ?? this.cfg.payTo, intent.mint ?? this.mint); if (plainly < got) got = plainly; }
+      if (intent.asset === "LAMPORT" && got > 0n) {
+        const plainly = sentPlainly(tx, intent.payTo ?? this.cfg.payTo, intent.mint ?? this.mint);
+        if (plainly === null) { unread += 1; continue; }
+        if (plainly < got) got = plainly;
+      }
       // nothing, short, or late: read once and remembered, so that what cannot be counted is not read at every look
-      if (got < BigInt(intent.units)) { this.note(intent, signature, got > 0n ? got : 0n); continue; }
+      // (and where the whole amount did arrive, and only the manner of it keeps it from counting, that is remembered too: the payer is told, and does not wait)
+      if (got < BigInt(intent.units)) { this.note(intent, signature, got > 0n ? got : 0n, false, came >= BigInt(intent.units) ? came : 0n); continue; }
       // a price in SOL or in LAMPORT holds for ten minutes: a payment made after that was made at another price
       if (intent.asset !== "USDC" && (tx.blockTime ?? this.now()) > intent.expiresAt + SOL_QUOTE_GRACE_SECONDS) { this.note(intent, signature, got, true); continue; }
       const now = this.now();
@@ -462,8 +473,10 @@ export class Prepaid {
     let best: CheckView = { status: "waiting" };
     for (const signature of new Set([...(intent.sent ?? []), ...(list ?? [])])) {
       const was = this.seen.get(`${intent.reference}:${signature}`);
-      if (!was || was.got <= 0n || this.accounts.credited(signature)) continue;
+      if (!was || (was.got <= 0n && was.held <= 0n) || this.accounts.credited(signature)) continue;
       if (was.late) best = { status: "late" };
+      else if (best.status === "late") continue;
+      else if (was.held > 0n) best = { status: "held", arrived: was.held.toString(), wanted: intent.units };
       else if (best.status === "waiting" || (best.status === "short" && BigInt(best.arrived) < was.got)) best = { status: "short", arrived: was.got.toString(), wanted: intent.units };
     }
     // "nothing is there yet" is not said of a chain that did not answer, or of a transaction that could not be read

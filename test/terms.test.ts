@@ -56,9 +56,12 @@ describe("the terms", () => {
     expect(prepaid).toContain('expiresAt: now + (asset === "USDC" ? USDC_QUOTE_SECONDS : SOL_QUOTE_SECONDS)');
     expect(prepaid).toContain('if (intent.asset !== "USDC" && (tx.blockTime ?? this.now()) > intent.expiresAt + SOL_QUOTE_GRACE_SECONDS)');
     expect(text).toContain("It counts, like a payment in USDC, when the chain has made it final and the amount that arrived at the treasury wallet is at least the amount shown.");
-    expect(prepaid).toContain("let got = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);");
+    expect(prepaid).toContain("const came = arrived(tx, intent.payTo ?? this.cfg.payTo, intent.asset, intent.mint ?? this.mint);");
     // at the treasury, which has other business: no more than what its sender sent it plainly
-    expect(prepaid).toContain('if (intent.asset === "LAMPORT" && got > 0n) { const plainly = sentPlainly(tx, intent.payTo ?? this.cfg.payTo, intent.mint ?? this.mint); if (plainly < got) got = plainly; }');
+    expect(prepaid).toContain("const plainly = sentPlainly(tx, intent.payTo ?? this.cfg.payTo, intent.mint ?? this.mint);");
+    expect(prepaid).toContain("if (plainly < got) got = plainly;");
+    // and a pool with too little in it, or a price that is not the token's price elsewhere, is no price
+    expect(price).toContain("const pools = reads.filter((a) => a.depth !== undefined && a.depth >= LAMPORT_POOL_LEAST_USD);");
     expect(text).toContain("The service looks for a payment while the Sentinel page is open and, by itself, about once an hour for three days after it was last asked about, so it does not depend on the page staying open.");
     expect(prepaid).toContain("SWEEP_SECONDS = 3 * 86_400");
     expect(read("sentinel", "service", "src", "main.ts")).toContain("await prepaid.sweep()");

@@ -643,6 +643,13 @@ of the customer and the subscription.
       the change over those periods; at least one that agrees about the price now has to give both, and
       what either gives is counted. A change that cannot be read is not taken for no change. When nobody
       can say, there is no price and no amount in LAMPORT is shown; USDC needs no price and always is.
+    - How deep. All of that rests on the pool holding enough that moving its price costs something. Each
+      of the two that read the pool also has to say it holds at least `LAMPORT_POOL_LEAST_USD` ($5,000;
+      it held about $19,000 on 2026-11-16), or its word about the pool is not taken. And when Jupiter,
+      which follows the token wherever it trades, answers and does not agree with the pool's price, there
+      is no price. So if what is in the pool is taken out, or trading moves, paying in LAMPORT goes off
+      by itself until `SENTINEL_LAMPORT_POOL` names where it went. Somebody who can mislead Jupiter can
+      turn it off for a while the same way; off is the safe way for this to fail.
     - What that does not do. A rise that has stood for six hours is the price. After any rise inside six
       hours a payer is asked for more tokens than the price of the moment would give (the terms say so).
       All three sources read the same chain, so "two agree" guards against a source being wrong, not
@@ -674,8 +681,12 @@ of the customer and the subscription.
     instruction (an order of the treasury's own being filled, a claim, a stream paying out): a
     transaction like that which named a quote would show a rise the treasury itself paid for. A program
     moves tokens inside its own instruction, so that is not counted. Nor, for the same reason, is a
-    payment made through a program such as a multisig: it is counted by hand. A payment that is short or
-    late starts nothing and is said to be; sending it back is done by hand from the treasury.
+    payment made through a program such as a multisig: it is counted by hand, and whoever made it is not
+    left waiting. The answer to "has it arrived" is then `held`: the whole amount is at the treasury and
+    was not sent plainly, with what to do about it. One shape still passes: the payer sends plainly, and
+    in the same transaction a program pays the treasury's own SOL out for it. That needs the treasury to
+    have such an order open, so the treasury keeps no open orders that anyone can fill. A payment that is
+    short or late starts nothing and is said to be; sending it back is done by hand from the treasury.
   - A send typed into a wallet by hand names no quote, and nothing on the chain says whose it is: it is
     never found, with or without its signature. The page and the terms say so before anybody pays (the
     same has always held for USDC and SOL, and was not said). Whoever does it anyway writes to support.
