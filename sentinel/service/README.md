@@ -636,6 +636,13 @@ of the customer and the subscription.
     agree, there is no price and no amount in LAMPORT is shown; USDC needs no price and always is. Taking
     the lower can only ask for more tokens, so after the token has risen within the hour a payer is asked
     for the amount at the earlier, lower price.
+  - The amount follows the price by itself, on the service and on the page. Every amount asked for is
+    worked out from the price at that moment. With what it offers, the service gives the page LAMPORT's
+    price now (`lamportNow`), and the page shows about how many tokens the plan comes to, again each time
+    it draws itself (every twenty seconds): an estimate, which binds nobody. An amount that was shown and
+    ran out with nothing paid on it is brought up to date by the page itself, after one look for a payment
+    on the old one: three times running while the page is being looked at, and after that on asking. The
+    same goes for an amount in SOL. An amount a payment is being looked for on is left as it is.
   - A quote keeps the wallet, the token and the decimals it was made for. A payment made on it is counted
     against those, whatever the settings are by then: moving the treasury, changing the number or switching
     LAMPORT off does not strand a payment that was already asked for.

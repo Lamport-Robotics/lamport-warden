@@ -356,20 +356,48 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     paidUntil = null;
     let release: () => void = () => undefined;
     const waitingOnChain = new Promise<void>((r) => { release = r; });
+    // what a LAMPORT costs, as the service gives it to the page each time the page asks: it moves during the test
+    let lamportUsd: number | null = 0.0004;
+    // the first amount asked for runs out two seconds after it is shown; the one after it holds
+    const STALE_REFERENCE = "3n6Qqs1Ws1cXWpJ1nkiVwWvT7pZTnXgLQ9eVV2Zb2Zb6";
+    let lamportQuotes = 0;
     apiDeps.prepaid = {
       offer: () => ({ payTo: PAY_TO, assets: ["USDC", "SOL", "LAMPORT"], months: [1, 3, 12], lamport: { payTo: TREASURY } }),
-      quote: async (_profile, asset, months) => { asked.push(["quote", asset, months]); return { ok: true, quote: { reference: LAMPORT_REFERENCE, payTo: TREASURY, asset: "LAMPORT", units: "25000000000", decimals: 6, mint: LAMPORT, months: months as number, cents: 1000, expiresAt: Math.floor(Date.now() / 1000) + 600, url: `solana:${TREASURY}?amount=25000&spl-token=${LAMPORT}&reference=${LAMPORT_REFERENCE}`, account: TREASURY_ACCOUNT } }; },
+      lamportNow: async () => lamportUsd,
+      quote: async (_profile, asset, months) => {
+        asked.push(["quote", asset, months]);
+        const first = ++lamportQuotes === 1;
+        const reference = first ? STALE_REFERENCE : LAMPORT_REFERENCE, tokens = first ? 30_000 : 25_000;
+        return { ok: true, quote: { reference, payTo: TREASURY, asset: "LAMPORT", units: `${tokens}000000`, decimals: 6, mint: LAMPORT, months: months as number, cents: 1000, expiresAt: Math.floor(Date.now() / 1000) + (first ? 2 : 600), url: `solana:${TREASURY}?amount=${tokens}&spl-token=${LAMPORT}&reference=${reference}`, account: TREASURY_ACCOUNT } };
+      },
       transaction: async (_profile, reference, payer) => { asked.push(["transaction", reference, payer]); return { ok: true, transaction: Buffer.from(inLamport).toString("base64") }; },
       // the first look is held until the test lets it go: the chain has not made the payment final yet
-      check: async (_profile, reference, signatures) => { asked.push(["check", reference, signatures]); await waitingOnChain; return { ok: true, result: paidUntil ? { status: "paid", until: paidUntil } : { status: "waiting" } }; },
+      check: async (_profile, reference, signatures) => {
+        asked.push(["check", reference, signatures]);
+        if (reference !== LAMPORT_REFERENCE) return { ok: true, result: { status: "waiting" } }; // nothing was paid on the amount that ran out
+        await waitingOnChain;
+        return { ok: true, result: paidUntil ? { status: "paid", until: paidUntil } : { status: "waiting" } };
+      },
     };
     await page.reload();
     await expect.poll(() => ahead.count(), { timeout: 10_000 }).toBe(1);
     expect(await ahead.getByLabel("Pay in").locator("option").allInnerTexts()).toEqual(["USDC", "SOL", "LAMPORT"]);
+    // Before anything is asked for, the page says about how many tokens the plan comes to at the price now:
+    // ten dollars a month for this holder, at four hundredths of a cent a token. Nothing of it for USDC.
+    expect(await ahead.locator(".about").isHidden()).toBe(true);
     await ahead.getByLabel("Pay in").selectOption("LAMPORT");
+    expect(await ahead.locator(".about").innerText()).toBe("About 25,000 LAMPORT for a month at its price now. It follows the price: the exact amount is shown before you pay, and holds for ten minutes.");
+    await ahead.getByLabel("For how long").selectOption("3");
+    expect(await ahead.locator(".about").innerText()).toContain("About 75,000 LAMPORT for 3 months at its price now.");
+    await ahead.getByLabel("For how long").selectOption("1");
+    // An amount is asked for, and runs out with nothing paid on it: the page looks once for a payment on it,
+    // and then brings the amount up to date by itself, saying that it did.
     await ahead.getByRole("button", { name: "Show the amount" }).click();
-    await expect.poll(() => ahead.locator(".quote").innerText().catch(() => ""), { timeout: 8000 }).toContain(`Send exactly 25,000 LAMPORT to ${TREASURY}, Lamport's treasury wallet.`);
+    await expect.poll(() => ahead.locator(".quote").innerText().catch(() => ""), { timeout: 8000 }).toContain(`Send exactly 30,000 LAMPORT to ${TREASURY}, Lamport's treasury wallet.`);
     expect(asked[0]).toEqual(["quote", "LAMPORT", 1]);
+    await expect.poll(() => ahead.locator(".quote").innerText().catch(() => ""), { timeout: 12_000 }).toContain(`The price of LAMPORT moved on, and this is the amount now. Send exactly 25,000 LAMPORT to ${TREASURY}, Lamport's treasury wallet.`);
+    expect(asked.map((a) => a[0])).toEqual(["quote", "check", "quote"]);
+    expect(asked[1]).toEqual(["check", STALE_REFERENCE, []]);
     expect(await ahead.locator(".quote code.addr").allInnerTexts()).toEqual([TREASURY, TREASURY_ACCOUNT]);
     expect(await ahead.locator(".quote").innerText()).toContain("Warden gives the amount in the token's smallest units, a million to a token: 25000000000.");
     // what the ten dollars pay for, how they became tokens, where the tokens go and what becomes of them; and how long the amount holds
@@ -393,7 +421,8 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     // While the payment is being looked for, nothing more is handed to a wallet and no other amount can be shown;
     // and the service was given the signature the wallet returned, to look for it by.
     await expect.poll(() => asked.some((a) => a[0] === "check"), { timeout: 8000 }).toBe(true);
-    expect((asked.find((a) => a[0] === "check") as unknown[])[2]).toEqual(["1".repeat(64)]);
+    await expect.poll(() => asked.some((a) => a[0] === "check" && a[1] === LAMPORT_REFERENCE), { timeout: 8000 }).toBe(true);
+    expect((asked.find((a) => a[0] === "check" && a[1] === LAMPORT_REFERENCE) as unknown[])[2]).toEqual(["1".repeat(64)]);
     expect(await ahead.getByRole("button", { name: "Pay with TestWallet" }).isDisabled()).toBe(true);
     expect(await ahead.getByRole("button", { name: "Show the amount" }).isDisabled()).toBe(true);
     expect(await ahead.getByLabel("Pay in").isDisabled()).toBe(true);
@@ -401,8 +430,11 @@ describe.skipIf(!existsSync(join(DIST, "app.js")))("the Sentinel page, in Chromi
     // hold are all still there after it has: a box made anew would have put live pay buttons back.
     const drawn = await page.evaluate(() => { const b = document.querySelector("#plans .ahead"); (b as any).__mark = "kept"; return !!b; });
     expect(drawn).toBe(true);
+    // (meanwhile the token's price halves: the estimate above the amount follows it at the next drawing, in the same box)
+    lamportUsd = 0.0002;
     await page.waitForTimeout(21_000);
     expect(await page.evaluate(() => (document.querySelector("#plans .ahead") as any)?.__mark ?? null)).toBe("kept");
+    expect(await ahead.locator(".about").innerText()).toContain("About 50,000 LAMPORT for a month at its price now.");
     expect(await ahead.locator(".quote").innerText()).toContain(`Send exactly 25,000 LAMPORT to ${TREASURY}, Lamport's treasury wallet.`);
     expect(await ahead.getByLabel("Payment request").inputValue()).toContain(LAMPORT_REFERENCE);
     expect(await ahead.getByRole("button", { name: "Pay with TestWallet" }).isDisabled()).toBe(true);

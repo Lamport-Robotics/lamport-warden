@@ -20,6 +20,8 @@ import { Prepaid, SOL_QUOTE_GRACE_SECONDS, SOL_QUOTE_SECONDS, arrived, tokenAcco
 import type { PriceFetch } from "../src/solprice.js";
 import { fromRpc } from "../src/observed.js";
 import type { Rpc } from "../src/rpc.js";
+import { api, type ApiRequest } from "../src/server.js";
+import { NonceBook } from "../src/signin.js";
 import { judge } from "../../../src/judge.js";
 import { ARMING_ORIGIN } from "../../../src/defaults.js";
 import { MemoryStore } from "../src/store.js";
@@ -181,6 +183,27 @@ describe("an amount in LAMPORT", () => {
     expect((await s.prepaid.quote(s.profile, "USDC", 1)).ok).toBe(true);
     // nor at a price that is not one
     for (const bad of [0, -1, NaN, 1e-15]) { s.market.price = bad; expect(await s.prepaid.quote(s.profile, "LAMPORT", 1), String(bad)).toMatchObject({ ok: false, status: 503 }); }
+  });
+
+  it("follows the price by itself: the page is given LAMPORT's price with what is offered each time it asks, and no price is not an error", async () => {
+    const s = setup();
+    expect(await s.prepaid.lamportNow()).toBe(PRICE);
+    // what the page asks for every twenty seconds
+    const quote = { enabled: true as const, checkoutOpen: true, tier: "watch" as const, subscribed: false, status: null, price: "full" as const, cents: 1500, centsFull: 1500, centsHolder: 1000, holder: false, holderMin: 250_000, renewsAt: null, endsAt: null, paidUntil: null };
+    const handle = api({ accounts: s.accounts, store: s.store, watcher: { ownerSigned: async () => undefined, confirmOwn: async () => true }, nonces: new NonceBook(), origin: "https://warden.lamportrobotics.com", now: () => T0, billing: { api: { quote: async () => quote } as any, webhookSecret: "whsec_x" }, prepaid: s.prepaid });
+    const session = s.accounts.startSession(s.profile, T0, key(1).toBase58());
+    const offered = async () => ((await handle({ method: "GET", path: "/v1/billing", body: undefined, bearer: session, ip: "10.0.0.1" } satisfies ApiRequest)).body as any).crypto;
+    expect(await offered()).toEqual({ payTo: PAY_TO, assets: ["USDC", "LAMPORT"], months: [1, 3, 12], lamport: { payTo: TREASURY, usd: PRICE } });
+    // the price moves, and the next asking has it
+    s.market.price = PRICE / 2;
+    expect((await offered()).lamport.usd).toBe(PRICE / 2);
+    // with no price just now LAMPORT is still offered, with nothing to estimate by; asking for an amount says why not
+    s.market.price = null;
+    expect(await offered()).toEqual({ payTo: PAY_TO, assets: ["USDC", "LAMPORT"], months: [1, 3, 12], lamport: { payTo: TREASURY, usd: null } });
+    expect(await s.prepaid.lamportNow()).toBeNull();
+    for (const bad of [0, -1, NaN]) { s.market.price = bad; expect(await s.prepaid.lamportNow(), String(bad)).toBeNull(); }
+    // and where LAMPORT is not taken there is nothing to say about its price
+    expect(await setup({ off: true }).prepaid.lamportNow()).toBeNull();
   });
 
   it("is not quoted when the token cannot be read from the chain, or is not a token", async () => {

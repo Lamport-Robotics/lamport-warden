@@ -218,6 +218,15 @@ export class Prepaid {
     const l = this.lamport;
     return l ? { payTo: this.cfg.payTo, assets: [...assets, "LAMPORT"], months: PREPAID_MONTHS, lamport: { payTo: l.payTo } } : { payTo: this.cfg.payTo, assets, months: PREPAID_MONTHS };
   }
+  /**
+   * Dollars for one LAMPORT now, at the price a quote made this moment would use; null where LAMPORT is not
+   * taken or cannot be priced just now. For the page to show, before anybody asks for an amount, about how
+   * many tokens the plan comes to: it is an estimate and binds nobody. The amount that binds is a quote's.
+   */
+  async lamportNow(): Promise<number | null> {
+    if (!this.lamport) return null;
+    try { const usd = await this.opts.lamportPrice!(); return Number.isFinite(usd) && usd > 0 ? usd : null; } catch { return null; }
+  }
   /** Where LAMPORT is taken: only with a treasury wallet to send it to and a price to turn dollars into it. */
   private get lamport(): { mint: string; payTo: string } | null { return this.cfg.lamport && this.opts.lamportPrice ? this.cfg.lamport : null; }
 
