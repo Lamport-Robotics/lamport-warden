@@ -19,22 +19,26 @@ text messages as the wallet is handed them; and the prompt takes a press only wh
 standing still. It also read a request from the side of an account named at the older door when the wallet's
 object said it was Backpack, which a page can make any wallet's object say: **0.7.5 must not be submitted.**
 0.7.6 reads such a request from both sides and asks no wallet what it is; asks once about a Backpack
-payment that goes through three of its doors; and lets a prompt taller than the window scroll. The current
-one is 0.7.7: an account named in a call is read once and the wallet is handed what was read; anything
-handed to Backpack's `send` that is not plain text is taken for a transaction; and a transaction is read
-only from the sides that sign it.
+payment that goes through three of its doors; and lets a prompt taller than the window scroll. 0.7.7: an
+account named in a call is read once and the wallet is handed what was read; anything handed to Backpack's
+`send` that is not plain text is taken for a transaction; and a transaction is read only from the sides that
+sign it. The current one is 0.7.8, which changes one sentence: the settings page no longer says a plan is
+paid by card only, and points at the Sentinel page for how it can be paid.
 
-To submit 0.7.7:
+To submit 0.7.8:
 
-1. Package tab: upload `lamport-warden-0.7.7.zip` (`pnpm package`).
+1. Package tab: upload `lamport-warden-0.7.8.zip` (`pnpm package`).
 2. Store listing tab: paste the description below again (it now mentions Sentinel and the practice page)
-   and replace the screenshots with the four in `store/screenshots/` (retaken from 0.7.1).
+   and replace the screenshots with the four in `store/screenshots/` (retaken from 0.7.8).
 3. Privacy tab: paste the storage justification and the data-usage note below again.
 4. Distribution tab: Payments. The extension itself sells nothing; it links to the Sentinel page, where the
    paid plan is sold once checkout is open. Choose "Contains in-app purchases" if checkout is open when you
-   submit, "Free of charge" if it is not.
+   submit, "Free of charge" if it is not. Checkout has been open since 2026-11-13.
 5. Test instructions tab: paste the text below (update the version in step 1 if it changed).
-6. Submit. Google flags the host permission for an in-depth review, so expect longer than a few days.
+6. Submit, with "Publish automatically after it has passed review" unticked. The review then starts and
+   nothing is public when it ends: the approved version waits (Google keeps it up to 30 days) until
+   "Publish" is pressed. Google flags the host permission for an in-depth review, so expect longer than a
+   few days.
 
 ## Store listing tab
 
@@ -99,7 +103,7 @@ Pro is $15 a month, or $10 while a wallet in your Sentinel profile holds 250,000
 Rescue is not available yet. Moving your tokens into your own Lamport Vault when a wallet is compromised needs Lamport Vault and the rescue program on Solana mainnet, and neither is there yet. It joins Pro when they are, at the same price.
 
 A plan is started and cancelled on the Sentinel page (warden.lamportrobotics.com/sentinel), which says
-whether Pro is on sale. It is paid by card through Stripe; nothing is bought inside the extension.
+whether Pro is on sale and how it can be paid. Nothing is bought inside the extension.
 
 Warden is advice in front of your wallet, not a lock on it. A page can still reach a wallet in ways an
 extension never sees. It is open source: https://github.com/Lamport-Robotics/lamport-warden
@@ -156,7 +160,7 @@ No login is needed. No wallet or cryptocurrency is needed.
 1. Install the extension. It opens its own settings page with a short welcome. Press
    "See it work with a practice wallet" there, or open https://warden.lamportrobotics.com/try/
    The page makes a practice wallet that holds nothing. Nothing on it is sent to any blockchain.
-   Near the top it says "Warden 0.7.7 is in this browser and is standing in front of the practice wallet."
+   Near the top it says "Warden 0.7.8 is in this browser and is standing in front of the practice wallet."
 2. Press "Try it" beside "Pay someone for the first time".
    The extension shows its prompt: one sentence saying what the request does, with Cancel and
    "Continue to wallet". Press "Continue to wallet".
