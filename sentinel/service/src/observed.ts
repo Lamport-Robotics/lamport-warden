@@ -39,7 +39,7 @@ export interface ObservedTx {
 
 const b64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
-/** From the answer of `getTransaction(signature, { encoding: "base64", maxSupportedTransactionVersion: 0 })`. */
+/** From the answer of `getTransaction(signature, { encoding: "base64", maxSupportedTransactionVersion })`, for a legacy, version 0 or version 1 transaction. */
 export function fromRpc(signature: string, result: any): ObservedTx | null {
   const raw = result?.transaction?.[0];
   const meta = result?.meta;

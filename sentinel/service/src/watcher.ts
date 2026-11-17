@@ -14,6 +14,9 @@ import type { Rpc } from "./rpc.js";
 import { BurstWindow, assessBehind, assessTaken, assessTokenAccount, assessTransaction, assessUnexplainedLoss, assessWalletAccount, without, type Assessment, type Level, type TokenAccountState, type WatchContext } from "./signals.js";
 import { disarmingNow, rescueDelegateOf, rescueVaultOf, type Store, type StoredEvent, type WalletRecord, type WatchedWallet } from "./store.js";
 
+/** The newest form of transaction this service reads (SIMD-0385), and so the newest it asks an RPC for. */
+export const NEWEST_TRANSACTION_VERSION = 1;
+
 /** How many of a wallet's token accounts are kept and compared. */
 export const MAX_TOKEN_ACCOUNTS = 1000;
 /** How many new transactions one pass reads. */
@@ -263,9 +266,22 @@ export class Watcher {
     return this.store.events(wallet).some((e) => e.signature === signature && (kind ? e.signals.includes(kind) : e.signals.includes("taken_by_permission") || e.signals.includes("rescued")));
   }
 
-  /** `background`: part of a new wallet's history, which waits for anything that is about a wallet already watched. */
+  /**
+   * `background`: part of a new wallet's history, which waits for anything that is about a wallet already watched.
+   *
+   * It is asked for in the newest form this service reads, version 1. Asked for as version 0, a version 1
+   * transaction is not an empty answer but an error, the same error at every look: the wallet's list would
+   * never be read past it, and a wallet that had made or been sent one would stop being watched without a word.
+   * An RPC that will not be asked for that form is asked the older way.
+   */
   private async transaction(signature: string, background = false): Promise<ObservedTx | null> {
-    return fromRpc(signature, await this.rpc.call("getTransaction", [signature, { encoding: "base64", maxSupportedTransactionVersion: 0, commitment: "confirmed" }], background ? { background: true } : undefined));
+    const ask = (version: number) => this.rpc.call("getTransaction", [signature, { encoding: "base64", maxSupportedTransactionVersion: version, commitment: "confirmed" }], background ? { background: true } : undefined);
+    try { return fromRpc(signature, await ask(NEWEST_TRANSACTION_VERSION)); }
+    catch (e) {
+      // only a complaint about the version is answered by asking the older way: anything else is the RPC's trouble, and the pass's
+      if (!/version/i.test(String((e as Error)?.message ?? ""))) throw e;
+      return fromRpc(signature, await ask(0));
+    }
   }
 
   private async tokenAccounts(wallet: string, known: Record<string, unknown> = {}): Promise<Record<string, TokenAccountState>> {

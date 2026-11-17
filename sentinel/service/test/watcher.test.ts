@@ -26,7 +26,7 @@ const lookalike = (of: PublicKey) => new PublicKey(Buffer.from((BigInt("0x" + Bu
 
 /** A chain as an RPC shows it: the wallet's transactions in order, its token accounts, and who owns the wallet account. */
 class Chain implements Rpc {
-  txs: { signature: string; result: any; visible: boolean }[] = [];
+  txs: { signature: string; result: any; visible: boolean; version?: number }[] = [];
   tokenAccounts: TokenAccountState[] = [];
   walletOwner = SYSTEM;
   /** What the wallet holds, in lamports: it moves with every payment, as the real one does. */
@@ -34,7 +34,11 @@ class Chain implements Rpc {
   /** What each token account holds, in the token's smallest units. */
   amounts: Record<string, number> = {};
   down = false;
+  /** An RPC that does not know of version 1 transactions, and will not be asked for them. */
+  refusesNewer = false;
   calls: string[] = [];
+  /** What each `getTransaction` named as the newest version it takes. */
+  versionsAsked: unknown[] = [];
   private n = 0;
 
   /** A payment of `sol` from `from` to `to`, confirmed at `at`. */
@@ -45,6 +49,30 @@ class Chain implements Rpc {
     if (from.toBase58() === W) this.lamports -= lamports + 5000;
     if (to.toBase58() === W) this.lamports += lamports;
     this.txs.push({ signature, visible: opts.visible ?? true, result: { slot: this.n, blockTime: at, transaction: [Buffer.from(raw).toString("base64"), "base64"], meta: { err: null, fee: 5000, preBalances: [20 * SOL, 0, 1], postBalances: [20 * SOL - lamports - 5000, lamports, 1], preTokenBalances: [], postTokenBalances: [] } } });
+    return signature;
+  }
+
+  /**
+   * The same payment as a version 1 transaction (SIMD-0385): the message, in its own layout, and the signature
+   * after it. The RPC gives one only to whoever says they take version 1, and answers everybody else with an error.
+   */
+  payV1(from: PublicKey, to: PublicKey, sol: number, at: number): string {
+    const lamports = Math.round(sol * SOL);
+    const data = SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports }).data;
+    const le32 = (n: number) => [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255];
+    const message = [
+      0x81, 1, 0, 1,                                                             // version, one signer, none of them read-only, one read-only address
+      ...le32(0),                                                                // no fee or limit named
+      ...new PublicKey("9hH1wzXmQ6tFJVYxWmH1yh1MYTzF9HbVnR6JvQnfZz1x").toBytes(), // the blockhash
+      1, 3, ...from.toBytes(), ...to.toBytes(), ...new PublicKey(SYSTEM).toBytes(),
+      2, 2, data.length & 255, data.length >> 8,                                 // the instruction: its program, how many accounts, how much data
+      0, 1, ...data,
+    ];
+    const raw = Uint8Array.from([...message, ...new Array(64).fill(0)]);
+    const signature = `sig${String(++this.n).padStart(4, "0")}`;
+    if (from.toBase58() === W) this.lamports -= lamports + 5000;
+    if (to.toBase58() === W) this.lamports += lamports;
+    this.txs.push({ signature, visible: true, version: 1, result: { slot: this.n, blockTime: at, version: 1, transaction: [Buffer.from(raw).toString("base64"), "base64"], meta: { err: null, fee: 5000, preBalances: [20 * SOL, 0, 1], postBalances: [20 * SOL - lamports - 5000, lamports, 1], preTokenBalances: [], postTokenBalances: [] } } });
     return signature;
   }
 
@@ -59,7 +87,15 @@ class Chain implements Rpc {
         if (until) { const i = list.findIndex((t) => t.signature === until); if (i >= 0) list = list.slice(0, i); }
         return list.slice(0, limit).map((t) => ({ signature: t.signature }));
       }
-      case "getTransaction": { const t = this.txs.find((x) => x.signature === params[0]); return t && t.visible ? t.result : null; }
+      case "getTransaction": {
+        const max = params[1]?.maxSupportedTransactionVersion;
+        this.versionsAsked.push(max);
+        if (this.refusesNewer && max > 0) throw new Error("getTransaction: Invalid params: unknown transaction version 1.");
+        const t = this.txs.find((x) => x.signature === params[0]);
+        // word for word what a mainnet RPC answers
+        if (t && t.visible && t.version === 1 && !(max >= 1)) throw new Error('getTransaction: Transaction version (1) is not supported by the requesting client. Please try the request again with the following configuration parameter: "maxSupportedTransactionVersion"');
+        return t && t.visible ? t.result : null;
+      }
       case "getTokenAccountsByOwner":
         return { value: this.tokenAccounts.filter((a) => a.owner === params[0] && params[1].programId.startsWith("Tokenkeg")).map((a) => ({ pubkey: a.address, account: { data: { parsed: { info: { mint: a.mint, owner: a.owner, ...(a.delegate ? { delegate: a.delegate } : {}), ...(a.closeAuthority ? { closeAuthority: a.closeAuthority } : {}) } } } } })) };
       case "getMultipleAccounts":
@@ -110,6 +146,35 @@ describe("the watcher", () => {
     expect(r.cursor).toBe(chain.txs.at(-1)!.signature);
     expect(r.baseline!.transactions).toBe(31);
     expect(r.lastSeenAt).toBe(NOON);
+  });
+
+  it("reads a version 1 transaction: tells of the theft in it, and reads on past it", async () => {
+    const { chain, store, sent, watcher } = setup();
+    await watcher.pass(me);
+    const theft = chain.payV1(wallet.publicKey, thief, 3, NOON + 600);
+    const [event] = await watcher.pass(me);
+    expect(event).toMatchObject({ level: "urgent", signature: theft });
+    expect(sent.list).toHaveLength(1);
+    // the list is read past it: asked for as version 0 it is an error at every look, and nothing after it would ever be read
+    expect(store.record(W).cursor).toBe(theft);
+    const after = chain.pay(wallet.publicKey, friend, 0.4, NOON + 1200);
+    expect(await watcher.pass(me)).toEqual([]);
+    expect(store.record(W).cursor).toBe(after);
+    expect(new Set(chain.versionsAsked)).toEqual(new Set([1]));
+  });
+
+  it("asks an RPC that will not be asked for version 1 the older way", async () => {
+    const { chain, store, watcher } = setup();
+    chain.refusesNewer = true;
+    await watcher.pass(me);
+    expect(store.record(W).baseline!.transactions).toBe(30);
+    const paid = chain.pay(wallet.publicKey, friend, 0.4, NOON + 600);
+    expect(await watcher.pass(me)).toEqual([]);
+    expect(store.record(W).cursor).toBe(paid);
+    // and an RPC that is down is still an RPC that is down
+    chain.down = true;
+    chain.pay(wallet.publicKey, friend, 0.4, NOON + 1200);
+    await expect(watcher.pass(me)).rejects.toThrow("503");
   });
 
   it("reads what is new, oldest first, says nothing about ordinary payments and learns from them", async () => {
