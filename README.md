@@ -107,6 +107,18 @@ stricter. A transaction made only of instructions Warden reads in full is never 
 
 The only permission is `storage`.
 
+## Install
+
+Until Warden is in the Chrome Web Store it is installed by hand:
+
+1. Download `lamport-warden-<version>.zip` from [the latest release](https://github.com/Lamport-Robotics/lamport-warden/releases/latest).
+2. Unzip it, and keep the folder somewhere it can stay: the browser runs Warden from that folder.
+3. Open `chrome://extensions` (in Brave, `brave://extensions`) and turn on Developer mode.
+4. Press Load unpacked and choose the folder.
+
+Installed this way it does not update itself; a new version is a new download. The release gives the file's
+SHA-256. The file is what `pnpm package` writes from the tagged source.
+
 ## Build, test, load
 
 ```

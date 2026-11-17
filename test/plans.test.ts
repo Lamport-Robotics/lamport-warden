@@ -75,5 +75,7 @@ describe("the version the Warden site names", () => {
   it("is the version being built, to its first two numbers", () => {
     const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string };
     expect(read("site", "index.html")).toContain(`Version ${version.split(".").slice(0, 2).join(".")}. Open source.`);
+    // the install steps name the file a person downloads, so they must name this version's
+    expect(read("site", "index.html")).toContain(`<code>lamport-warden-${version}.zip</code>`);
   });
 });
