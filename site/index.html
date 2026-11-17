@@ -53,6 +53,7 @@
   .hero h1 { margin-bottom: 24px; }
   .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
   .status { font-size: 14px; color: var(--mute); margin-top: 18px; }
+  .status a { color: var(--bone); border-bottom: 1px solid var(--mute); }
 
   /* the prompt, as the extension draws it */
   .stage { border: 1px solid var(--line); background: var(--raise); border-radius: 22px; padding: clamp(20px, 3vw, 36px) clamp(16px, 2.4vw, 28px); }
@@ -87,6 +88,10 @@
   .plans ul { list-style: none; color: var(--dim); margin-bottom: 14px; max-width: 32em; }
   .plans li { padding: 10px 0; border-top: 1px solid var(--line); }
   .plans li.not { color: var(--care); }
+  ol.steps { list-style: none; padding: 0; counter-reset: step; color: var(--dim); margin-bottom: 14px; max-width: 32em; }
+  ol.steps li { counter-increment: step; padding: 12px 0 12px 40px; border-top: 1px solid var(--line); position: relative; }
+  ol.steps li::before { content: counter(step); position: absolute; left: 0; top: 12px; color: var(--bone); font-weight: 500; }
+  ol.steps code, .two p code { font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; color: var(--bone); overflow-wrap: anywhere; }
   .two p.mint { font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0; color: var(--bone); overflow-wrap: anywhere; user-select: all; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--raise); }
   .foot { display: flex; flex-wrap: wrap; gap: 12px 32px; align-items: center; padding: 28px var(--pad) 40px; border-top: 1px solid var(--line); font-size: 14px; color: var(--mute); }
   .foot nav { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-left: auto; }
@@ -127,11 +132,11 @@
         <h1>It reads the request before you sign it.</h1>
         <p class="lede">Warden is a browser extension that sits in front of the Solana wallet you already use. Before a signing request reaches the wallet, Warden says in one sentence what it will do to your money, and stops it when that is not what you meant.</p>
         <div class="cta">
-          <a class="btn solid" href="https://github.com/Lamport-Robotics/lamport-warden" rel="noopener">Get the developer preview</a>
+          <a class="btn solid" href="#install">Install the preview</a>
           <a class="btn" href="/try/">Try it with a practice wallet</a>
           <a class="btn" href="#doors">Which wallets it covers</a>
         </div>
-        <p class="status">Version 0.7. Open source. Not in the Chrome Web Store yet.</p>
+        <p class="status">Version 0.7. Open source. Not in the Chrome Web Store yet, so it is installed by hand: <a href="#install">four steps</a>.</p>
       </div>
       <div class="stage" aria-label="What Warden shows when it blocks a request">
         <div class="card">
@@ -186,6 +191,29 @@
         <tr><td>Backpack</td><td>Guarded</td><td>Guarded</td></tr>
         <tr><td>Solflare</td><td>Guarded</td><td class="no">Not guarded. Solflare freezes <code>window.solflare</code>, so nothing can stand in front of it.</td></tr>
       </table>
+    </div>
+  </section>
+
+  <section class="sec" id="install">
+    <div class="inner two">
+      <div>
+        <p class="eyebrow">Install</p>
+        <h2>Four steps, <span>until the store has it.</span></h2>
+        <ol class="steps">
+          <li>Download <a href="https://github.com/Lamport-Robotics/lamport-warden/releases/latest" rel="noopener">the latest release</a>: the file named <code>lamport-warden-0.7.8.zip</code>.</li>
+          <li>Unzip it, and keep the folder somewhere it can stay. The browser runs Warden from that folder.</li>
+          <li>Open <code>chrome://extensions</code> (in Brave, <code>brave://extensions</code>) and turn on Developer mode, top right.</li>
+          <li>Press Load unpacked and choose the folder. Warden's button appears in the toolbar and opens its settings.</li>
+        </ol>
+      </div>
+      <div>
+        <p class="eyebrow">Good to know</p>
+        <h2>What installing by hand means.</h2>
+        <p>Warden is tested in Chromium, the browser Chrome is built on, in front of Phantom, Backpack and Solflare. Brave and other Chromium browsers on a computer load it the same way. It asks for one permission, storage, and it runs on every https page, because any of them can ask a wallet to sign.</p>
+        <p>Installed this way it does not update itself. A new version is a new download, and the release page says what changed. When Warden is in the Chrome Web Store this page will say so, and that copy updates itself.</p>
+        <p>The release page gives the file's SHA-256, and the source it is built from is public.</p>
+        <p>Not ready to install? <a href="/try/">Try it with a practice wallet</a> first: no real wallet, no real money.</p>
+      </div>
     </div>
   </section>
 
