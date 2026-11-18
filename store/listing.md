@@ -25,6 +25,11 @@ account named in a call is read once and the wallet is handed what was read; any
 sign it. The current one is 0.7.8, which changes one sentence: the settings page no longer says a plan is
 paid by card only, and points at the Sentinel page for how it can be paid.
 
+On 2026-11-17 the draft was brought up to 0.7.8 and saved, **not submitted**: the package, the description
+below, the store icon, the four screenshots, the promo tile, the storage justification, payments set to
+"Contains in-app purchases", and the test instructions below. Visibility is still Unlisted. Steps 1 to 5 are
+therefore done for 0.7.8; what is left is step 6, and choosing Public or Unlisted before it.
+
 To submit 0.7.8:
 
 1. Package tab: upload `lamport-warden-0.7.8.zip` (`pnpm package`).
@@ -34,7 +39,7 @@ To submit 0.7.8:
 4. Distribution tab: Payments. The extension itself sells nothing; it links to the Sentinel page, where the
    paid plan is sold once checkout is open. Choose "Contains in-app purchases" if checkout is open when you
    submit, "Free of charge" if it is not. Checkout has been open since 2026-11-13.
-5. Test instructions tab: paste the text below (update the version in step 1 if it changed).
+5. Test instructions tab: paste the short text below (500 characters at most).
 6. Submit, with "Publish automatically after it has passed review" unticked. The review then starts and
    nothing is public when it ends: the approved version waits (Google keeps it up to 30 days) until
    "Publish" is pressed. Google flags the host permission for an in-depth review, so expect longer than a
@@ -152,35 +157,40 @@ lending.
 
 ## Test instructions tab
 
-Paste this. A reviewer needs no account, no wallet and no crypto to see everything the extension does.
+Paste this into "Additional instructions". The field takes 500 characters at most (this is 498), so it is the
+short form of the walk below; username and password stay empty. A reviewer needs no account, no wallet and no
+crypto to see everything the extension does.
 
 ```
-No login is needed. No wallet or cryptocurrency is needed.
+No login, wallet or crypto is needed.
+1. Install, then open https://warden.lamportrobotics.com/try/ (a practice wallet that holds nothing; nothing reaches a blockchain).
+2. "Pay someone for the first time": Warden shows one sentence, Cancel and "Continue to wallet".
+3. "Pay the same address again": nothing is shown; it goes through.
+4. Look-alike address, USDC approval, account handover, wrong-site sign-in, payment as a message: each is "Blocked" with the reason.
+5. Options lists what it kept.
+```
 
-1. Install the extension. It opens its own settings page with a short welcome. Press
-   "See it work with a practice wallet" there, or open https://warden.lamportrobotics.com/try/
-   The page makes a practice wallet that holds nothing. Nothing on it is sent to any blockchain.
-   Near the top it says "Warden 0.7.8 is in this browser and is standing in front of the practice wallet."
-2. Press "Try it" beside "Pay someone for the first time".
-   The extension shows its prompt: one sentence saying what the request does, with Cancel and
-   "Continue to wallet". Press "Continue to wallet".
-3. Press "Try it" beside "Pay the same address again".
-   Nothing is shown: a payment to an address already paid goes straight through. This is the normal case.
+The same walk in full, for anyone following it by hand:
+
+1. Install the extension. It opens its own settings page with a short welcome. Press "See it work with a
+   practice wallet" there, or open https://warden.lamportrobotics.com/try/. The page makes a practice wallet
+   that holds nothing, and nothing on it is sent to any blockchain. Near the top it says which Warden version
+   is in the browser and that it is standing in front of the practice wallet.
+2. Press "Try it" beside "Pay someone for the first time". The extension shows its prompt: one sentence
+   saying what the request does, with Cancel and "Continue to wallet". Press "Continue to wallet".
+3. Press "Try it" beside "Pay the same address again". Nothing is shown: a payment to an address already
+   paid goes straight through. This is the normal case.
 4. Press "Try it" beside each of "Pay an address that only looks like it", "Let a stranger spend your USDC",
    "Hand your USDC account to someone else", "Sign in to a site you are not on" and "A payment dressed up as
-   a message". Each time the prompt says "Blocked" with the reason, and its only button is Close.
-   The page then says "Stopped. The practice wallet was never asked."
+   a message". Each time the prompt says "Blocked" with the reason, and its only button is Close. The page
+   then says "Stopped. The practice wallet was never asked."
 5. Open the extension's options page (right-click the icon, Options). It lists the practice wallet and what
-   was remembered about it, and can forget it. This is all the data the extension keeps, and it stays in
-   the browser.
+   was remembered about it, and can forget it. This is all the data the extension keeps, and it stays in the
+   browser.
 
-The extension works the same in front of Phantom, Solflare and Backpack. The practice page exists so that
-this can be seen without installing one of them.
-
-Sentinel, which the options page links to, is an optional web service on our own site. Signing in to it
-needs a Solana wallet extension (a signature only: no funds, no payment). It is not needed to test the
-extension, and nothing is sold inside the extension.
-```
+The extension works the same in front of Phantom, Solflare and Backpack; the practice page exists so that
+this can be seen without installing one of them. Sentinel, which the options page links to, is an optional
+web service on our own site. It is not needed to test the extension, and nothing is sold inside the extension.
 
 The practice page is `site/try/`. `test/browser/try-page.test.ts` walks these same steps in Chromium with the
 built extension, so the instructions cannot drift from what the extension does.
@@ -188,10 +198,12 @@ built extension, so the instructions cannot drift from what the extension does.
 ## Distribution tab
 
 Free. All regions. Public, or Unlisted for a first round with testers: unlisted is reviewed the same way and
-anyone with the link can install it. The draft is set to Unlisted and "Free of charge"; switching either is a
-change on this tab that has to be submitted.
+anyone with the link can install it. The draft is set to Unlisted and, since 2026-11-17, "Contains in-app
+purchases" (it shows an "in-app purchases" badge on the item page); switching either is a change on this tab
+that has to be submitted.
 
-"Free of charge" means the package has nothing in it to buy. Google's developer agreement does not let a
+The extension costs nothing and the package has nothing in it to buy; "Contains in-app purchases" is chosen
+because it links to the Sentinel page, where a paid plan is on sale. Google's developer agreement does not let a
 publisher later charge for what users first got free (section 3.3), and lets an extension be the way in to a
 paid service (section 4.4.3). So the pre-sign check stays free for good, and Sentinel is sold as a service
 beside it. Google does not process the payment.
